@@ -54,7 +54,7 @@ Recommended next modules after this scaffold:
 
 ## MVP scope
 
-- Load a local audio file by path.
+- Scan a local music directory and build a playable track list.
 - Decode and play audio with `symphonia + cpal`.
 - Read tags and find sidecar `.lrc` files.
 - Persist config and playlists locally.
@@ -74,7 +74,11 @@ cargo run
 cargo build --release
 ```
 
-Current playback support is file-based: paste an audio file path into the app, press `Load file`, then press `Play`.
+Current playback support is directory-based and split into tabs: use `Scan` to choose a folder, `Library` to browse the scanned directory tree, `Play` to control playback, and `Queue` to inspect the current order.
+
+When available, track title and artist are read from embedded file tags instead of only using the filename.
+
+Scanned directory paths are stored in `data/config.json`. On startup, the app automatically rescans saved directories and rebuilds the library list.
 
 Release binary paths:
 
@@ -189,7 +193,9 @@ Typical flow:
 
 The current version includes a real playback backend behind the player interface.
 Audio files are decoded with `symphonia` and sent to the output device with `cpal`.
-The file loading UI is intentionally minimal for now and will likely be replaced by library scanning and file dialogs later.
+The current UI scans directories recursively for supported audio files and uses a native folder picker for convenience.
+Selected scan directories are persisted automatically, so the library can be restored on the next launch.
+The UI also loads common system fallback fonts when available so Japanese and other non-Latin text can render correctly without bundling extra font files.
 
 ## Current scaffold direction
 
