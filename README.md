@@ -83,6 +83,13 @@ This repository includes a GitHub Actions workflow that builds release artifacts
 - macOS x86_64
 - macOS arm64
 
+Current runner labels in CI:
+
+- Linux x86_64: `ubuntu-latest`
+- Windows x86_64: `windows-latest`
+- macOS x86_64: `macos-15-intel`
+- macOS arm64: `macos-14`
+
 The workflow runs on pushes, pull requests, and manual dispatch. When you push a tag such as `v0.1.0`, it also publishes a GitHub Release and attaches packaged artifacts.
 
 ### Local release build
