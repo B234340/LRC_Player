@@ -10,11 +10,15 @@ const CONFIG_FILE_NAME: &str = "config.json";
 const PLAYLISTS_FILE_NAME: &str = "playlists.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub theme: String,
     pub library_folders: Vec<String>,
     pub excluded_folders: Vec<String>,
     pub last_playlist: Option<String>,
+    pub queue_follow_current: bool,
+    pub show_library_track_paths: bool,
+    pub show_library_lyric_paths: bool,
 }
 
 impl Default for AppConfig {
@@ -24,6 +28,9 @@ impl Default for AppConfig {
             library_folders: Vec::new(),
             excluded_folders: Vec::new(),
             last_playlist: None,
+            queue_follow_current: true,
+            show_library_track_paths: true,
+            show_library_lyric_paths: true,
         }
     }
 }

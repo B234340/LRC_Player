@@ -43,6 +43,9 @@ pub enum AppCommand {
     RemoveTrackFromPlaylist { playlist_name: String, track_id: TrackId },
     MovePlaylistItem { playlist_name: String, from: usize, to: usize },
     SetTheme(String),
+    SetQueueFollowCurrent(bool),
+    SetShowLibraryTrackPaths(bool),
+    SetShowLibraryLyricPaths(bool),
 }
 
 pub struct AppState {
@@ -233,6 +236,18 @@ impl AppState {
             AppCommand::SetTheme(theme) => {
                 self.config.theme = theme;
                 self.persist_config(config_store, "Theme saved.");
+            }
+            AppCommand::SetQueueFollowCurrent(enabled) => {
+                self.config.queue_follow_current = enabled;
+                self.persist_config(config_store, "Queue follow setting saved.");
+            }
+            AppCommand::SetShowLibraryTrackPaths(enabled) => {
+                self.config.show_library_track_paths = enabled;
+                self.persist_config(config_store, "Library path setting saved.");
+            }
+            AppCommand::SetShowLibraryLyricPaths(enabled) => {
+                self.config.show_library_lyric_paths = enabled;
+                self.persist_config(config_store, "Library lyric path setting saved.");
             }
         }
     }
