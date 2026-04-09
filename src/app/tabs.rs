@@ -86,6 +86,7 @@ impl LrcPlayerApp {
                     };
 
                     let is_current = current_track_id.as_ref() == Some(&track.id);
+                    let row_width = ui.available_width();
                     let frame = egui::Frame::group(ui.style())
                         .fill(if is_current {
                             ui.visuals().selection.bg_fill
@@ -99,9 +100,10 @@ impl LrcPlayerApp {
                         });
 
                     let (inner, dropped_payload) = ui.dnd_drop_zone::<usize, _>(frame, |ui| {
-                        let drag_id = ui.make_persistent_id(("queue-row", &track.id.0));
-                        ui.dnd_drag_source(drag_id, index, |ui| {
-                            ui.horizontal(|ui| {
+                        ui.set_min_width(row_width);
+                        ui.horizontal(|ui| {
+                            let drag_id = ui.make_persistent_id(("queue-row", &track.id.0));
+                            ui.dnd_drag_source(drag_id, index, |ui| {
                                 ui.allocate_ui_with_layout(
                                     egui::vec2(44.0, 72.0),
                                     egui::Layout::top_down(egui::Align::Center),
@@ -118,32 +120,32 @@ impl LrcPlayerApp {
                                             });
                                     },
                                 );
-                                self.render_track_artwork(ui, ctx, &track, 72.0);
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(&track.title)
-                                            .strong()
-                                            .size(22.0)
-                                            .color(if is_current {
-                                                ui.visuals().strong_text_color()
-                                            } else {
-                                                ui.visuals().text_color()
-                                            }),
-                                    );
-                                    ui.label(egui::RichText::new(self.track_artist_label(&track)).size(18.0));
-                                    ui.label(
-                                        egui::RichText::new(
-                                            track.album.clone().unwrap_or_else(|| String::from("Unknown album")),
-                                        )
-                                        .size(16.0)
-                                        .color(ui.visuals().weak_text_color()),
-                                    );
-                                });
+                            });
+                            self.render_track_artwork(ui, ctx, &track, 72.0);
+                            ui.vertical(|ui| {
+                                ui.set_min_width((row_width - 144.0).max(0.0));
+                                ui.label(
+                                    egui::RichText::new(&track.title)
+                                        .strong()
+                                        .size(22.0)
+                                        .color(if is_current {
+                                            ui.visuals().strong_text_color()
+                                        } else {
+                                            ui.visuals().text_color()
+                                        }),
+                                );
+                                ui.label(egui::RichText::new(self.track_artist_label(&track)).size(18.0));
+                                ui.label(
+                                    egui::RichText::new(
+                                        track.album.clone().unwrap_or_else(|| String::from("Unknown album")),
+                                    )
+                                    .size(16.0)
+                                    .color(ui.visuals().weak_text_color()),
+                                );
                             });
                         })
-                        .inner
+                        .response
                     });
-                    let _ = inner;
                     let row_response = ui.interact(
                         inner.response.rect,
                         ui.make_persistent_id(("queue-row-click", &track.id.0)),
@@ -301,8 +303,6 @@ impl LrcPlayerApp {
             egui::ScrollArea::vertical()
                 .id_salt("album-track-list")
                 .show(&mut columns[1], |ui| {
-                    ui.set_width(card_width);
-                    ui.set_max_width(card_width);
                     let Some(selected_album) = albums
                         .iter()
                         .find(|album| self.selected_album_key.as_deref() == Some(album.key.as_str()))
@@ -329,8 +329,9 @@ impl LrcPlayerApp {
                     });
 
                     for track in &tracks {
+                        let row_width = ui.available_width();
                         let row = egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.set_width(card_width);
+                            ui.set_min_width(row_width);
                             ui.strong(&track.title);
                             if let Some(track_number) = track.track_number {
                                 ui.small(format!("{:02} / {}", track_number, self.track_secondary_line(track)));
@@ -724,7 +725,9 @@ impl LrcPlayerApp {
         }
 
         for track in tracks {
+            let row_width = ui.available_width();
             let row = egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_min_width(row_width);
                 ui.horizontal(|ui| {
                     self.render_track_artwork(ui, ctx, track, 56.0);
                     ui.vertical(|ui| {
@@ -902,12 +905,14 @@ impl LrcPlayerApp {
 
         for track in &node.tracks {
             let selected = self.current_track_id() == Some(&track.id);
+            let row_width = ui.available_width();
             let frame = egui::Frame::group(ui.style()).fill(if selected {
                 ui.visuals().selection.bg_fill
             } else {
                 ui.visuals().extreme_bg_color
             });
             let row = frame.show(ui, |ui| {
+                ui.set_min_width(row_width);
                 ui.strong(&track.title);
                 ui.small(format!("{} / {}", track.artist, track.album));
                 if self.state.config.show_library_track_paths {
@@ -1055,43 +1060,60 @@ impl LrcPlayerApp {
             } else {
                 ui.visuals().extreme_bg_color
             });
+            let row_width = ui.available_width();
 
-            let (_inner, dropped_payload) = ui.dnd_drop_zone::<usize, _>(frame, |ui| {
-                let drag_id = ui.make_persistent_id(("playlist-row", playlist_name, &track.id.0));
-                ui.dnd_drag_source(drag_id, index, |ui| {
-                    ui.horizontal(|ui| {
-                        self.render_track_artwork(ui, ctx, track, 56.0);
-                        ui.vertical(|ui| {
-                            let response = ui.selectable_label(
-                                self.current_track_id() == Some(&track.id),
-                                &track.title,
-                            );
-                            if response.clicked() {
-                                self.state.handle(
-                                    &self.config_store,
-                                    AppCommand::BuildQueueAndPlay {
-                                        track_ids: visible_track_ids.to_vec(),
-                                        start_track_id: track.id.clone(),
-                                    },
-                                );
-                                self.active_tab = super::types::AppTab::Play;
-                            }
-                            self.render_track_context_menu(ui, response, &track.id, visible_track_ids);
-                            ui.label(self.track_secondary_line(track));
-                            ui.small(track.file_name.clone());
-                        });
+            let mut remove_clicked = false;
+            let (inner, dropped_payload) = ui.dnd_drop_zone::<usize, _>(frame, |ui| {
+                ui.set_min_width(row_width);
+                ui.horizontal(|ui| {
+                    let drag_id = ui.make_persistent_id(("playlist-row", playlist_name, &track.id.0));
+                    ui.dnd_drag_source(drag_id, index, |ui| {
+                        egui::Frame::group(ui.style())
+                            .fill(ui.visuals().faint_bg_color)
+                            .show(ui, |ui| {
+                                ui.set_min_size(egui::vec2(30.0, 44.0));
+                                ui.vertical_centered(|ui| {
+                                    ui.monospace("====");
+                                    ui.monospace("====");
+                                });
+                            });
+                    });
 
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("Remove").clicked() {
-                                pending_remove = Some(track.id.clone());
-                            }
-                            ui.strong(format!("#{}", index + 1));
-                            ui.small("Drag");
-                        });
+                    self.render_track_artwork(ui, ctx, track, 56.0);
+                    ui.vertical(|ui| {
+                        ui.set_min_width((row_width - 180.0).max(0.0));
+                        ui.strong(&track.title);
+                        ui.label(self.track_secondary_line(track));
+                        ui.small(track.file_name.clone());
+                    });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Remove").clicked() {
+                            pending_remove = Some(track.id.clone());
+                            remove_clicked = true;
+                        }
+                        ui.strong(format!("#{}", index + 1));
                     });
                 })
-                .inner
+                .response
             });
+
+            let row_response = ui.interact(
+                inner.response.rect,
+                ui.make_persistent_id(("playlist-track-row", playlist_name, &track.id.0)),
+                egui::Sense::click(),
+            );
+            if row_response.clicked() && !remove_clicked {
+                self.state.handle(
+                    &self.config_store,
+                    AppCommand::BuildQueueAndPlay {
+                        track_ids: visible_track_ids.to_vec(),
+                        start_track_id: track.id.clone(),
+                    },
+                );
+                self.active_tab = super::types::AppTab::Play;
+            }
+            self.render_track_context_menu(ui, row_response, &track.id, visible_track_ids);
 
             if let Some(from_index) = dropped_payload.map(|payload| *payload) {
                 if from_index != index {
