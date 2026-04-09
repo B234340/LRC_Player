@@ -1,6 +1,6 @@
 # LRC Player
 
-Cross-platform portable audio player scaffold.
+Cross-platform portable audio player with a portable data layout.
 
 ## Design goals
 
@@ -54,12 +54,19 @@ Recommended next modules after this scaffold:
 
 ## MVP scope
 
-- Add library folders manually.
+- Load a local audio file by path.
+- Decode and play audio with `symphonia + cpal`.
 - Read tags and find sidecar `.lrc` files.
-- Control playback, queue, seek, repeat, and shuffle.
 - Persist config and playlists locally.
 
 ## Build
+
+Linux build prerequisites for audio playback:
+
+```bash
+sudo apt update
+sudo apt install -y pkg-config libasound2-dev
+```
 
 ```bash
 source "$HOME/.cargo/env"
@@ -67,11 +74,48 @@ cargo run
 cargo build --release
 ```
 
+Current playback support is file-based: paste an audio file path into the app, press `Load file`, then press `Play`.
+
 Release binary paths:
 
 - Linux: `target/release/lrc_player`
 - macOS: `target/release/lrc_player`
-- Windows: `target/release/lrc_player.exe`
+- Windows (native build): `target/release/lrc_player.exe`
+- Windows (WSL cross-build): `target/x86_64-pc-windows-gnu/release/lrc_player.exe`
+
+## WSL local release build
+
+If WSL rendering is unstable and you want a Windows `.exe` from the same machine, use the bundled build script instead of plain `cargo build --release`.
+
+Prerequisites on WSL:
+
+```bash
+source "$HOME/.cargo/env"
+rustup target add x86_64-pc-windows-gnu
+sudo apt update
+sudo apt install -y mingw-w64
+```
+
+Then run:
+
+```bash
+source "$HOME/.cargo/env"
+chmod +x scripts/build_release.sh
+./scripts/build_release.sh
+```
+
+Generated outputs:
+
+- Linux portable folder: `dist/linux-x86_64/`
+- Windows portable folder: `dist/windows-x86_64/`
+- Windows executable: `target/x86_64-pc-windows-gnu/release/lrc_player.exe`
+
+The script builds the current Linux release binary and the Windows `.exe`, then assembles portable directories with a local `data/` folder for each target.
+
+Windows note:
+
+- Release builds are linked as GUI applications, so launching `lrc_player.exe` does not keep a console window open.
+- Debug builds may still show a console window for logging and debugging.
 
 ## Release strategy
 
@@ -99,6 +143,17 @@ Build the current host platform locally:
 ```bash
 source "$HOME/.cargo/env"
 cargo build --release
+```
+
+On Windows itself, the release executable is usually:
+
+- `target/release/lrc_player.exe`
+
+To build both the Linux binary and a Windows `.exe` from WSL, use:
+
+```bash
+source "$HOME/.cargo/env"
+./scripts/build_release.sh
 ```
 
 If you want to package it manually, create a folder like this and archive it:
@@ -132,8 +187,9 @@ Typical flow:
 
 ## Notes
 
-The current scaffold intentionally stops at startup, config persistence, and UI shell.
-Audio decoding and output should be added behind a dedicated player interface rather than wired directly into the UI.
+The current version includes a real playback backend behind the player interface.
+Audio files are decoded with `symphonia` and sent to the output device with `cpal`.
+The file loading UI is intentionally minimal for now and will likely be replaced by library scanning and file dialogs later.
 
 ## Current scaffold direction
 
@@ -142,7 +198,7 @@ The repository now includes the first-pass core skeleton for the next stage:
 - `models.rs` holds portable domain types such as tracks, playlists, queue mode, and playback mode.
 - `library.rs` provides an in-memory library index API that can later be backed by JSON or SQLite.
 - `lyrics.rs` contains a minimal `.lrc` parser and a lookup method for the active line at a playback position.
-- `player.rs` defines a playback trait and a `NullPlayer` adapter so UI work can proceed before a real backend exists.
+- `player.rs` defines a playback trait, a `symphonia + cpal` backend, and a `NullPlayer` fallback used only when audio output cannot be initialized.
 - `state.rs` acts as the application layer, receiving commands from the UI and coordinating config, library, and player state.
 
 This keeps `app.rs` focused on rendering and user interaction while leaving room to add a real scanner and playback backend without rewriting the UI layer.

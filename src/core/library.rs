@@ -26,6 +26,10 @@ impl LibraryIndex {
         self.tracks = tracks;
     }
 
+    pub fn tracks(&self) -> &[Track] {
+        &self.tracks
+    }
+
     pub fn track_count(&self) -> usize {
         self.tracks.len()
     }

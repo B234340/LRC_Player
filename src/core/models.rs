@@ -13,6 +13,14 @@ pub enum TrackLocation {
     Absolute(String),
 }
 
+impl TrackLocation {
+    pub fn as_path_str(&self) -> &str {
+        match self {
+            Self::Relative(path) | Self::Absolute(path) => path,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Track {
     pub id: TrackId,
@@ -22,6 +30,12 @@ pub struct Track {
     pub duration_ms: Option<u64>,
     pub location: TrackLocation,
     pub lyric_path: Option<String>,
+}
+
+impl Track {
+    pub fn file_path(&self) -> &str {
+        self.location.as_path_str()
+    }
 }
 
 #[derive(Debug, Clone)]

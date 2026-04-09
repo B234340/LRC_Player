@@ -1,4 +1,5 @@
 /target/
+/dist/
 
 /data/config.json
 /data/library.json
