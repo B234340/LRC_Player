@@ -31,6 +31,13 @@ enum ArtistKind {
     Composer,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QueuePlaybackMode {
+    SingleRepeat,
+    QueueRepeat,
+    QueueShuffle,
+}
+
 #[derive(Default)]
 struct DirectoryNode {
     children: BTreeMap<String, DirectoryNode>,
@@ -72,6 +79,8 @@ pub struct LrcPlayerApp {
     artist_kind: ArtistKind,
     selected_album_key: Option<String>,
     selected_artist_name: Option<String>,
+    revealed_queue_anchor_id: Option<TrackId>,
+    detail_track_id: Option<TrackId>,
     artwork_cache: HashMap<String, egui::TextureHandle>,
 }
 
@@ -92,6 +101,8 @@ impl LrcPlayerApp {
             artist_kind: ArtistKind::Artist,
             selected_album_key: None,
             selected_artist_name: None,
+            revealed_queue_anchor_id: None,
+            detail_track_id: None,
             artwork_cache: HashMap::new(),
         }
     }
@@ -146,6 +157,8 @@ impl eframe::App for LrcPlayerApp {
                     self.render_active_tab(ui, ctx);
                 });
         });
+
+        self.render_track_detail_window(ctx);
     }
 }
 
@@ -183,6 +196,9 @@ impl LrcPlayerApp {
 
         if ui.add(button).clicked() {
             self.active_tab = tab;
+            if tab == AppTab::Queue {
+                self.revealed_queue_anchor_id = None;
+            }
         }
     }
 
@@ -201,21 +217,20 @@ impl LrcPlayerApp {
 
     fn render_queue_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Queue");
-        ui.label("Current playback order. Click a row to jump there. Reorder with the up/down controls.");
+        ui.label("Current playback order. Click a row to jump there. Drag rows to change the playback order.");
 
         ui.add_space(12.0);
+        let mut playback_mode = self.queue_playback_mode();
         ui.horizontal_wrapped(|ui| {
-            ui.label("Repeat");
-            ui.selectable_value(&mut self.state.queue.repeat_mode, RepeatMode::Off, "Off");
-            ui.selectable_value(&mut self.state.queue.repeat_mode, RepeatMode::One, "Single");
-            ui.selectable_value(&mut self.state.queue.repeat_mode, RepeatMode::All, "Queue");
-            ui.separator();
-            ui.label("Order");
-            ui.selectable_value(&mut self.state.queue.queue_mode, QueueMode::Sequential, "Sequential");
-            ui.selectable_value(&mut self.state.queue.queue_mode, QueueMode::Shuffle, "Random");
+            ui.label("Playback mode");
+            ui.radio_value(&mut playback_mode, QueuePlaybackMode::SingleRepeat, "Single repeat");
+            ui.radio_value(&mut playback_mode, QueuePlaybackMode::QueueRepeat, "Queue repeat");
+            ui.radio_value(&mut playback_mode, QueuePlaybackMode::QueueShuffle, "Queue shuffle");
         });
+        self.set_queue_playback_mode(playback_mode);
 
         if self.state.queue.track_ids.is_empty() {
+            self.revealed_queue_anchor_id = None;
             ui.add_space(12.0);
             ui.label("Queue is empty. Click a track in Album, Artist, Playlist, or Library to build a new queue.");
             return;
@@ -223,6 +238,15 @@ impl LrcPlayerApp {
 
         let queue_track_ids = self.state.queue.track_ids.clone();
         let current_track_id = self.current_track_id().cloned();
+        let queue_anchor_id = self
+            .state
+            .queue
+            .current_index
+            .and_then(|current_index| queue_track_ids.get(current_index.saturating_sub(1)).cloned());
+        let should_reveal_anchor = queue_anchor_id.is_some()
+            && self.revealed_queue_anchor_id.as_ref() != queue_anchor_id.as_ref();
+
+        let mut pending_move = None;
 
         for (index, track_id) in queue_track_ids.iter().enumerate() {
             let Some(track) = self.state.library.track_by_id(track_id).cloned() else {
@@ -230,13 +254,14 @@ impl LrcPlayerApp {
             };
 
             let is_current = current_track_id.as_ref() == Some(&track.id);
-            egui::Frame::group(ui.style())
-                .fill(if is_current {
-                    ui.visuals().selection.bg_fill
-                } else {
-                    ui.visuals().extreme_bg_color
-                })
-                .show(ui, |ui| {
+            let frame = egui::Frame::group(ui.style()).fill(if is_current {
+                ui.visuals().selection.bg_fill
+            } else {
+                ui.visuals().extreme_bg_color
+            });
+            let (inner, dropped_payload) = ui.dnd_drop_zone::<usize, _>(frame, |ui| {
+                let drag_id = ui.make_persistent_id(("queue-row", &track.id.0));
+                ui.dnd_drag_source(drag_id, index, |ui| {
                     ui.horizontal(|ui| {
                         self.render_track_artwork(ui, ctx, &track, 72.0);
                         ui.vertical(|ui| {
@@ -245,41 +270,37 @@ impl LrcPlayerApp {
                                 self.state
                                     .handle(&self.config_store, AppCommand::JumpToQueueTrack(track.id.clone()));
                             }
+                            if should_reveal_anchor && queue_anchor_id.as_ref() == Some(&track.id) {
+                                response.scroll_to_me(Some(egui::Align::TOP));
+                            }
                             self.render_track_context_menu(ui, response, &track.id, &queue_track_ids);
                             ui.label(self.track_secondary_line(&track));
                             ui.small(track.album.clone().unwrap_or_else(|| String::from("Unknown album")));
                         });
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Down").clicked() && index + 1 < queue_track_ids.len() {
-                                self.state.handle(
-                                    &self.config_store,
-                                    AppCommand::MoveQueueItem {
-                                        from: index,
-                                        to: index + 1,
-                                    },
-                                );
-                            }
-                            if ui.button("Up").clicked() && index > 0 {
-                                self.state.handle(
-                                    &self.config_store,
-                                    AppCommand::MoveQueueItem {
-                                        from: index,
-                                        to: index - 1,
-                                    },
-                                );
-                            }
-                            ui.label(format!("#{}", index + 1));
+                            ui.strong(format!("#{}", index + 1));
+                            ui.small("Drag");
                         });
                     });
-                });
+                })
+                .inner
+            });
+            let _ = inner;
+            if let Some(from_index) = dropped_payload.map(|payload| *payload) {
+                if from_index != index {
+                    pending_move = Some((from_index, index));
+                }
+            }
             ui.add_space(8.0);
         }
 
-        self.state
-            .handle(&self.config_store, AppCommand::SetRepeatMode(self.state.queue.repeat_mode));
-        self.state
-            .handle(&self.config_store, AppCommand::SetQueueMode(self.state.queue.queue_mode));
+        if let Some((from, to)) = pending_move {
+            self.state
+                .handle(&self.config_store, AppCommand::MoveQueueItem { from, to });
+        }
+
+        self.revealed_queue_anchor_id = queue_anchor_id;
     }
 
     fn render_play_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -325,7 +346,7 @@ impl LrcPlayerApp {
             });
         });
 
-        ui.add_space(18.0);
+        ui.add_space((ui.available_height() - 80.0).max(18.0));
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             ui.horizontal_centered(|ui| {
                 if ui.button("Previous").clicked() {
@@ -369,24 +390,29 @@ impl LrcPlayerApp {
         }
 
         ui.add_space(12.0);
-        ui.horizontal_wrapped(|ui| {
-            for album in &albums {
-                let selected = self.selected_album_key.as_deref() == Some(album.key.as_str());
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(180.0);
-                    if let Some(track) = self.state.library.track_by_id(&album.preview_track_id).cloned() {
-                        self.render_track_artwork(ui, ctx, &track, 160.0);
-                    }
+        let card_width = 200.0;
+        let column_count = ((ui.available_width() + 12.0) / (card_width + 12.0)).floor() as usize;
+        let column_count = column_count.max(1);
+        for row in albums.chunks(column_count) {
+            ui.columns(row.len(), |columns| {
+                for (column, album) in columns.iter_mut().zip(row.iter()) {
+                    let selected = self.selected_album_key.as_deref() == Some(album.key.as_str());
+                    egui::Frame::group(column.style()).show(column, |ui| {
+                        ui.set_width(card_width);
+                        if let Some(track) = self.state.library.track_by_id(&album.preview_track_id).cloned() {
+                            self.render_track_artwork(ui, ctx, &track, 172.0);
+                        }
 
-                    if ui.selectable_label(selected, &album.title).clicked() {
-                        self.selected_album_key = Some(album.key.clone());
-                    }
-                    ui.small(&album.subtitle);
-                    ui.small(format!("{} tracks", album.track_ids.len()));
-                });
-                ui.add_space(8.0);
-            }
-        });
+                        if ui.selectable_label(selected, &album.title).clicked() {
+                            self.selected_album_key = Some(album.key.clone());
+                        }
+                        ui.small(&album.subtitle);
+                        ui.small(format!("{} tracks", album.track_ids.len()));
+                    });
+                }
+            });
+            ui.add_space(12.0);
+        }
 
         if self.selected_album_key.is_none() {
             self.selected_album_key = albums.first().map(|album| album.key.clone());
@@ -555,23 +581,7 @@ impl LrcPlayerApp {
                     .filter_map(|track_id| self.state.library.track_by_id(track_id).cloned())
                     .collect::<Vec<_>>();
 
-                self.render_track_list(ui, ctx, &tracks, &playlist_track_ids);
-
-                if !playlist_track_ids.is_empty() {
-                    ui.add_space(12.0);
-                    let removable_ids = playlist_track_ids.clone();
-                    for track_id in removable_ids {
-                        if ui.button(format!("Remove {}", self.track_title(&track_id))).clicked() {
-                            self.state.handle(
-                                &self.config_store,
-                                AppCommand::RemoveTrackFromPlaylist {
-                                    playlist_name: selected_playlist_name.clone(),
-                                    track_id,
-                                },
-                            );
-                        }
-                    }
-                }
+                self.render_playlist_tracks(ui, ctx, &selected_playlist_name, &tracks, &playlist_track_ids);
             });
         });
     }
@@ -718,7 +728,8 @@ impl LrcPlayerApp {
             ui.label("Portable layout");
             ui.label("- Data stays under ./data relative to the executable.");
             ui.label("- Scan folders and exclusions are saved to config.json.");
-            ui.label("- Queue and playlists currently live in memory for the running session.");
+            ui.label("- Playlists are saved to playlists.json in the same data directory.");
+            ui.label("- Queue order is session-local and updates immediately when rows are dragged.");
         });
     }
 
@@ -818,11 +829,9 @@ impl LrcPlayerApp {
             }
 
             ui.separator();
-            if let Some(track) = self.state.library.track_by_id(&track_id) {
-                ui.label(format!("Title: {}", track.title));
-                ui.label(format!("Artist: {}", track.artist.clone().unwrap_or_else(|| String::from("Unknown"))));
-                ui.label(format!("Album: {}", track.album.clone().unwrap_or_else(|| String::from("Unknown"))));
-                ui.monospace(track.file_path());
+            if ui.button("Show details").clicked() {
+                self.detail_track_id = Some(track_id.clone());
+                ui.close_menu();
             }
         });
         let _ = ui;
@@ -942,12 +951,13 @@ impl LrcPlayerApp {
         let mut artists = BTreeMap::<String, Vec<TrackId>>::new();
 
         for track in self.state.library.tracks() {
-            let name = match self.artist_kind {
+            let Some(name) = (match self.artist_kind {
                 ArtistKind::Artist => track.artist.clone(),
                 ArtistKind::AlbumArtist => track.album_artist.clone(),
                 ArtistKind::Composer => track.composer.clone(),
-            }
-            .unwrap_or_else(|| String::from("Unknown"));
+            }) else {
+                continue;
+            };
 
             artists.entry(name).or_default().push(track.id.clone());
         }
@@ -956,6 +966,177 @@ impl LrcPlayerApp {
             .into_iter()
             .map(|(name, track_ids)| ArtistView { name, track_ids })
             .collect()
+    }
+
+    fn render_playlist_tracks(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        playlist_name: &str,
+        tracks: &[Track],
+        visible_track_ids: &[TrackId],
+    ) {
+        if tracks.is_empty() {
+            ui.label("No tracks in this playlist.");
+            return;
+        }
+
+        let mut pending_move = None;
+        let mut pending_remove = None;
+
+        for (index, track) in tracks.iter().enumerate() {
+            let frame = egui::Frame::group(ui.style()).fill(if self.current_track_id() == Some(&track.id) {
+                ui.visuals().selection.bg_fill
+            } else {
+                ui.visuals().extreme_bg_color
+            });
+
+            let (_inner, dropped_payload) = ui.dnd_drop_zone::<usize, _>(frame, |ui| {
+                let drag_id = ui.make_persistent_id(("playlist-row", playlist_name, &track.id.0));
+                ui.dnd_drag_source(drag_id, index, |ui| {
+                    ui.horizontal(|ui| {
+                        self.render_track_artwork(ui, ctx, track, 56.0);
+                        ui.vertical(|ui| {
+                            let response = ui.selectable_label(
+                                self.current_track_id() == Some(&track.id),
+                                &track.title,
+                            );
+                            if response.clicked() {
+                                self.state.handle(
+                                    &self.config_store,
+                                    AppCommand::BuildQueueAndPlay {
+                                        track_ids: visible_track_ids.to_vec(),
+                                        start_track_id: track.id.clone(),
+                                    },
+                                );
+                                self.active_tab = AppTab::Play;
+                            }
+                            self.render_track_context_menu(ui, response, &track.id, visible_track_ids);
+                            ui.label(self.track_secondary_line(track));
+                            ui.small(track.file_name.clone());
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Remove").clicked() {
+                                pending_remove = Some(track.id.clone());
+                            }
+                            ui.strong(format!("#{}", index + 1));
+                            ui.small("Drag");
+                        });
+                    });
+                })
+                .inner
+            });
+
+            if let Some(from_index) = dropped_payload.map(|payload| *payload) {
+                if from_index != index {
+                    pending_move = Some((from_index, index));
+                }
+            }
+
+            ui.add_space(8.0);
+        }
+
+        if let Some((from, to)) = pending_move {
+            self.state.handle(
+                &self.config_store,
+                AppCommand::MovePlaylistItem {
+                    playlist_name: playlist_name.to_string(),
+                    from,
+                    to,
+                },
+            );
+        }
+
+        if let Some(track_id) = pending_remove {
+            self.state.handle(
+                &self.config_store,
+                AppCommand::RemoveTrackFromPlaylist {
+                    playlist_name: playlist_name.to_string(),
+                    track_id,
+                },
+            );
+        }
+    }
+
+    fn render_track_detail_window(&mut self, ctx: &egui::Context) {
+        let Some(track_id) = self.detail_track_id.clone() else {
+            return;
+        };
+
+        let Some(track) = self.state.library.track_by_id(&track_id).cloned() else {
+            self.detail_track_id = None;
+            return;
+        };
+
+        let mut open = true;
+        egui::Window::new("Track Details")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.heading(&track.title);
+                ui.add_space(12.0);
+                ui.label(format!(
+                    "Artist: {}",
+                    track.artist.clone().unwrap_or_else(|| String::from("Unknown artist"))
+                ));
+                ui.label(format!(
+                    "Album: {}",
+                    track.album.clone().unwrap_or_else(|| String::from("Unknown album"))
+                ));
+                ui.label(format!(
+                    "Album Artist: {}",
+                    track.album_artist.clone().unwrap_or_else(|| String::from("Unknown"))
+                ));
+                ui.label(format!(
+                    "Composer: {}",
+                    track.composer.clone().unwrap_or_else(|| String::from("Unknown"))
+                ));
+                if let Some(duration_ms) = track.duration_ms {
+                    ui.label(format!("Duration: {}", format_duration(duration_ms)));
+                }
+                ui.separator();
+                ui.label("File path");
+                ui.monospace(track.file_path());
+            });
+
+        if !open {
+            self.detail_track_id = None;
+        }
+    }
+
+    fn queue_playback_mode(&self) -> QueuePlaybackMode {
+        if self.state.queue.repeat_mode == RepeatMode::One {
+            QueuePlaybackMode::SingleRepeat
+        } else if self.state.queue.queue_mode == QueueMode::Shuffle {
+            QueuePlaybackMode::QueueShuffle
+        } else {
+            QueuePlaybackMode::QueueRepeat
+        }
+    }
+
+    fn set_queue_playback_mode(&mut self, mode: QueuePlaybackMode) {
+        match mode {
+            QueuePlaybackMode::SingleRepeat => {
+                self.state.queue.repeat_mode = RepeatMode::One;
+                self.state.queue.queue_mode = QueueMode::Sequential;
+            }
+            QueuePlaybackMode::QueueRepeat => {
+                self.state.queue.repeat_mode = RepeatMode::All;
+                self.state.queue.queue_mode = QueueMode::Sequential;
+            }
+            QueuePlaybackMode::QueueShuffle => {
+                self.state.queue.repeat_mode = RepeatMode::Off;
+                self.state.queue.queue_mode = QueueMode::Shuffle;
+            }
+        }
+
+        self.state
+            .handle(&self.config_store, AppCommand::SetRepeatMode(self.state.queue.repeat_mode));
+        self.state
+            .handle(&self.config_store, AppCommand::SetQueueMode(self.state.queue.queue_mode));
     }
 
     fn render_track_artwork(
@@ -1019,13 +1200,6 @@ impl LrcPlayerApp {
         format!("{artist} / {album}")
     }
 
-    fn track_title(&self, track_id: &TrackId) -> String {
-        self.state
-            .library
-            .track_by_id(track_id)
-            .map(|track| track.title.clone())
-            .unwrap_or_else(|| String::from("track"))
-    }
 }
 
 fn configure_fonts(ctx: &egui::Context) {

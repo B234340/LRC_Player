@@ -41,6 +41,7 @@ pub enum AppCommand {
     SelectPlaylist(Option<String>),
     AddTrackToPlaylist { playlist_name: String, track_id: TrackId },
     RemoveTrackFromPlaylist { playlist_name: String, track_id: TrackId },
+    MovePlaylistItem { playlist_name: String, from: usize, to: usize },
     SetTheme(String),
 }
 
@@ -71,15 +72,25 @@ impl AppState {
 
         match config_store.load_or_create() {
             Ok(config) => {
+                let playlist_load_result = config_store.load_playlists();
+                let mut playlist_status = None;
+                let playlists = match playlist_load_result {
+                    Ok(playlists) => playlists,
+                    Err(err) => {
+                        playlist_status = Some(format!(" Playlist load failed: {err}"));
+                        Vec::new()
+                    }
+                };
                 let mut state = Self {
+                    selected_playlist_name: config.last_playlist.clone(),
                     config,
                     library: LibraryIndex::new(),
-                    playlists: Vec::new(),
+                    playlists,
                     queue: QueueState::default(),
                     selected_track_id: None,
-                    selected_playlist_name: None,
                     status_line: format!(
-                        "Portable mode active: using local ./data directory. {player_status}"
+                        "Portable mode active: using local ./data directory. {player_status}{}",
+                        playlist_status.unwrap_or_default()
                     ),
                     player,
                     last_playback_status: PlaybackStatus::Stopped,
@@ -181,9 +192,15 @@ impl AppState {
             }
             AppCommand::CreatePlaylist(name) => {
                 self.create_playlist(name);
+                if !self.status_line.starts_with("Playlist save failed:") {
+                    self.persist_playlists(config_store, &self.status_line.clone());
+                }
             }
             AppCommand::DeletePlaylist(name) => {
                 self.delete_playlist(&name);
+                if !self.status_line.starts_with("Playlist save failed:") {
+                    self.persist_playlists(config_store, &self.status_line.clone());
+                }
             }
             AppCommand::SelectPlaylist(name) => {
                 self.selected_playlist_name = name.clone();
@@ -195,12 +212,23 @@ impl AppState {
                 track_id,
             } => {
                 self.add_track_to_playlist(&playlist_name, track_id);
+                if !self.status_line.starts_with("Playlist not found.") {
+                    self.persist_playlists(config_store, &self.status_line.clone());
+                }
             }
             AppCommand::RemoveTrackFromPlaylist {
                 playlist_name,
                 track_id,
             } => {
                 self.remove_track_from_playlist(&playlist_name, &track_id);
+                self.persist_playlists(config_store, &self.status_line.clone());
+            }
+            AppCommand::MovePlaylistItem {
+                playlist_name,
+                from,
+                to,
+            } => {
+                self.move_playlist_item(config_store, &playlist_name, from, to);
             }
             AppCommand::SetTheme(theme) => {
                 self.config.theme = theme;
@@ -293,6 +321,17 @@ impl AppState {
             }
             Err(err) => {
                 self.status_line = format!("Config save failed: {err}");
+            }
+        }
+    }
+
+    fn persist_playlists(&mut self, config_store: &ConfigStore, success_message: &str) {
+        match config_store.save_playlists(&self.playlists) {
+            Ok(()) => {
+                self.status_line = success_message.to_string();
+            }
+            Err(err) => {
+                self.status_line = format!("Playlist save failed: {err}");
             }
         }
     }
@@ -544,6 +583,21 @@ impl AppState {
         self.status_line = format!("Removed {} from playlist {playlist_name}.", self.describe_track(track_id));
     }
 
+    fn move_playlist_item(&mut self, config_store: &ConfigStore, playlist_name: &str, from: usize, to: usize) {
+        let Some(playlist) = self.playlists.iter_mut().find(|playlist| playlist.name == playlist_name) else {
+            self.status_line = String::from("Playlist not found.");
+            return;
+        };
+
+        if from >= playlist.track_ids.len() || to >= playlist.track_ids.len() || from == to {
+            return;
+        }
+
+        let track_id = playlist.track_ids.remove(from);
+        playlist.track_ids.insert(to, track_id);
+        self.persist_playlists(config_store, &format!("Reordered playlist: {playlist_name}"));
+    }
+
     fn describe_track(&self, track_id: &TrackId) -> String {
         self.library
             .track_by_id(track_id)
@@ -573,6 +627,7 @@ impl AppState {
             self.selected_track_id = None;
             self.queue.track_ids.clear();
             self.queue.current_index = None;
+            self.retain_playlist_tracks();
             return;
         }
 
@@ -588,6 +643,7 @@ impl AppState {
                 self.selected_track_id = self.library.tracks().first().map(|track| track.id.clone());
 
                 self.queue.track_ids.retain(|track_id| self.library.track_by_id(track_id).is_some());
+                self.retain_playlist_tracks();
                 if let Some(current_index) = self.queue.current_index {
                     if current_index >= self.queue.track_ids.len() {
                         self.queue.current_index = self.queue.track_ids.len().checked_sub(1);
@@ -619,7 +675,24 @@ impl AppState {
                 self.selected_track_id = None;
                 self.queue.track_ids.clear();
                 self.queue.current_index = None;
+                self.retain_playlist_tracks();
                 self.status_line = format!("Saved directory scan failed: {err}");
+            }
+        }
+    }
+
+    fn retain_playlist_tracks(&mut self) {
+        for playlist in &mut self.playlists {
+            playlist
+                .track_ids
+                .retain(|track_id| self.library.track_by_id(track_id).is_some());
+        }
+
+        self.playlists.retain(|playlist| !playlist.name.trim().is_empty());
+
+        if let Some(selected_name) = self.selected_playlist_name.as_ref() {
+            if !self.playlists.iter().any(|playlist| &playlist.name == selected_name) {
+                self.selected_playlist_name = None;
             }
         }
     }

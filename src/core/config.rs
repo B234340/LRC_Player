@@ -3,8 +3,11 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::core::models::Playlist;
+
 const DATA_DIR_NAME: &str = "data";
 const CONFIG_FILE_NAME: &str = "config.json";
+const PLAYLISTS_FILE_NAME: &str = "playlists.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -57,6 +60,7 @@ impl From<serde_json::Error> for ConfigError {
 pub struct ConfigStore {
     data_dir: PathBuf,
     config_path: PathBuf,
+    playlists_path: PathBuf,
 }
 
 impl ConfigStore {
@@ -64,10 +68,12 @@ impl ConfigStore {
         let base_dir = portable_base_dir();
         let data_dir = base_dir.join(DATA_DIR_NAME);
         let config_path = data_dir.join(CONFIG_FILE_NAME);
+        let playlists_path = data_dir.join(PLAYLISTS_FILE_NAME);
 
         Self {
             data_dir,
             config_path,
+            playlists_path,
         }
     }
 
@@ -88,6 +94,25 @@ impl ConfigStore {
         self.ensure_layout()?;
         let json = serde_json::to_string_pretty(config)?;
         fs::write(&self.config_path, json)?;
+        Ok(())
+    }
+
+    pub fn load_playlists(&self) -> Result<Vec<Playlist>, ConfigError> {
+        self.ensure_layout()?;
+
+        if !self.playlists_path.exists() {
+            self.save_playlists(&[])?;
+            return Ok(Vec::new());
+        }
+
+        let raw = fs::read_to_string(&self.playlists_path)?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+
+    pub fn save_playlists(&self, playlists: &[Playlist]) -> Result<(), ConfigError> {
+        self.ensure_layout()?;
+        let json = serde_json::to_string_pretty(playlists)?;
+        fs::write(&self.playlists_path, json)?;
         Ok(())
     }
 
