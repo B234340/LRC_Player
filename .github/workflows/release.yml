@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: lrc-player-linux-x86_64
+            binary_name: lrc_player
+            archive_ext: tar.gz
+          - os: windows-latest
+            artifact_name: lrc-player-windows-x86_64
+            binary_name: lrc_player.exe
+            archive_ext: zip
+          - os: macos-13
+            artifact_name: lrc-player-macos-x86_64
+            binary_name: lrc_player
+            archive_ext: tar.gz
+          - os: macos-14
+            artifact_name: lrc-player-macos-arm64
+            binary_name: lrc_player
+            archive_ext: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Prepare portable package directory
+        shell: bash
+        run: |
+          set -e
+          package_dir="${{ matrix.artifact_name }}"
+          mkdir -p "$package_dir/data/cache" "$package_dir/data/logs"
+          cp "target/release/${{ matrix.binary_name }}" "$package_dir/"
+          cp README.md "$package_dir/"
+
+      - name: Create tar.gz archive
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          set -e
+          tar -czf "${{ matrix.artifact_name }}.tar.gz" "${{ matrix.artifact_name }}"
+
+      - name: Create zip archive
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ matrix.artifact_name }}" -DestinationPath "${{ matrix.artifact_name }}.zip"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
+
+      - name: Publish GitHub Release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_name }}.${{ matrix.archive_ext }}

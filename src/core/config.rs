@@ -59,7 +59,7 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn new() -> Self {
-        let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let base_dir = portable_base_dir();
         let data_dir = base_dir.join(DATA_DIR_NAME);
         let config_path = data_dir.join(CONFIG_FILE_NAME);
 
@@ -94,4 +94,12 @@ impl ConfigStore {
         fs::create_dir_all(self.data_dir.join("logs"))?;
         Ok(())
     }
+}
+
+fn portable_base_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(PathBuf::from))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
 }

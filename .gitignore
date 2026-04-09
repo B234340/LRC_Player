@@ -1,0 +1,9 @@
+/target/
+
+/data/config.json
+/data/library.json
+/data/playlists.json
+/data/cache/
+/data/logs/
+
+.DS_Store

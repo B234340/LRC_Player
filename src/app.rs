@@ -1,27 +1,20 @@
-use crate::core::config::{AppConfig, ConfigStore};
+use crate::core::config::ConfigStore;
+use crate::core::state::{AppCommand, AppState};
 use eframe::egui;
 
 pub struct LrcPlayerApp {
     config_store: ConfigStore,
-    config: AppConfig,
-    status_line: String,
+    state: AppState,
 }
 
 impl LrcPlayerApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let config_store = ConfigStore::new();
-        let (config, status_line) = match config_store.load_or_create() {
-            Ok(config) => (config, String::from("Portable mode active: using local ./data directory.")),
-            Err(err) => (
-                AppConfig::default(),
-                format!("Config load failed, using defaults: {err}"),
-            ),
-        };
+        let state = AppState::bootstrap(&config_store);
 
         Self {
             config_store,
-            config,
-            status_line,
+            state,
         }
     }
 }
@@ -43,10 +36,10 @@ impl eframe::App for LrcPlayerApp {
                 ui.heading("Library");
                 ui.label("Folders");
 
-                if self.config.library_folders.is_empty() {
+                if self.state.config.library_folders.is_empty() {
                     ui.label("No library folders configured.");
                 } else {
-                    for folder in &self.config.library_folders {
+                    for folder in &self.state.config.library_folders {
                         ui.monospace(folder);
                     }
                 }
@@ -58,7 +51,7 @@ impl eframe::App for LrcPlayerApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Now Playing");
-            ui.label("Playback engine is not wired yet.");
+            ui.label(self.state.playback_summary());
 
             ui.add_space(16.0);
             ui.group(|ui| {
@@ -71,22 +64,22 @@ impl eframe::App for LrcPlayerApp {
             ui.add_space(16.0);
 
             if ui.button("Save current config").clicked() {
-                match self.config_store.save(&self.config) {
-                    Ok(()) => {
-                        self.status_line = String::from("Config saved to ./data/config.json.");
-                    }
-                    Err(err) => {
-                        self.status_line = format!("Config save failed: {err}");
-                    }
-                }
+                self.state
+                    .handle(&self.config_store, AppCommand::SaveConfig);
             }
+
+            ui.add_space(12.0);
+            ui.label(format!(
+                "Indexed tracks: {}",
+                self.state.library.track_count()
+            ));
         });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(&self.status_line);
+                ui.label(&self.state.status_line);
                 ui.separator();
-                ui.label(format!("Theme: {}", self.config.theme));
+                ui.label(format!("Theme: {}", self.state.config.theme));
             });
         });
     }
