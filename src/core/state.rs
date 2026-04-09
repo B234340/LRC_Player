@@ -934,10 +934,6 @@ fn read_track_metadata(path: &Path) -> TrackMetadata {
         .map(|value| value.to_string())
         .filter(|value| !value.trim().is_empty());
     let track_number = tag.and_then(|tag| tag.track());
-    let artwork = tag
-        .and_then(|tag| tag.pictures().first())
-        .map(|picture| picture.data().to_vec())
-        .filter(|bytes| !bytes.is_empty());
     let duration_ms = Some(tagged_file.properties().duration().as_millis().min(u128::from(u64::MAX)) as u64);
 
     TrackMetadata {
@@ -949,7 +945,7 @@ fn read_track_metadata(path: &Path) -> TrackMetadata {
         duration_ms,
         track_number,
         file_name,
-        artwork,
+        artwork: None,
     }
 }
 

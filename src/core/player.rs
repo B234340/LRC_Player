@@ -232,7 +232,7 @@ struct SharedPlaybackState {
     sample_rate: u32,
     channels: u16,
     position_samples: usize,
-    samples: Vec<f32>,
+    samples: Vec<i16>,
 }
 
 impl SharedPlaybackState {
@@ -323,7 +323,8 @@ where
             continue;
         }
 
-        *sample = T::from_sample(state.samples[state.position_samples]);
+        let normalized = state.samples[state.position_samples] as f32 / i16::MAX as f32;
+        *sample = T::from_sample(normalized);
         state.position_samples += 1;
     }
 
@@ -336,7 +337,7 @@ fn decode_audio_file(
     file_path: &Path,
     output_sample_rate: u32,
     output_channels: u16,
-) -> Result<Vec<f32>, PlayerError> {
+) -> Result<Vec<i16>, PlayerError> {
     let file = File::open(file_path)
         .map_err(|err| PlayerError::new(format!("Audio file open failed: {err}")))?;
     let media_source = MediaSourceStream::new(Box::new(file), Default::default());
@@ -402,13 +403,13 @@ fn decode_audio_file(
         return Err(PlayerError::new("The selected audio file produced no playable samples."));
     }
 
-    Ok(resample_interleaved(
+    Ok(quantize_samples(&resample_interleaved(
         &decoded_samples,
         source_sample_rate,
         source_channels,
         output_sample_rate,
         output_channels as usize,
-    ))
+    )))
 }
 
 fn append_decoded_samples(output: &mut Vec<f32>, decoded: AudioBufferRef<'_>) {
@@ -525,4 +526,14 @@ fn remap_channel(frame: &[f32], output_channel: usize, output_channels: usize) -
         (1, _) => frame[0],
         _ => frame[output_channel.min(frame.len() - 1)],
     }
+}
+
+fn quantize_samples(input: &[f32]) -> Vec<i16> {
+    input
+        .iter()
+        .map(|sample| {
+            let clamped = sample.clamp(-1.0, 1.0);
+            (clamped * i16::MAX as f32) as i16
+        })
+        .collect()
 }

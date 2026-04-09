@@ -6,6 +6,8 @@ use crate::core::player::PlaybackStatus;
 use crate::core::state::AppCommand;
 use eframe::egui;
 use image::ImageReader;
+use lofty::prelude::TaggedFileExt;
+use lofty::probe::Probe;
 use rfd::FileDialog;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -38,13 +40,6 @@ impl LrcPlayerApp {
 
         let queue_track_ids = self.state.queue.track_ids.clone();
         let current_track_id = self.current_track_id().cloned();
-        if current_track_id != self.last_queue_current_track_id {
-            self.last_queue_current_track_id = current_track_id.clone();
-            if self.state.config.queue_follow_current {
-                self.queue_follow_paused_by_user = false;
-                self.revealed_queue_anchor_id = None;
-            }
-        }
         let queue_anchor_id = if self.state.config.queue_follow_current && !self.queue_follow_paused_by_user {
             self.state
                 .queue
@@ -106,15 +101,7 @@ impl LrcPlayerApp {
                             ui.add_space(8.0);
                             self.render_track_artwork(ui, ctx, &track, 72.0);
                             ui.vertical(|ui| {
-                                let response = ui.selectable_label(is_current, &track.title);
-                                if response.clicked() {
-                                    self.state
-                                        .handle(&self.config_store, AppCommand::JumpToQueueTrack(track.id.clone()));
-                                }
-                                if should_reveal_anchor && queue_anchor_id.as_ref() == Some(&track.id) {
-                                    response.scroll_to_me(Some(egui::Align::TOP));
-                                }
-                                self.render_track_context_menu(ui, response, &track.id, &queue_track_ids);
+                                ui.strong(&track.title);
                                 ui.label(self.track_artist_label(&track));
                                 ui.small(track.album.clone().unwrap_or_else(|| String::from("Unknown album")));
                             });
@@ -125,6 +112,19 @@ impl LrcPlayerApp {
                         });
                     });
                     let _ = inner;
+                    let row_response = ui.interact(
+                        inner.response.rect,
+                        ui.make_persistent_id(("queue-row-click", &track.id.0)),
+                        egui::Sense::click(),
+                    );
+                    if row_response.clicked() {
+                        self.state
+                            .handle(&self.config_store, AppCommand::JumpToQueueTrack(track.id.clone()));
+                    }
+                    if should_reveal_anchor && queue_anchor_id.as_ref() == Some(&track.id) {
+                        row_response.scroll_to_me(Some(egui::Align::TOP));
+                    }
+                    self.render_track_context_menu(ui, row_response, &track.id, &queue_track_ids);
                     if let Some(from_index) = dropped_payload.map(|payload| *payload) {
                         if from_index != index {
                             pending_move = Some((from_index, index));
@@ -232,16 +232,12 @@ impl LrcPlayerApp {
             return;
         }
 
-        if self.selected_album_key.is_none() {
-            self.selected_album_key = albums.first().map(|album| album.key.clone());
-        }
-
         ui.add_space(12.0);
         ui.columns(2, |columns| {
+            let card_width = 200.0;
             egui::ScrollArea::vertical()
                 .id_salt("album-grid")
                 .show(&mut columns[0], |ui| {
-                    let card_width = 200.0;
                     let column_count = ((ui.available_width() + 12.0) / (card_width + 12.0)).floor() as usize;
                     let column_count = column_count.max(1);
                     for row in albums.chunks(column_count) {
@@ -255,7 +251,11 @@ impl LrcPlayerApp {
                                     }
 
                                     if ui.selectable_label(selected, &album.title).clicked() {
-                                        self.selected_album_key = Some(album.key.clone());
+                                        if selected {
+                                            self.selected_album_key = None;
+                                        } else {
+                                            self.selected_album_key = Some(album.key.clone());
+                                        }
                                     }
                                     ui.small(&album.subtitle);
                                     ui.small(format!("{} tracks", album.track_ids.len()));
@@ -269,6 +269,8 @@ impl LrcPlayerApp {
             egui::ScrollArea::vertical()
                 .id_salt("album-track-list")
                 .show(&mut columns[1], |ui| {
+                    ui.set_width(card_width);
+                    ui.set_max_width(card_width);
                     let Some(selected_album) = albums
                         .iter()
                         .find(|album| self.selected_album_key.as_deref() == Some(album.key.as_str()))
@@ -295,28 +297,31 @@ impl LrcPlayerApp {
                     });
 
                     for track in &tracks {
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            let response = ui.selectable_label(
-                                self.current_track_id() == Some(&track.id),
-                                &track.title,
-                            );
-                            if response.clicked() {
-                                self.state.handle(
-                                    &self.config_store,
-                                    AppCommand::BuildQueueAndPlay {
-                                        track_ids: selected_album.track_ids.clone(),
-                                        start_track_id: track.id.clone(),
-                                    },
-                                );
-                                self.active_tab = super::types::AppTab::Play;
-                            }
-                            self.render_track_context_menu(ui, response, &track.id, &selected_album.track_ids);
+                        let row = egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_width(card_width);
+                            ui.strong(&track.title);
                             if let Some(track_number) = track.track_number {
                                 ui.small(format!("{:02} / {}", track_number, self.track_secondary_line(track)));
                             } else {
                                 ui.small(self.track_secondary_line(track));
                             }
                         });
+                        let response = ui.interact(
+                            row.response.rect,
+                            ui.make_persistent_id(("album-track-row", &track.id.0)),
+                            egui::Sense::click(),
+                        );
+                        if response.clicked() {
+                            self.state.handle(
+                                &self.config_store,
+                                AppCommand::BuildQueueAndPlay {
+                                    track_ids: selected_album.track_ids.clone(),
+                                    start_track_id: track.id.clone(),
+                                },
+                            );
+                            self.active_tab = super::types::AppTab::Play;
+                        }
+                        self.render_track_context_menu(ui, response, &track.id, &selected_album.track_ids);
                         ui.add_space(8.0);
                     }
                 });
@@ -362,7 +367,9 @@ impl LrcPlayerApp {
                 }
             });
 
-            egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("artist-track-list")
+                .show(&mut columns[1], |ui| {
                 let Some(selected_artist) = artists
                     .iter()
                     .find(|artist| self.selected_artist_name.as_deref() == Some(artist.name.as_str()))
@@ -685,30 +692,32 @@ impl LrcPlayerApp {
         }
 
         for track in tracks {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
+            let row = egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     self.render_track_artwork(ui, ctx, track, 56.0);
                     ui.vertical(|ui| {
-                        let response = ui.selectable_label(
-                            self.current_track_id() == Some(&track.id),
-                            &track.title,
-                        );
-                        if response.clicked() {
-                            self.state.handle(
-                                &self.config_store,
-                                AppCommand::BuildQueueAndPlay {
-                                    track_ids: visible_track_ids.to_vec(),
-                                    start_track_id: track.id.clone(),
-                                },
-                            );
-                            self.active_tab = super::types::AppTab::Play;
-                        }
-                        self.render_track_context_menu(ui, response, &track.id, visible_track_ids);
+                        ui.strong(&track.title);
                         ui.label(self.track_secondary_line(track));
                         ui.small(track.file_name.clone());
                     });
                 });
             });
+            let response = ui.interact(
+                row.response.rect,
+                ui.make_persistent_id(("track-list-row", &track.id.0)),
+                egui::Sense::click(),
+            );
+            if response.clicked() {
+                self.state.handle(
+                    &self.config_store,
+                    AppCommand::BuildQueueAndPlay {
+                        track_ids: visible_track_ids.to_vec(),
+                        start_track_id: track.id.clone(),
+                    },
+                );
+                self.active_tab = super::types::AppTab::Play;
+            }
+            self.render_track_context_menu(ui, response, &track.id, visible_track_ids);
             ui.add_space(8.0);
         }
     }
@@ -803,19 +812,8 @@ impl LrcPlayerApp {
             } else {
                 ui.visuals().extreme_bg_color
             });
-            frame.show(ui, |ui| {
-                let response = ui.selectable_label(selected, &track.title);
-                if response.clicked() {
-                    self.state.handle(
-                        &self.config_store,
-                        AppCommand::BuildQueueAndPlay {
-                            track_ids: visible_track_ids.to_vec(),
-                            start_track_id: track.id.clone(),
-                        },
-                    );
-                    self.active_tab = super::types::AppTab::Play;
-                }
-                self.render_track_context_menu(ui, response, &track.id, visible_track_ids);
+            let row = frame.show(ui, |ui| {
+                ui.strong(&track.title);
                 ui.small(format!("{} / {}", track.artist, track.album));
                 if self.state.config.show_library_track_paths {
                     ui.monospace(&track.full_path);
@@ -826,6 +824,22 @@ impl LrcPlayerApp {
                     }
                 }
             });
+            let response = ui.interact(
+                row.response.rect,
+                ui.make_persistent_id(("library-row", &track.id.0)),
+                egui::Sense::click(),
+            );
+            if response.clicked() {
+                self.state.handle(
+                    &self.config_store,
+                    AppCommand::BuildQueueAndPlay {
+                        track_ids: visible_track_ids.to_vec(),
+                        start_track_id: track.id.clone(),
+                    },
+                );
+                self.active_tab = super::types::AppTab::Play;
+            }
+            self.render_track_context_menu(ui, response, &track.id, visible_track_ids);
             ui.add_space(8.0);
         }
     }
@@ -1103,7 +1117,7 @@ impl LrcPlayerApp {
         size: f32,
     ) {
         let cache_key = format!("art:{}", track.id.0);
-        if let Some(texture_id) = self.ensure_artwork_texture(ctx, &cache_key, track.artwork.as_deref()) {
+        if let Some(texture_id) = self.ensure_artwork_texture(ctx, &cache_key, track) {
             ui.image((texture_id, egui::vec2(size, size)));
             return;
         }
@@ -1125,10 +1139,21 @@ impl LrcPlayerApp {
         &mut self,
         ctx: &egui::Context,
         cache_key: &str,
-        artwork_bytes: Option<&[u8]>,
+        track: &Track,
     ) -> Option<egui::TextureId> {
+        if self.missing_artwork.contains(cache_key) {
+            return None;
+        }
+
         if !self.artwork_cache.contains_key(cache_key) {
-            let bytes = artwork_bytes?;
+            let owned_artwork = track
+                .artwork
+                .clone()
+                .or_else(|| load_artwork_from_file(Path::new(track.file_path())));
+            let Some(bytes) = owned_artwork.as_deref() else {
+                self.missing_artwork.insert(cache_key.to_string());
+                return None;
+            };
             let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
             let image = reader.decode().ok()?.to_rgba8();
             let image_size = [image.width() as usize, image.height() as usize];
@@ -1191,4 +1216,14 @@ impl LrcPlayerApp {
         }
         self.cached_artists.clone()
     }
+}
+
+fn load_artwork_from_file(path: &Path) -> Option<Vec<u8>> {
+    let tagged_file = Probe::open(path).ok()?.guess_file_type().ok()?.read().ok()?;
+    tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag())
+        .and_then(|tag| tag.pictures().first())
+        .map(|picture| picture.data().to_vec())
+        .filter(|bytes| !bytes.is_empty())
 }

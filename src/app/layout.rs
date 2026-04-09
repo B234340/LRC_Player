@@ -46,9 +46,9 @@ impl eframe::App for LrcPlayerApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
-            AppTab::Queue => {
+            AppTab::Queue | AppTab::Album | AppTab::Artist => {
                 ui.set_min_width(ui.available_width());
-                self.render_queue_tab(ui, ctx);
+                self.render_active_tab(ui, ctx);
             }
             _ => {
                 egui::ScrollArea::vertical()
