@@ -27,9 +27,14 @@ pub struct Track {
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub composer: Option<String>,
     pub duration_ms: Option<u64>,
+    pub track_number: Option<u32>,
+    pub file_name: String,
     pub location: TrackLocation,
     pub lyric_path: Option<String>,
+    pub artwork: Option<Vec<u8>>,
 }
 
 impl Track {
@@ -59,7 +64,8 @@ pub enum QueueMode {
 
 #[derive(Debug, Clone)]
 pub struct QueueState {
-    pub current_track: Option<TrackId>,
+    pub track_ids: Vec<TrackId>,
+    pub current_index: Option<usize>,
     pub repeat_mode: RepeatMode,
     pub queue_mode: QueueMode,
 }
@@ -67,9 +73,17 @@ pub struct QueueState {
 impl Default for QueueState {
     fn default() -> Self {
         Self {
-            current_track: None,
+            track_ids: Vec::new(),
+            current_index: None,
             repeat_mode: RepeatMode::Off,
             queue_mode: QueueMode::Sequential,
         }
+    }
+}
+
+impl QueueState {
+    pub fn current_track_id(&self) -> Option<&TrackId> {
+        let index = self.current_index?;
+        self.track_ids.get(index)
     }
 }

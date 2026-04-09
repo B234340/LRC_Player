@@ -1,10 +1,14 @@
 use crate::core::config::ConfigStore;
-use crate::core::models::TrackId;
+use crate::core::models::{QueueMode, RepeatMode, Track, TrackId};
+use crate::core::player::PlaybackStatus;
 use crate::core::state::{AppCommand, AppState};
 use eframe::egui;
+use image::ImageReader;
 use rfd::FileDialog;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,8 +16,19 @@ use std::sync::Arc;
 enum AppTab {
     Queue,
     Play,
+    Album,
+    Artist,
+    Playlist,
     Library,
     Scan,
+    Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArtistKind {
+    Artist,
+    AlbumArtist,
+    Composer,
 }
 
 #[derive(Default)]
@@ -26,15 +41,38 @@ struct DirectoryNode {
 struct LibraryTrackView {
     id: TrackId,
     title: String,
+    artist: String,
+    album: String,
     full_path: String,
     lyric_path: Option<String>,
+}
+
+#[derive(Clone)]
+struct AlbumView {
+    key: String,
+    title: String,
+    subtitle: String,
+    track_ids: Vec<TrackId>,
+    preview_track_id: TrackId,
+}
+
+#[derive(Clone)]
+struct ArtistView {
+    name: String,
+    track_ids: Vec<TrackId>,
 }
 
 pub struct LrcPlayerApp {
     config_store: ConfigStore,
     state: AppState,
-    directory_path_input: String,
+    include_path_input: String,
+    exclude_path_input: String,
+    playlist_name_input: String,
     active_tab: AppTab,
+    artist_kind: ArtistKind,
+    selected_album_key: Option<String>,
+    selected_artist_name: Option<String>,
+    artwork_cache: HashMap<String, egui::TextureHandle>,
 }
 
 impl LrcPlayerApp {
@@ -47,16 +85,25 @@ impl LrcPlayerApp {
         Self {
             config_store,
             state,
-            directory_path_input: String::new(),
+            include_path_input: String::new(),
+            exclude_path_input: String::new(),
+            playlist_name_input: String::new(),
             active_tab: AppTab::Play,
+            artist_kind: ArtistKind::Artist,
+            selected_album_key: None,
+            selected_artist_name: None,
+            artwork_cache: HashMap::new(),
         }
     }
 }
 
 impl eframe::App for LrcPlayerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.state.refresh();
+        self.apply_theme(ctx);
+
         ctx.style_mut(|style| {
-            style.spacing.interact_size = egui::vec2(80.0, 40.0);
+            style.spacing.interact_size = egui::vec2(84.0, 42.0);
             style.spacing.button_padding = egui::vec2(12.0, 10.0);
             style.spacing.scroll = egui::style::ScrollStyle {
                 bar_width: 24.0,
@@ -74,7 +121,7 @@ impl eframe::App for LrcPlayerApp {
             ui.horizontal_wrapped(|ui| {
                 ui.heading("LRC Player");
                 ui.separator();
-                ui.label("Portable audio player scaffold");
+                ui.label("Portable queue-driven music player");
             });
 
             ui.add_space(8.0);
@@ -86,6 +133,8 @@ impl eframe::App for LrcPlayerApp {
                 ui.label(&self.state.status_line);
                 ui.separator();
                 ui.label(format!("Theme: {}", self.state.config.theme));
+                ui.separator();
+                ui.label(format!("Library: {} tracks", self.state.library.track_count()));
             });
         });
 
@@ -94,19 +143,31 @@ impl eframe::App for LrcPlayerApp {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                self.render_active_tab(ui);
+                    self.render_active_tab(ui, ctx);
                 });
         });
     }
 }
 
 impl LrcPlayerApp {
+    fn apply_theme(&self, ctx: &egui::Context) {
+        match self.state.config.theme.as_str() {
+            "light" => ctx.set_visuals(egui::Visuals::light()),
+            "dark" => ctx.set_visuals(egui::Visuals::dark()),
+            _ => {}
+        }
+    }
+
     fn render_tab_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             self.render_tab_button(ui, AppTab::Queue, "Queue");
             self.render_tab_button(ui, AppTab::Play, "Play");
+            self.render_tab_button(ui, AppTab::Album, "Album");
+            self.render_tab_button(ui, AppTab::Artist, "Artist");
+            self.render_tab_button(ui, AppTab::Playlist, "Playlist");
             self.render_tab_button(ui, AppTab::Library, "Library");
             self.render_tab_button(ui, AppTab::Scan, "Scan");
+            self.render_tab_button(ui, AppTab::Settings, "Settings");
         });
     }
 
@@ -125,214 +186,698 @@ impl LrcPlayerApp {
         }
     }
 
-    fn render_active_tab(&mut self, ui: &mut egui::Ui) {
+    fn render_active_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         match self.active_tab {
-            AppTab::Queue => self.render_queue_tab(ui),
-            AppTab::Play => self.render_play_tab(ui),
+            AppTab::Queue => self.render_queue_tab(ui, ctx),
+            AppTab::Play => self.render_play_tab(ui, ctx),
+            AppTab::Album => self.render_album_tab(ui, ctx),
+            AppTab::Artist => self.render_artist_tab(ui, ctx),
+            AppTab::Playlist => self.render_playlist_tab(ui, ctx),
             AppTab::Library => self.render_library_tab(ui),
             AppTab::Scan => self.render_scan_tab(ui),
+            AppTab::Settings => self.render_settings_tab(ui),
         }
     }
 
-    fn render_queue_tab(&mut self, ui: &mut egui::Ui) {
+    fn render_queue_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Queue");
-        ui.label("Current queue order follows the scanned library order.");
+        ui.label("Current playback order. Click a row to jump there. Reorder with the up/down controls.");
 
         ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Repeat");
+            ui.selectable_value(&mut self.state.queue.repeat_mode, RepeatMode::Off, "Off");
+            ui.selectable_value(&mut self.state.queue.repeat_mode, RepeatMode::One, "Single");
+            ui.selectable_value(&mut self.state.queue.repeat_mode, RepeatMode::All, "Queue");
+            ui.separator();
+            ui.label("Order");
+            ui.selectable_value(&mut self.state.queue.queue_mode, QueueMode::Sequential, "Sequential");
+            ui.selectable_value(&mut self.state.queue.queue_mode, QueueMode::Shuffle, "Random");
+        });
 
-        if self.state.library.tracks().is_empty() {
-            ui.label("No tracks available. Open the Scan tab and scan a directory first.");
+        if self.state.queue.track_ids.is_empty() {
+            ui.add_space(12.0);
+            ui.label("Queue is empty. Click a track in Album, Artist, Playlist, or Library to build a new queue.");
             return;
         }
 
-        if let Some(track) = self.state.selected_track() {
-            ui.label(format!("Current track: {}", track.title));
-            ui.label(self.queue_track_label(track.title.as_str(), track.artist.as_deref()));
-        } else {
-            ui.label("No track selected.");
+        let queue_track_ids = self.state.queue.track_ids.clone();
+        let current_track_id = self.current_track_id().cloned();
+
+        for (index, track_id) in queue_track_ids.iter().enumerate() {
+            let Some(track) = self.state.library.track_by_id(track_id).cloned() else {
+                continue;
+            };
+
+            let is_current = current_track_id.as_ref() == Some(&track.id);
+            egui::Frame::group(ui.style())
+                .fill(if is_current {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().extreme_bg_color
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        self.render_track_artwork(ui, ctx, &track, 72.0);
+                        ui.vertical(|ui| {
+                            let response = ui.selectable_label(is_current, &track.title);
+                            if response.clicked() {
+                                self.state
+                                    .handle(&self.config_store, AppCommand::JumpToQueueTrack(track.id.clone()));
+                            }
+                            self.render_track_context_menu(ui, response, &track.id, &queue_track_ids);
+                            ui.label(self.track_secondary_line(&track));
+                            ui.small(track.album.clone().unwrap_or_else(|| String::from("Unknown album")));
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Down").clicked() && index + 1 < queue_track_ids.len() {
+                                self.state.handle(
+                                    &self.config_store,
+                                    AppCommand::MoveQueueItem {
+                                        from: index,
+                                        to: index + 1,
+                                    },
+                                );
+                            }
+                            if ui.button("Up").clicked() && index > 0 {
+                                self.state.handle(
+                                    &self.config_store,
+                                    AppCommand::MoveQueueItem {
+                                        from: index,
+                                        to: index - 1,
+                                    },
+                                );
+                            }
+                            ui.label(format!("#{}", index + 1));
+                        });
+                    });
+                });
+            ui.add_space(8.0);
         }
 
-        ui.add_space(16.0);
-        ui.group(|ui| {
-            ui.label("Queue order");
+        self.state
+            .handle(&self.config_store, AppCommand::SetRepeatMode(self.state.queue.repeat_mode));
+        self.state
+            .handle(&self.config_store, AppCommand::SetQueueMode(self.state.queue.queue_mode));
+    }
 
-            let mut clicked_track_id = None;
-            for track in self.state.library.tracks() {
-                let selected = self.is_selected_track(&track.id);
-                if ui
-                    .selectable_label(
-                        selected,
-                        self.queue_track_label(track.title.as_str(), track.artist.as_deref()),
-                    )
-                    .clicked()
-                {
-                    clicked_track_id = Some(track.id.clone());
+    fn render_play_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Play");
+        ui.label(self.state.playback_summary());
+
+        ui.add_space(12.0);
+
+        let Some(track) = self.current_track().cloned().or_else(|| self.state.selected_track().cloned()) else {
+            ui.label("No track selected.");
+            return;
+        };
+
+        let available = ui.available_size_before_wrap();
+        let art_size = available.x.min(available.y.max(280.0)) * 0.6;
+        ui.vertical_centered(|ui| {
+            self.render_track_artwork(ui, ctx, &track, art_size.clamp(180.0, 420.0));
+            ui.add_space(12.0);
+            ui.heading(&track.title);
+            ui.label(self.track_secondary_line(&track));
+            ui.label(track.album.clone().unwrap_or_else(|| String::from("Unknown album")));
+        });
+
+        ui.add_space(18.0);
+
+        let snapshot = self.state.playback_snapshot();
+        let duration_ms = track.duration_ms.unwrap_or(0);
+        let mut seek_value = snapshot.position_ms.min(duration_ms) as f64;
+        let slider = egui::Slider::new(&mut seek_value, 0.0..=duration_ms.max(1) as f64)
+            .show_value(false)
+            .trailing_fill(true)
+            .text("Position");
+        let response = ui.add_sized([ui.available_width(), 40.0], slider);
+        if response.changed() {
+            self.state
+                .handle(&self.config_store, AppCommand::Seek(seek_value as u64));
+        }
+
+        ui.horizontal(|ui| {
+            ui.label(format_duration(snapshot.position_ms));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(format_duration(duration_ms));
+            });
+        });
+
+        ui.add_space(18.0);
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+            ui.horizontal_centered(|ui| {
+                if ui.button("Previous").clicked() {
+                    self.state.handle(&self.config_store, AppCommand::PreviousTrack);
                 }
-                ui.add_space(8.0);
-            }
 
-            if let Some(track_id) = clicked_track_id {
-                self.state
-                    .handle(&self.config_store, AppCommand::SelectTrack(track_id));
-            }
+                match snapshot.status {
+                    PlaybackStatus::Playing => {
+                        if ui.button("Pause").clicked() {
+                            self.state.handle(&self.config_store, AppCommand::Pause);
+                        }
+                    }
+                    PlaybackStatus::Paused => {
+                        if ui.button("Resume").clicked() {
+                            self.state.handle(&self.config_store, AppCommand::Resume);
+                        }
+                    }
+                    PlaybackStatus::Stopped => {
+                        if ui.button("Play").clicked() {
+                            self.state.handle(&self.config_store, AppCommand::PlaySelected);
+                        }
+                    }
+                }
+
+                if ui.button("Next").clicked() {
+                    self.state.handle(&self.config_store, AppCommand::NextTrack);
+                }
+            });
         });
     }
 
-    fn render_play_tab(&mut self, ui: &mut egui::Ui) {
-        let playback_snapshot = self.state.playback_snapshot();
+    fn render_album_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Album");
+        ui.label("Albums are grouped from tags, with tracks available below the selected album.");
 
-        ui.heading("Now Playing");
-        ui.label(self.state.playback_summary());
-
-        if let Some(track) = self.state.selected_track() {
-            ui.add_space(8.0);
-            ui.label(format!("Selected track: {}", track.title));
-            ui.monospace(track.file_path());
+        let albums = self.build_album_views();
+        if albums.is_empty() {
+            ui.add_space(12.0);
+            ui.label("No albums available. Scan at least one directory first.");
+            return;
         }
 
-        ui.add_space(8.0);
+        ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Play").clicked() {
-                self.state
-                    .handle(&self.config_store, AppCommand::PlaySelected);
-            }
-
-            match playback_snapshot.status {
-                crate::core::player::PlaybackStatus::Playing => {
-                    if ui.button("Pause").clicked() {
-                        self.state.handle(&self.config_store, AppCommand::Pause);
+            for album in &albums {
+                let selected = self.selected_album_key.as_deref() == Some(album.key.as_str());
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(180.0);
+                    if let Some(track) = self.state.library.track_by_id(&album.preview_track_id).cloned() {
+                        self.render_track_artwork(ui, ctx, &track, 160.0);
                     }
-                }
-                crate::core::player::PlaybackStatus::Paused => {
-                    if ui.button("Resume").clicked() {
-                        self.state.handle(&self.config_store, AppCommand::Resume);
-                    }
-                }
-                crate::core::player::PlaybackStatus::Stopped => {}
-            }
 
-            if ui.button("Stop").clicked() {
-                self.state.handle(&self.config_store, AppCommand::Stop);
+                    if ui.selectable_label(selected, &album.title).clicked() {
+                        self.selected_album_key = Some(album.key.clone());
+                    }
+                    ui.small(&album.subtitle);
+                    ui.small(format!("{} tracks", album.track_ids.len()));
+                });
+                ui.add_space(8.0);
             }
         });
 
-        ui.add_space(16.0);
-        ui.group(|ui| {
-            ui.label("Current design constraints");
-            ui.label("- All mutable files stay inside the application directory.");
-            ui.label("- Core logic remains independent from UI toolkit details.");
-            ui.label("- Audio playback is decoded with symphonia and output via cpal.");
+        if self.selected_album_key.is_none() {
+            self.selected_album_key = albums.first().map(|album| album.key.clone());
+        }
+
+        let Some(selected_album) = albums
+            .iter()
+            .find(|album| self.selected_album_key.as_deref() == Some(album.key.as_str()))
+            .cloned()
+        else {
+            return;
+        };
+
+        ui.add_space(18.0);
+        ui.heading(format!("Album Tracks: {}", selected_album.title));
+        let mut tracks = selected_album
+            .track_ids
+            .iter()
+            .filter_map(|track_id| self.state.library.track_by_id(track_id).cloned())
+            .collect::<Vec<_>>();
+        tracks.sort_by(|left, right| {
+            left.track_number
+                .unwrap_or(u32::MAX)
+                .cmp(&right.track_number.unwrap_or(u32::MAX))
+                .then_with(|| left.file_name.cmp(&right.file_name))
+        });
+        self.render_track_list(ui, ctx, &tracks, &selected_album.track_ids);
+    }
+
+    fn render_artist_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Artist");
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.artist_kind, ArtistKind::Artist, "Artist");
+            ui.selectable_value(&mut self.artist_kind, ArtistKind::AlbumArtist, "Album Artist");
+            ui.selectable_value(&mut self.artist_kind, ArtistKind::Composer, "Composer");
+        });
+
+        let artists = self.build_artist_views();
+        if artists.is_empty() {
+            ui.add_space(12.0);
+            ui.label("No artist information is available in the scanned library.");
+            return;
+        }
+
+        if self.selected_artist_name.is_none() {
+            self.selected_artist_name = artists.first().map(|artist| artist.name.clone());
+        }
+
+        ui.add_space(12.0);
+        ui.columns(2, |columns| {
+            egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
+                for artist in &artists {
+                    let selected = self.selected_artist_name.as_deref() == Some(artist.name.as_str());
+                    if ui.selectable_label(selected, &artist.name).clicked() {
+                        self.selected_artist_name = Some(artist.name.clone());
+                    }
+                }
+            });
+
+            egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
+                let Some(selected_artist) = artists
+                    .iter()
+                    .find(|artist| self.selected_artist_name.as_deref() == Some(artist.name.as_str()))
+                    .cloned()
+                else {
+                    return;
+                };
+
+                let mut tracks = selected_artist
+                    .track_ids
+                    .iter()
+                    .filter_map(|track_id| self.state.library.track_by_id(track_id).cloned())
+                    .collect::<Vec<_>>();
+                tracks.sort_by(|left, right| {
+                    left.album
+                        .clone()
+                        .unwrap_or_default()
+                        .cmp(&right.album.clone().unwrap_or_default())
+                        .then_with(|| left.file_name.cmp(&right.file_name))
+                });
+
+                self.render_track_list(ui, ctx, &tracks, &selected_artist.track_ids);
+            });
+        });
+    }
+
+    fn render_playlist_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Playlist");
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.playlist_name_input)
+                    .hint_text("New playlist name")
+                    .desired_width(260.0),
+            );
+            if ui.button("Create playlist").clicked() {
+                self.state.handle(
+                    &self.config_store,
+                    AppCommand::CreatePlaylist(self.playlist_name_input.clone()),
+                );
+                self.playlist_name_input.clear();
+            }
+            if let Some(track) = self.state.selected_track().cloned() {
+                if let Some(selected_playlist_name) = self.state.selected_playlist_name.clone() {
+                    if ui.button("Add selected track").clicked() {
+                        self.state.handle(
+                            &self.config_store,
+                            AppCommand::AddTrackToPlaylist {
+                                playlist_name: selected_playlist_name,
+                                track_id: track.id,
+                            },
+                        );
+                    }
+                }
+            }
+        });
+
+        ui.add_space(12.0);
+        ui.columns(2, |columns| {
+            egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
+                if self.state.playlists.is_empty() {
+                    ui.label("No playlists yet.");
+                    return;
+                }
+
+                let playlist_names = self
+                    .state
+                    .playlists
+                    .iter()
+                    .map(|playlist| playlist.name.clone())
+                    .collect::<Vec<_>>();
+
+                for playlist_name in playlist_names {
+                    let selected = self.state.selected_playlist_name.as_deref() == Some(playlist_name.as_str());
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(selected, &playlist_name).clicked() {
+                            self.state.handle(
+                                &self.config_store,
+                                AppCommand::SelectPlaylist(Some(playlist_name.clone())),
+                            );
+                        }
+                        if ui.button("Delete").clicked() {
+                            self.state.handle(
+                                &self.config_store,
+                                AppCommand::DeletePlaylist(playlist_name.clone()),
+                            );
+                        }
+                    });
+                }
+            });
+
+            egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
+                let Some(selected_playlist_name) = self.state.selected_playlist_name.clone() else {
+                    ui.label("Select a playlist.");
+                    return;
+                };
+
+                let playlist_track_ids = self
+                    .state
+                    .playlists
+                    .iter()
+                    .find(|playlist| playlist.name == selected_playlist_name)
+                    .map(|playlist| playlist.track_ids.clone())
+                    .unwrap_or_default();
+                let tracks = playlist_track_ids
+                    .iter()
+                    .filter_map(|track_id| self.state.library.track_by_id(track_id).cloned())
+                    .collect::<Vec<_>>();
+
+                self.render_track_list(ui, ctx, &tracks, &playlist_track_ids);
+
+                if !playlist_track_ids.is_empty() {
+                    ui.add_space(12.0);
+                    let removable_ids = playlist_track_ids.clone();
+                    for track_id in removable_ids {
+                        if ui.button(format!("Remove {}", self.track_title(&track_id))).clicked() {
+                            self.state.handle(
+                                &self.config_store,
+                                AppCommand::RemoveTrackFromPlaylist {
+                                    playlist_name: selected_playlist_name.clone(),
+                                    track_id,
+                                },
+                            );
+                        }
+                    }
+                }
+            });
         });
     }
 
     fn render_library_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("Library");
-        ui.label("Scanned tracks by directory");
-
-        ui.add_space(12.0);
+        ui.label("Directory tree view of the registered library folders.");
 
         if self.state.library.tracks().is_empty() {
+            ui.add_space(12.0);
             ui.label("No directory scanned.");
-        } else {
-            let tree = self.build_library_tree();
-            let mut clicked_track_id = None;
-
-            for (root_label, root_node) in tree {
-                egui::CollapsingHeader::new(root_label)
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        self.render_directory_node(ui, &root_node, &mut clicked_track_id);
-                    });
-                ui.add_space(8.0);
-            }
-
-            if let Some(track_id) = clicked_track_id {
-                self.state
-                    .handle(&self.config_store, AppCommand::SelectTrack(track_id));
-            }
+            return;
         }
 
-        ui.add_space(12.0);
-        ui.group(|ui| {
-            ui.label(format!("Indexed tracks: {}", self.state.library.track_count()));
-            ui.label("Library shows the scanned folder structure. Selecting a track changes the target for Play.");
-        });
+        let tree = self.build_library_tree();
+        let library_track_ids = self
+            .state
+            .library
+            .tracks()
+            .iter()
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>();
+
+        for (root_label, root_node) in tree {
+            egui::CollapsingHeader::new(root_label)
+                .default_open(false)
+                .show(ui, |ui| {
+                    self.render_directory_node(ui, &root_node, &library_track_ids);
+                });
+            ui.add_space(8.0);
+        }
     }
 
     fn render_scan_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("Scan");
-        ui.label("Choose a music directory and scan it recursively.");
+        ui.label("Register include and exclude folders for library scanning.");
 
-        ui.add_space(16.0);
-        ui.label("Music directory path");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.directory_path_input)
-                .desired_width(f32::INFINITY)
-                .hint_text("/path/to/music or C:/Music"),
-        );
-
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Browse folder...").clicked() {
-                self.pick_audio_directory();
-            }
-
-            if ui.button("Scan directory").clicked() {
-                self.state.handle(
-                    &self.config_store,
-                    AppCommand::OpenAudioDirectory(self.directory_path_input.clone()),
-                );
-            }
-
-            if ui.button("Save current config").clicked() {
-                self.state
-                    .handle(&self.config_store, AppCommand::SaveConfig);
-            }
-        });
-
-        ui.add_space(16.0);
+        ui.add_space(12.0);
         ui.group(|ui| {
-            ui.label("Scanned directories");
-            if self.state.config.library_folders.is_empty() {
-                ui.label("No directory saved yet.");
-            } else {
-                for folder in &self.state.config.library_folders {
-                    ui.monospace(folder);
-                }
-            }
-        });
-
-        ui.add_space(16.0);
-        ui.group(|ui| {
-            ui.label("Portable data");
-            ui.label("Config, cache, playlists, and logs stay under ./data.");
-        });
-    }
-
-    fn pick_audio_directory(&mut self) {
-        let dialog = FileDialog::new().set_title("Select a music directory");
-
-        if let Some(path) = dialog.pick_folder() {
-            self.directory_path_input = path.to_string_lossy().to_string();
-            self.state.handle(
-                &self.config_store,
-                AppCommand::OpenAudioDirectory(self.directory_path_input.clone()),
+            ui.label("Include folder");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.include_path_input)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("/path/to/music"),
             );
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Browse...").clicked() {
+                    self.pick_folder(true);
+                }
+                if ui.button("Add scan folder").clicked() {
+                    self.state.handle(
+                        &self.config_store,
+                        AppCommand::AddLibraryFolder(self.include_path_input.clone()),
+                    );
+                }
+            });
+        });
+
+        ui.add_space(12.0);
+        ui.group(|ui| {
+            ui.label("Exclude folder");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.exclude_path_input)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("/path/to/skip"),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Browse...").clicked() {
+                    self.pick_folder(false);
+                }
+                if ui.button("Add excluded folder").clicked() {
+                    self.state.handle(
+                        &self.config_store,
+                        AppCommand::AddExcludedFolder(self.exclude_path_input.clone()),
+                    );
+                }
+            });
+        });
+
+        ui.add_space(16.0);
+        ui.columns(2, |columns| {
+            columns[0].group(|ui| {
+                ui.label("Scan folders");
+                let folders = self.state.config.library_folders.clone();
+                if folders.is_empty() {
+                    ui.label("No registered folders.");
+                }
+                for folder in folders {
+                    ui.horizontal(|ui| {
+                        ui.monospace(&folder);
+                        if ui.button("Remove").clicked() {
+                            self.state.handle(
+                                &self.config_store,
+                                AppCommand::RemoveLibraryFolder(folder.clone()),
+                            );
+                        }
+                    });
+                }
+            });
+
+            columns[1].group(|ui| {
+                ui.label("Excluded folders");
+                let folders = self.state.config.excluded_folders.clone();
+                if folders.is_empty() {
+                    ui.label("No exclusions configured.");
+                }
+                for folder in folders {
+                    ui.horizontal(|ui| {
+                        ui.monospace(&folder);
+                        if ui.button("Remove").clicked() {
+                            self.state.handle(
+                                &self.config_store,
+                                AppCommand::RemoveExcludedFolder(folder.clone()),
+                            );
+                        }
+                    });
+                }
+            });
+        });
+
+        ui.add_space(12.0);
+        if ui.button("Rescan now").clicked() {
+            self.state.handle(&self.config_store, AppCommand::RescanLibrary);
         }
     }
 
-    fn is_selected_track(&self, track_id: &TrackId) -> bool {
-        self.state
-            .selected_track_id
-            .as_ref()
-            .map(|selected_track_id| selected_track_id == track_id)
-            .unwrap_or(false)
+    fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Settings");
+        ui.label("Current settings are kept in the local portable data directory.");
+
+        ui.add_space(12.0);
+        let mut theme = self.state.config.theme.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut theme, String::from("system"), "System");
+            ui.selectable_value(&mut theme, String::from("light"), "Light");
+            ui.selectable_value(&mut theme, String::from("dark"), "Dark");
+        });
+        if theme != self.state.config.theme {
+            self.state.handle(&self.config_store, AppCommand::SetTheme(theme));
+        }
+
+        ui.add_space(12.0);
+        ui.group(|ui| {
+            ui.label("Portable layout");
+            ui.label("- Data stays under ./data relative to the executable.");
+            ui.label("- Scan folders and exclusions are saved to config.json.");
+            ui.label("- Queue and playlists currently live in memory for the running session.");
+        });
     }
 
-    fn queue_track_label(&self, title: &str, artist: Option<&str>) -> String {
-        match artist.filter(|artist_name| !artist_name.trim().is_empty()) {
-            Some(artist_name) => format!("{title} / {artist_name}"),
-            None => format!("{title} / Unknown artist"),
+    fn render_track_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        tracks: &[Track],
+        visible_track_ids: &[TrackId],
+    ) {
+        if tracks.is_empty() {
+            ui.label("No tracks to display.");
+            return;
+        }
+
+        for track in tracks {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    self.render_track_artwork(ui, ctx, track, 56.0);
+                    ui.vertical(|ui| {
+                        let response = ui.selectable_label(
+                            self.current_track_id() == Some(&track.id),
+                            &track.title,
+                        );
+                        if response.clicked() {
+                            self.state.handle(
+                                &self.config_store,
+                                AppCommand::BuildQueueAndPlay {
+                                    track_ids: visible_track_ids.to_vec(),
+                                    start_track_id: track.id.clone(),
+                                },
+                            );
+                            self.active_tab = AppTab::Play;
+                        }
+                        self.render_track_context_menu(ui, response, &track.id, visible_track_ids);
+                        ui.label(self.track_secondary_line(track));
+                        ui.small(track.file_name.clone());
+                    });
+                });
+            });
+            ui.add_space(8.0);
+        }
+    }
+
+    fn render_track_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: egui::Response,
+        track_id: &TrackId,
+        visible_track_ids: &[TrackId],
+    ) {
+        let track_id = track_id.clone();
+        let visible_track_ids = visible_track_ids.to_vec();
+        response.context_menu(|ui| {
+            if ui.button("Play from here").clicked() {
+                self.state.handle(
+                    &self.config_store,
+                    AppCommand::BuildQueueAndPlay {
+                        track_ids: visible_track_ids.clone(),
+                        start_track_id: track_id.clone(),
+                    },
+                );
+                self.active_tab = AppTab::Play;
+                ui.close_menu();
+            }
+
+            if ui.button("Play next").clicked() {
+                self.state
+                    .handle(&self.config_store, AppCommand::QueueTrackNext(track_id.clone()));
+                ui.close_menu();
+            }
+
+            if ui.button("Add to queue end").clicked() {
+                self.state.handle(
+                    &self.config_store,
+                    AppCommand::AppendTrackToQueue(track_id.clone()),
+                );
+                ui.close_menu();
+            }
+
+            if !self.state.playlists.is_empty() {
+                ui.separator();
+                ui.label("Add to playlist");
+                let playlists = self.state.playlists.clone();
+                for playlist in playlists {
+                    if ui.button(&playlist.name).clicked() {
+                        self.state.handle(
+                            &self.config_store,
+                            AppCommand::AddTrackToPlaylist {
+                                playlist_name: playlist.name,
+                                track_id: track_id.clone(),
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                }
+            }
+
+            ui.separator();
+            if let Some(track) = self.state.library.track_by_id(&track_id) {
+                ui.label(format!("Title: {}", track.title));
+                ui.label(format!("Artist: {}", track.artist.clone().unwrap_or_else(|| String::from("Unknown"))));
+                ui.label(format!("Album: {}", track.album.clone().unwrap_or_else(|| String::from("Unknown"))));
+                ui.monospace(track.file_path());
+            }
+        });
+        let _ = ui;
+    }
+
+    fn render_directory_node(
+        &mut self,
+        ui: &mut egui::Ui,
+        node: &DirectoryNode,
+        visible_track_ids: &[TrackId],
+    ) {
+        for (directory_name, child_node) in &node.children {
+            egui::CollapsingHeader::new(directory_name)
+                .default_open(false)
+                .show(ui, |ui| {
+                    self.render_directory_node(ui, child_node, visible_track_ids);
+                });
+        }
+
+        for track in &node.tracks {
+            let selected = self.current_track_id() == Some(&track.id);
+            let response = ui.selectable_label(selected, &track.title);
+            if response.clicked() {
+                self.state.handle(
+                    &self.config_store,
+                    AppCommand::BuildQueueAndPlay {
+                        track_ids: visible_track_ids.to_vec(),
+                        start_track_id: track.id.clone(),
+                    },
+                );
+                self.active_tab = AppTab::Play;
+            }
+            self.render_track_context_menu(ui, response, &track.id, visible_track_ids);
+            ui.small(format!("{} / {}", track.artist, track.album));
+            ui.monospace(&track.full_path);
+            if let Some(lyric_path) = &track.lyric_path {
+                ui.small(format!("LRC: {lyric_path}"));
+            }
+            ui.add_space(8.0);
+        }
+    }
+
+    fn pick_folder(&mut self, include_folder: bool) {
+        let dialog = FileDialog::new().set_title("Select folder");
+        if let Some(path) = dialog.pick_folder() {
+            let selected = path.to_string_lossy().to_string();
+            if include_folder {
+                self.include_path_input = selected.clone();
+                self.state
+                    .handle(&self.config_store, AppCommand::AddLibraryFolder(selected));
+            } else {
+                self.exclude_path_input = selected.clone();
+                self.state
+                    .handle(&self.config_store, AppCommand::AddExcludedFolder(selected));
+            }
         }
     }
 
@@ -352,6 +897,8 @@ impl LrcPlayerApp {
                 let track_view = LibraryTrackView {
                     id: track.id.clone(),
                     title: track.title.clone(),
+                    artist: track.artist.clone().unwrap_or_else(|| String::from("Unknown artist")),
+                    album: track.album.clone().unwrap_or_else(|| String::from("Unknown album")),
                     full_path: track.file_path().to_string(),
                     lyric_path: track.lyric_path.clone(),
                 };
@@ -361,48 +908,123 @@ impl LrcPlayerApp {
             roots.push((folder.clone(), root_node));
         }
 
-        if roots.is_empty() {
-            let mut root_node = DirectoryNode::default();
-            for track in self.state.library.tracks() {
-                let track_view = LibraryTrackView {
-                    id: track.id.clone(),
-                    title: track.title.clone(),
-                    full_path: track.file_path().to_string(),
-                    lyric_path: track.lyric_path.clone(),
-                };
-                insert_track_into_tree(&mut root_node, Path::new(track.file_path()), track_view);
-            }
-            roots.push((String::from("Library"), root_node));
-        }
-
         roots
     }
 
-    fn render_directory_node(
-        &mut self,
-        ui: &mut egui::Ui,
-        node: &DirectoryNode,
-        clicked_track_id: &mut Option<TrackId>,
-    ) {
-        for (directory_name, child_node) in &node.children {
-            egui::CollapsingHeader::new(directory_name)
-                .default_open(true)
-                .show(ui, |ui| {
-                    self.render_directory_node(ui, child_node, clicked_track_id);
+    fn build_album_views(&self) -> Vec<AlbumView> {
+        let mut albums = BTreeMap::<String, AlbumView>::new();
+
+        for track in self.state.library.tracks() {
+            let album_title = track.album.clone().unwrap_or_else(|| String::from("Unknown album"));
+            let subtitle = track
+                .album_artist
+                .clone()
+                .or_else(|| track.artist.clone())
+                .unwrap_or_else(|| String::from("Unknown artist"));
+            let key = format!("{subtitle}\u{1f}{album_title}");
+
+            albums
+                .entry(key.clone())
+                .and_modify(|album| album.track_ids.push(track.id.clone()))
+                .or_insert_with(|| AlbumView {
+                    key,
+                    title: album_title,
+                    subtitle,
+                    track_ids: vec![track.id.clone()],
+                    preview_track_id: track.id.clone(),
                 });
         }
 
-        for track in &node.tracks {
-            let selected = self.is_selected_track(&track.id);
-            if ui.selectable_label(selected, &track.title).clicked() {
-                *clicked_track_id = Some(track.id.clone());
+        albums.into_values().collect()
+    }
+
+    fn build_artist_views(&self) -> Vec<ArtistView> {
+        let mut artists = BTreeMap::<String, Vec<TrackId>>::new();
+
+        for track in self.state.library.tracks() {
+            let name = match self.artist_kind {
+                ArtistKind::Artist => track.artist.clone(),
+                ArtistKind::AlbumArtist => track.album_artist.clone(),
+                ArtistKind::Composer => track.composer.clone(),
             }
-            ui.monospace(&track.full_path);
-            if let Some(lyric_path) = &track.lyric_path {
-                ui.label(format!("LRC: {lyric_path}"));
-            }
-            ui.add_space(8.0);
+            .unwrap_or_else(|| String::from("Unknown"));
+
+            artists.entry(name).or_default().push(track.id.clone());
         }
+
+        artists
+            .into_iter()
+            .map(|(name, track_ids)| ArtistView { name, track_ids })
+            .collect()
+    }
+
+    fn render_track_artwork(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        track: &Track,
+        size: f32,
+    ) {
+        let cache_key = format!("art:{}", track.id.0);
+        if let Some(texture_id) = self.ensure_artwork_texture(ctx, &cache_key, track.artwork.as_deref()) {
+            ui.image((texture_id, egui::vec2(size, size)));
+            return;
+        }
+
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        let fill = placeholder_color(&cache_key);
+        painter.rect_filled(rect, 10.0, fill);
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            artwork_placeholder_label(track),
+            egui::FontId::proportional((size * 0.18).clamp(16.0, 36.0)),
+            egui::Color32::WHITE,
+        );
+    }
+
+    fn ensure_artwork_texture(
+        &mut self,
+        ctx: &egui::Context,
+        cache_key: &str,
+        artwork_bytes: Option<&[u8]>,
+    ) -> Option<egui::TextureId> {
+        if !self.artwork_cache.contains_key(cache_key) {
+            let bytes = artwork_bytes?;
+            let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
+            let image = reader.decode().ok()?.to_rgba8();
+            let image_size = [image.width() as usize, image.height() as usize];
+            let pixels = image.into_raw();
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(image_size, &pixels);
+            let texture = ctx.load_texture(cache_key.to_string(), color_image, egui::TextureOptions::LINEAR);
+            self.artwork_cache.insert(cache_key.to_string(), texture);
+        }
+
+        self.artwork_cache.get(cache_key).map(|texture| texture.id())
+    }
+
+    fn current_track(&self) -> Option<&Track> {
+        let track_id = self.current_track_id()?;
+        self.state.library.track_by_id(track_id)
+    }
+
+    fn current_track_id(&self) -> Option<&TrackId> {
+        self.state.queue.current_track_id()
+    }
+
+    fn track_secondary_line(&self, track: &Track) -> String {
+        let artist = track.artist.clone().unwrap_or_else(|| String::from("Unknown artist"));
+        let album = track.album.clone().unwrap_or_else(|| String::from("Unknown album"));
+        format!("{artist} / {album}")
+    }
+
+    fn track_title(&self, track_id: &TrackId) -> String {
+        self.state
+            .library
+            .track_by_id(track_id)
+            .map(|track| track.title.clone())
+            .unwrap_or_else(|| String::from("track"))
     }
 }
 
@@ -410,7 +1032,9 @@ fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
     for (font_name, font_data) in load_system_fallback_fonts() {
-        fonts.font_data.insert(font_name.clone(), Arc::new(egui::FontData::from_owned(font_data)));
+        fonts
+            .font_data
+            .insert(font_name.clone(), Arc::new(egui::FontData::from_owned(font_data)));
         if let Some(proportional_fonts) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
             proportional_fonts.insert(0, font_name.clone());
         }
@@ -435,7 +1059,6 @@ fn load_system_fallback_fonts() -> Vec<(String, Vec<u8>)> {
     ];
 
     let mut loaded_fonts = Vec::new();
-
     for (font_name, font_path) in candidates {
         if let Ok(font_data) = fs::read(font_path) {
             loaded_fonts.push((font_name.to_string(), font_data));
@@ -460,4 +1083,32 @@ fn insert_track_into_tree(node: &mut DirectoryNode, relative_path: &Path, track:
     }
 
     node.tracks.push(track);
+}
+
+fn format_duration(duration_ms: u64) -> String {
+    let total_seconds = duration_ms / 1_000;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes:02}:{seconds:02}")
+}
+
+fn placeholder_color(key: &str) -> egui::Color32 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    let hash = hasher.finish();
+    egui::Color32::from_rgb(
+        64 + ((hash >> 16) & 0x7f) as u8,
+        72 + ((hash >> 8) & 0x7f) as u8,
+        88 + (hash & 0x7f) as u8,
+    )
+}
+
+fn artwork_placeholder_label(track: &Track) -> String {
+    track
+        .album
+        .as_deref()
+        .and_then(|album| album.chars().next())
+        .or_else(|| track.title.chars().next())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| String::from("?"))
 }

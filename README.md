@@ -74,11 +74,11 @@ cargo run
 cargo build --release
 ```
 
-Current playback support is directory-based and split into tabs: use `Scan` to choose a folder, `Library` to browse the scanned directory tree, `Play` to control playback, and `Queue` to inspect the current order.
+Current playback support is directory-based and split into tabs: `Queue`, `Play`, `Album`, `Artist`, `Playlist`, `Library`, `Scan`, and `Settings`.
 
-When available, track title and artist are read from embedded file tags instead of only using the filename.
+When available, track title, artist, album, album artist, composer, and cover art are read from embedded file tags instead of only using the filename.
 
-Scanned directory paths are stored in `data/config.json`. On startup, the app automatically rescans saved directories and rebuilds the library list.
+Scanned directory paths and excluded folders are stored in `data/config.json`. On startup, the app automatically rescans saved directories and rebuilds the library list.
 
 Release binary paths:
 
@@ -193,8 +193,9 @@ Typical flow:
 
 The current version includes a real playback backend behind the player interface.
 Audio files are decoded with `symphonia` and sent to the output device with `cpal`.
-The current UI scans directories recursively for supported audio files and uses a native folder picker for convenience.
+The current UI scans directories recursively for supported audio files, supports include and exclude folders, and uses a native folder picker for convenience.
 Selected scan directories are persisted automatically, so the library can be restored on the next launch.
+Queue, album, artist, and playlist views can all build a new playback queue directly from the currently displayed track list.
 The UI also loads common system fallback fonts when available so Japanese and other non-Latin text can render correctly without bundling extra font files.
 
 ## Current scaffold direction

@@ -10,6 +10,7 @@ const CONFIG_FILE_NAME: &str = "config.json";
 pub struct AppConfig {
     pub theme: String,
     pub library_folders: Vec<String>,
+    pub excluded_folders: Vec<String>,
     pub last_playlist: Option<String>,
 }
 
@@ -18,6 +19,7 @@ impl Default for AppConfig {
         Self {
             theme: String::from("system"),
             library_folders: Vec::new(),
+            excluded_folders: Vec::new(),
             last_playlist: None,
         }
     }

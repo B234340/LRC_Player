@@ -1762,6 +1762,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2024,7 +2026,9 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "eframe",
+ "image",
  "lofty",
+ "rand 0.8.5",
  "rfd",
  "serde",
  "serde_json",
