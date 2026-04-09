@@ -38,14 +38,14 @@ impl LrcPlayerApp {
             return;
         }
 
-        let queue_track_ids = self.state.queue.track_ids.clone();
+        let queue_len = self.state.queue.track_ids.len();
         let current_track_id = self.current_track_id().cloned();
         let queue_anchor_id = if self.state.config.queue_follow_current && !self.queue_follow_paused_by_user {
             self.state
                 .queue
                 .current_index
-                .and_then(|current_index| queue_track_ids.get(current_index.saturating_sub(2)).cloned())
-                .or_else(|| queue_track_ids.first().cloned())
+                .and_then(|current_index| self.state.queue.track_ids.get(current_index.saturating_sub(2)).cloned())
+                .or_else(|| self.state.queue.track_ids.first().cloned())
         } else {
             None
         };
@@ -72,44 +72,76 @@ impl LrcPlayerApp {
             .id_salt("queue-list")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for (index, track_id) in queue_track_ids.iter().enumerate() {
-                    let Some(track) = self.state.library.track_by_id(track_id).cloned() else {
+                for index in 0..queue_len {
+                    let Some((track, is_anchor_track)) = (match self.state.queue.track_ids.get(index) {
+                        Some(track_id) => self
+                            .state
+                            .library
+                            .track_by_id(track_id)
+                            .cloned()
+                            .map(|track| (track, queue_anchor_id.as_ref() == Some(track_id))),
+                        None => None,
+                    }) else {
                         continue;
                     };
 
                     let is_current = current_track_id.as_ref() == Some(&track.id);
-                    let frame = egui::Frame::group(ui.style()).fill(if is_current {
-                        ui.visuals().selection.bg_fill
-                    } else {
-                        ui.visuals().extreme_bg_color
-                    });
-                    let (inner, dropped_payload) = ui.dnd_drop_zone::<usize, _>(frame, |ui| {
-                        ui.horizontal(|ui| {
-                            let drag_id = ui.make_persistent_id(("queue-row", &track.id.0));
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(28.0, 72.0),
-                                egui::Layout::top_down(egui::Align::Center),
-                                |ui| {
-                                    ui.dnd_drag_source(drag_id, index, |ui| {
-                                        ui.add_space(12.0);
-                                        ui.monospace("==");
-                                        ui.monospace("==");
-                                    });
-                                });
-                            
-
-                            ui.add_space(8.0);
-                            self.render_track_artwork(ui, ctx, &track, 72.0);
-                            ui.vertical(|ui| {
-                                ui.strong(&track.title);
-                                ui.label(self.track_artist_label(&track));
-                                ui.small(track.album.clone().unwrap_or_else(|| String::from("Unknown album")));
-                            });
-
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.strong(format!("#{}", index + 1));
-                            });
+                    let frame = egui::Frame::group(ui.style())
+                        .fill(if is_current {
+                            ui.visuals().selection.bg_fill
+                        } else {
+                            ui.visuals().extreme_bg_color
+                        })
+                        .stroke(if is_current {
+                            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color)
+                        } else {
+                            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
                         });
+
+                    let (inner, dropped_payload) = ui.dnd_drop_zone::<usize, _>(frame, |ui| {
+                        let drag_id = ui.make_persistent_id(("queue-row", &track.id.0));
+                        ui.dnd_drag_source(drag_id, index, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(44.0, 72.0),
+                                    egui::Layout::top_down(egui::Align::Center),
+                                    |ui| {
+                                        egui::Frame::group(ui.style())
+                                            .fill(ui.visuals().faint_bg_color)
+                                            .show(ui, |ui| {
+                                                ui.set_min_size(egui::vec2(36.0, 52.0));
+                                                ui.vertical_centered(|ui| {
+                                                    ui.add_space(6.0);
+                                                    ui.monospace("====");
+                                                    ui.monospace("====");
+                                                });
+                                            });
+                                    },
+                                );
+                                self.render_track_artwork(ui, ctx, &track, 72.0);
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(&track.title)
+                                            .strong()
+                                            .size(22.0)
+                                            .color(if is_current {
+                                                ui.visuals().strong_text_color()
+                                            } else {
+                                                ui.visuals().text_color()
+                                            }),
+                                    );
+                                    ui.label(egui::RichText::new(self.track_artist_label(&track)).size(18.0));
+                                    ui.label(
+                                        egui::RichText::new(
+                                            track.album.clone().unwrap_or_else(|| String::from("Unknown album")),
+                                        )
+                                        .size(16.0)
+                                        .color(ui.visuals().weak_text_color()),
+                                    );
+                                });
+                            });
+                        })
+                        .inner
                     });
                     let _ = inner;
                     let row_response = ui.interact(
@@ -121,10 +153,10 @@ impl LrcPlayerApp {
                         self.state
                             .handle(&self.config_store, AppCommand::JumpToQueueTrack(track.id.clone()));
                     }
-                    if should_reveal_anchor && queue_anchor_id.as_ref() == Some(&track.id) {
+                    if should_reveal_anchor && is_anchor_track {
                         row_response.scroll_to_me(Some(egui::Align::TOP));
                     }
-                    self.render_track_context_menu(ui, row_response, &track.id, &queue_track_ids);
+                    self.render_queue_track_context_menu(ui, row_response, &track.id);
                     if let Some(from_index) = dropped_payload.map(|payload| *payload) {
                         if from_index != index {
                             pending_move = Some((from_index, index));
@@ -729,14 +761,12 @@ impl LrcPlayerApp {
         track_id: &TrackId,
         visible_track_ids: &[TrackId],
     ) {
-        let track_id = track_id.clone();
-        let visible_track_ids = visible_track_ids.to_vec();
         response.context_menu(|ui| {
             if ui.button("Play from here").clicked() {
                 self.state.handle(
                     &self.config_store,
                     AppCommand::BuildQueueAndPlay {
-                        track_ids: visible_track_ids.clone(),
+                        track_ids: visible_track_ids.to_vec(),
                         start_track_id: track_id.clone(),
                     },
                 );
@@ -761,13 +791,78 @@ impl LrcPlayerApp {
             if !self.state.playlists.is_empty() {
                 ui.separator();
                 ui.label("Add to playlist");
-                let playlists = self.state.playlists.clone();
-                for playlist in playlists {
-                    if ui.button(&playlist.name).clicked() {
+                let playlist_names = self
+                    .state
+                    .playlists
+                    .iter()
+                    .map(|playlist| playlist.name.clone())
+                    .collect::<Vec<_>>();
+                for playlist_name in playlist_names {
+                    if ui.button(&playlist_name).clicked() {
                         self.state.handle(
                             &self.config_store,
                             AppCommand::AddTrackToPlaylist {
-                                playlist_name: playlist.name,
+                                playlist_name,
+                                track_id: track_id.clone(),
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                }
+            }
+
+            ui.separator();
+            if ui.button("Show details").clicked() {
+                self.detail_track_id = Some(track_id.clone());
+                ui.close_menu();
+            }
+        });
+        let _ = ui;
+    }
+
+    fn render_queue_track_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: egui::Response,
+        track_id: &TrackId,
+    ) {
+        response.context_menu(|ui| {
+            if ui.button("Play from here").clicked() {
+                self.state
+                    .handle(&self.config_store, AppCommand::JumpToQueueTrack(track_id.clone()));
+                self.active_tab = super::types::AppTab::Play;
+                ui.close_menu();
+            }
+
+            if ui.button("Play next").clicked() {
+                self.state
+                    .handle(&self.config_store, AppCommand::QueueTrackNext(track_id.clone()));
+                ui.close_menu();
+            }
+
+            if ui.button("Add to queue end").clicked() {
+                self.state.handle(
+                    &self.config_store,
+                    AppCommand::AppendTrackToQueue(track_id.clone()),
+                );
+                ui.close_menu();
+            }
+
+            if !self.state.playlists.is_empty() {
+                ui.separator();
+                ui.label("Add to playlist");
+                let playlist_names = self
+                    .state
+                    .playlists
+                    .iter()
+                    .map(|playlist| playlist.name.clone())
+                    .collect::<Vec<_>>();
+                for playlist_name in playlist_names {
+                    if ui.button(&playlist_name).clicked() {
+                        self.state.handle(
+                            &self.config_store,
+                            AppCommand::AddTrackToPlaylist {
+                                playlist_name,
                                 track_id: track_id.clone(),
                             },
                         );
