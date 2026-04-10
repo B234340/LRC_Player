@@ -207,6 +207,58 @@ impl AudioDeviceOutput {
 
         Ok(Self { _stream: stream })
     }
+
+    pub fn list_output_devices() -> Vec<String> {
+        let host = cpal::default_host();
+        match host.output_devices() {
+            Ok(devices) => devices
+                .filter_map(|d| d.name().ok())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub fn try_start_by_name(buffered_output: &BufferedAudioOutput, device_name: &str) -> Result<Self, String> {
+        let host = cpal::default_host();
+        let mut selected = None;
+
+        let devices = host
+            .output_devices()
+            .map_err(|e| format!("failed to enumerate output devices: {e}"))?;
+
+        for device in devices {
+            if let Ok(name) = device.name() {
+                if name == device_name {
+                    selected = Some(device);
+                    break;
+                }
+            }
+        }
+
+        let device = selected.ok_or_else(|| format!("device '{}' not found", device_name))?;
+
+        let supported = device
+            .default_output_config()
+            .map_err(|error| format!("failed to query default output config: {error}"))?;
+        let stream_config = supported.config();
+        let queue = buffered_output.shared_queue();
+        let playback_active = buffered_output.shared_playback_active();
+        let pending_samples = buffered_output.shared_pending_samples();
+        let reset_epoch = buffered_output.shared_reset_epoch();
+
+        let stream = match supported.sample_format() {
+            SampleFormat::F32 => build_output_stream::<f32>(&device, &stream_config, queue, playback_active, pending_samples, reset_epoch),
+            SampleFormat::I16 => build_output_stream::<i16>(&device, &stream_config, queue, playback_active, pending_samples, reset_epoch),
+            SampleFormat::U16 => build_output_stream::<u16>(&device, &stream_config, queue, playback_active, pending_samples, reset_epoch),
+            other => Err(format!("unsupported output sample format: {other:?}")),
+        }?;
+
+        stream
+            .play()
+            .map_err(|error| format!("failed to start output stream: {error}"))?;
+
+        Ok(Self { _stream: stream })
+    }
 }
 
 fn build_output_stream<T>(

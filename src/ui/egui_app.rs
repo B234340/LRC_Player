@@ -362,6 +362,26 @@ impl LrcPlayerEguiApp {
                 ui.end_row();
             }
         });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Output device");
+            let selected = view_model.settings.preferred_output_device.clone();
+            let selected_text = selected.clone().unwrap_or_else(|| "Default".to_string());
+            egui::ComboBox::from_label("")
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(selected.is_none(), "Default").clicked() {
+                        self.application.handle_command(AppCommand::SetPreferredOutputDevice { device_name: None });
+                    }
+
+                    for device in &view_model.settings.available_output_devices {
+                        if ui.selectable_label(selected == Some(device.clone()), device).clicked() {
+                            self.application.handle_command(AppCommand::SetPreferredOutputDevice { device_name: Some(device.clone()) });
+                        }
+                    }
+                });
+        });
     }
 
     fn pick_scan_directory(&mut self, include: bool) {

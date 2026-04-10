@@ -387,6 +387,15 @@ impl AppFacade {
                 self.selected_directory = node_id;
                 vec![AppEvent::TabChanged(self.current_tab)]
             }
+            AppCommand::SetPreferredOutputDevice { device_name } => {
+                self.settings.preferred_output_device = device_name.clone();
+                let audio_device = match device_name {
+                    Some(ref name) => AudioDeviceOutput::try_start_by_name(&self.audio_output, name).ok(),
+                    None => AudioDeviceOutput::try_start(&self.audio_output).ok(),
+                };
+                self._audio_device = audio_device;
+                vec![AppEvent::TabChanged(self.current_tab)]
+            }
             AppCommand::Scan(scan_command) => self.handle_scan_command(scan_command),
             AppCommand::CreatePlaylist { name } => {
                 let name_id = self.strings.intern(name);
@@ -902,6 +911,8 @@ impl AppFacade {
                     value: self.settings.play_empty_state.clone(),
                 },
             ],
+            available_output_devices: AudioDeviceOutput::list_output_devices(),
+            preferred_output_device: self.settings.preferred_output_device.clone(),
         }
     }
 

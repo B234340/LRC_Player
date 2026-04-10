@@ -54,6 +54,9 @@ pub enum AppCommand {
     SelectArtist(Option<ArtistId>),
     SelectPlaylist(Option<PlaylistId>),
     SelectDirectory(Option<DirectoryNodeId>),
+    SetPreferredOutputDevice {
+        device_name: Option<String>,
+    },
     Scan(ScanCommand),
     CreatePlaylist {
         name: String,

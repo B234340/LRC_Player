@@ -125,6 +125,8 @@ pub struct SettingItemVm {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SettingsTabVm {
     pub items: Vec<SettingItemVm>,
+    pub available_output_devices: Vec<String>,
+    pub preferred_output_device: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

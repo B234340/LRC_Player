@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +34,14 @@ pub struct PersistencePaths {
     pub playlists_json: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeviceConfig {
+    pub sample_rate: Option<u32>,
+    pub frames_per_buffer: Option<u32>,
+    pub target_buffer_ms: Option<u32>,
+    pub exclusive_mode: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfigFile {
     pub accent_color: String,
@@ -44,6 +53,8 @@ pub struct AppConfigFile {
     pub play_empty_state: String,
     pub include_dirs: Vec<PathBuf>,
     pub exclude_dirs: Vec<PathBuf>,
+    pub preferred_output_device: Option<String>,
+    pub per_device_settings: HashMap<String, DeviceConfig>,
 }
 
 impl Default for AppConfigFile {
@@ -58,6 +69,8 @@ impl Default for AppConfigFile {
             play_empty_state: "none".to_string(),
             include_dirs: Vec::new(),
             exclude_dirs: Vec::new(),
+            preferred_output_device: None,
+            per_device_settings: HashMap::new(),
         }
     }
 }
