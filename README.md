@@ -74,7 +74,7 @@ cargo run
 cargo build --release
 ```
 
-Current playback support is directory-based and split into tabs: `Queue`, `Play`, `Album`, `Artist`, `Playlist`, `Library`, `Scan`, and `Settings`.
+Current playback support is directory-based and split into tabs: `Play`, `Album`, `Artist`, `Playlist`, `Library`, `Scan`, and `Settings`.
 
 When available, track title, artist, album, album artist, composer, and cover art are read from embedded file tags instead of only using the filename.
 
@@ -195,14 +195,14 @@ The current version includes a real playback backend behind the player interface
 Audio files are decoded with `symphonia` and sent to the output device with `cpal`.
 The current UI scans directories recursively for supported audio files, supports include and exclude folders, and uses a native folder picker for convenience.
 Selected scan directories are persisted automatically, so the library can be restored on the next launch.
-Queue, album, artist, and playlist views can all build a new playback queue directly from the currently displayed track list.
+Album, artist, playlist, and library views can all start playback directly from the currently displayed track list.
 The UI also loads common system fallback fonts when available so Japanese and other non-Latin text can render correctly without bundling extra font files.
 
 ## Current scaffold direction
 
 The repository now includes the first-pass core skeleton for the next stage:
 
-- `models.rs` holds portable domain types such as tracks, playlists, queue mode, and playback mode.
+- `models.rs` holds portable domain types such as tracks and playlists.
 - `library.rs` provides an in-memory library index API that can later be backed by JSON or SQLite.
 - `lyrics.rs` contains a minimal `.lrc` parser and a lookup method for the active line at a playback position.
 - `player.rs` defines a playback trait, a `symphonia + cpal` backend, and a `NullPlayer` fallback used only when audio output cannot be initialized.
