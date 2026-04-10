@@ -72,6 +72,14 @@ impl PlaybackModel {
         self.seek_to(next_position);
     }
 
+    pub fn restore_track(&mut self, track_id: TrackId, position_ms: u64) {
+        self.current_track = Some(track_id);
+        self.position_ms = position_ms;
+        self.buffered_ms = 0;
+        self.state = PlaybackState::Paused;
+        self.resume_after_seek = PlaybackState::Paused;
+    }
+
     pub fn stop(&mut self) {
         self.state = PlaybackState::Stopped;
         self.current_track = None;
@@ -95,5 +103,16 @@ mod tests {
 
         assert_eq!(playback.state, PlaybackState::Paused);
         assert_eq!(playback.position_ms, 42_000);
+    }
+
+    #[test]
+    fn restore_track_enters_paused_state() {
+        let mut playback = PlaybackModel::default();
+
+        playback.restore_track(TrackId(7), 12_345);
+
+        assert_eq!(playback.current_track, Some(TrackId(7)));
+        assert_eq!(playback.position_ms, 12_345);
+        assert_eq!(playback.state, PlaybackState::Paused);
     }
 }

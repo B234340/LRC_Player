@@ -141,7 +141,24 @@ release workflow は `.github/workflows/release.yml` にあります。
   - `x86_64-pc-windows-gnu`
   - `x86_64-apple-darwin`
   - `aarch64-apple-darwin`
-- タグ実行時は GitHub Release に成果物を添付
+- 各 target の実行ファイルを archive 化して artifact として保存
+- タグ実行時は GitHub Release を自動作成または更新し、archive を添付
+
+自動 Releases ビルドの使い方:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+生成される成果物:
+
+- `lrc_player-x86_64-unknown-linux-gnu.tar.gz`
+- `lrc_player-x86_64-pc-windows-gnu.zip`
+- `lrc_player-x86_64-apple-darwin.tar.gz`
+- `lrc_player-aarch64-apple-darwin.tar.gz`
+
+タグなしで確認したい場合は GitHub Actions の `Release Builds` を `workflow_dispatch` で手動実行してください。この場合は artifact 生成まで行い、GitHub Release への添付は行いません。
 
 ## 現状の注意点
 

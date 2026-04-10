@@ -1,6 +1,6 @@
 name: Release Builds
 
-on:
+"on":
   workflow_dispatch:
   push:
     tags:
@@ -8,6 +8,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  BINARY_NAME: lrc_player
 
 jobs:
   build:
@@ -19,12 +22,20 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+            asset_name: lrc_player-x86_64-unknown-linux-gnu.tar.gz
+            archive_type: tar.gz
           - target: x86_64-pc-windows-gnu
             runner: ubuntu-latest
+            asset_name: lrc_player-x86_64-pc-windows-gnu.zip
+            archive_type: zip
           - target: x86_64-apple-darwin
             runner: macos-14
+            asset_name: lrc_player-x86_64-apple-darwin.tar.gz
+            archive_type: tar.gz
           - target: aarch64-apple-darwin
             runner: macos-14
+            asset_name: lrc_player-aarch64-apple-darwin.tar.gz
+            archive_type: tar.gz
 
     steps:
       - uses: actions/checkout@v4
@@ -53,11 +64,25 @@ jobs:
           TARGETS: ${{ matrix.target }}
         run: ./build_release_binaries.sh
 
+      - name: Package release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/${{ matrix.target }}
+          cp releases/${{ matrix.target }}/* dist/${{ matrix.target }}/
+
+          if [[ "${{ matrix.archive_type }}" == "zip" ]]; then
+            cd dist/${{ matrix.target }}
+            zip -9 -r ../${{ matrix.asset_name }} .
+          else
+            tar -C dist/${{ matrix.target }} -czf dist/${{ matrix.asset_name }} .
+          fi
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: releases/${{ matrix.target }}/*
+          path: dist/${{ matrix.asset_name }}
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -69,6 +94,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
+
+      - name: Show release files
+        run: find dist -type f | sort
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2

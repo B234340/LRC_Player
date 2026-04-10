@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::core::ids::StrId;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct StringInterner {
     ids_by_value: HashMap<String, StrId>,
     values: Vec<String>,

@@ -1,4 +1,5 @@
-use crate::core::ids::{PlaylistId, QueueEntryId, TrackId};
+use crate::core::ids::{AlbumId, ArtistId, PlaylistId, QueueEntryId, TrackId};
+use crate::core::library::{ArtistKind, DirectoryNodeId};
 use crate::core::persistence::TabId;
 use crate::core::scan::ScanCommand;
 
@@ -48,6 +49,11 @@ pub enum AppCommand {
     NextTrack,
     PreviousTrack,
     SelectTab(TabId),
+    SelectAlbum(Option<AlbumId>),
+    SelectArtistKind(ArtistKind),
+    SelectArtist(Option<ArtistId>),
+    SelectPlaylist(Option<PlaylistId>),
+    SelectDirectory(Option<DirectoryNodeId>),
     Scan(ScanCommand),
     CreatePlaylist {
         name: String,

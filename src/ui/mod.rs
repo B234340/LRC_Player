@@ -1,3 +1,4 @@
+pub mod egui_app;
 pub mod tabs;
 
 use crate::app::view_models::AppViewModel;

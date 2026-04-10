@@ -30,4 +30,16 @@ impl<T> RingBuffer<T> {
     pub fn len(&self) -> usize {
         self.queue.len()
     }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.queue.len() >= self.capacity
+    }
 }

@@ -83,4 +83,23 @@ impl PlaylistStore {
             .map(|playlist| playlist.tracks.contains(&track_id))
             .unwrap_or(false)
     }
+
+    pub fn replace_all(
+        &mut self,
+        playlists: Vec<Playlist>,
+        selected: Option<PlaylistId>,
+        favorite_playlist: PlaylistId,
+    ) {
+        let next_playlist_id = playlists
+            .iter()
+            .map(|playlist| playlist.id.0)
+            .max()
+            .map(|max_id| max_id + 1)
+            .unwrap_or(0);
+
+        self.playlists = playlists;
+        self.selected = selected;
+        self.favorite_playlist = favorite_playlist;
+        self.next_playlist_id = next_playlist_id;
+    }
 }
