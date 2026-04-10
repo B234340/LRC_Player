@@ -1,4 +1,5 @@
 use eframe::egui;
+use rfd::FileDialog;
 
 use crate::app::commands::{AppCommand, TrackListOrigin};
 use crate::app::view_models::{
@@ -266,14 +267,45 @@ impl LrcPlayerEguiApp {
         });
 
         ui.separator();
-        ui.label("Include directories");
+        ui.horizontal(|ui| {
+            ui.heading("Include directories");
+            if ui.button("Add...").clicked() {
+                self.pick_scan_directory(true);
+            }
+        });
         for path in &view_model.scan.include_dirs {
-            ui.label(path);
+            ui.horizontal(|ui| {
+                ui.label(path);
+                if ui.button("Remove").clicked() {
+                    self.application.handle_command(AppCommand::Scan(
+                        ScanCommand::RemoveIncludeDir(path.into()),
+                    ));
+                }
+            });
         }
+        if view_model.scan.include_dirs.is_empty() {
+            ui.label("No include directories configured");
+        }
+
         ui.separator();
-        ui.label("Exclude directories");
+        ui.horizontal(|ui| {
+            ui.heading("Exclude directories");
+            if ui.button("Add...").clicked() {
+                self.pick_scan_directory(false);
+            }
+        });
         for path in &view_model.scan.exclude_dirs {
-            ui.label(path);
+            ui.horizontal(|ui| {
+                ui.label(path);
+                if ui.button("Remove").clicked() {
+                    self.application.handle_command(AppCommand::Scan(
+                        ScanCommand::RemoveExcludeDir(path.into()),
+                    ));
+                }
+            });
+        }
+        if view_model.scan.exclude_dirs.is_empty() {
+            ui.label("No exclude directories configured");
         }
     }
 
@@ -285,6 +317,19 @@ impl LrcPlayerEguiApp {
                 ui.end_row();
             }
         });
+    }
+
+    fn pick_scan_directory(&mut self, include: bool) {
+        let Some(path) = FileDialog::new().pick_folder() else {
+            return;
+        };
+
+        let command = if include {
+            ScanCommand::AddIncludeDir(path)
+        } else {
+            ScanCommand::AddExcludeDir(path)
+        };
+        self.application.handle_command(AppCommand::Scan(command));
     }
 }
 

@@ -128,12 +128,16 @@ sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
 
 Linux 上で `x86_64-apple-darwin` と `aarch64-apple-darwin` をローカル生成するには、`osxcross` と手元で用意した Apple SDK が必要です。これらが未導入でも、GitHub Actions 側では macOS runner 上で同じ target 名の release ビルドを行います。
 
-## GitHub Actions release
+## GitHub Actions
 
 release workflow は `.github/workflows/release.yml` にあります。
+事前検証 workflow は `.github/workflows/release-check.yml` にあります。
 
 動作は次のとおりです。
 
+- `Release Validation` は `push` と `pull_request` で自動実行
+- `Release Validation` は release と同じ target 構成で「実際に release build できるか」を検証
+- `Release Validation` は先に `cargo test` を実行し、その後 target ごとの release build を確認
 - `workflow_dispatch` で手動実行可能
 - `v*` タグ push で release ビルドを実行
 - 次の target をビルド
@@ -158,7 +162,7 @@ git push origin v0.1.0
 - `lrc_player-x86_64-apple-darwin.tar.gz`
 - `lrc_player-aarch64-apple-darwin.tar.gz`
 
-タグなしで確認したい場合は GitHub Actions の `Release Builds` を `workflow_dispatch` で手動実行してください。この場合は artifact 生成まで行い、GitHub Release への添付は行いません。
+タグなしで確認したい場合は、通常の push / pull request で `Release Validation` が自動実行されます。手動確認したい場合は GitHub Actions の `Release Validation` または `Release Builds` を `workflow_dispatch` で実行できます。`Release Builds` をタグなしで手動実行した場合は artifact 生成まで行い、GitHub Release への添付は行いません。
 
 ## 現状の注意点
 
