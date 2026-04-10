@@ -8,6 +8,8 @@ use crate::app::view_models::{
     PlaylistTabVm, QueueTabVm, ScanTabVm, SettingItemVm, SettingsTabVm, TrackRowVm,
 };
 use crate::audio::output::{AudioDeviceOutput, AudioOutputConfig, BufferedAudioOutput};
+use crate::audio::device_watcher::DeviceWatcherHandle;
+use cpal::traits::{HostTrait, DeviceTrait};
 use crate::core::ids::{AlbumId, ArtistId, StrId, TrackId};
 use crate::core::library::{ArtistKind, DirectoryNodeId, Library};
 use crate::core::persistence::{AppConfigFile, AppStateFile, JsonStore, PlaylistsFile, TabId};
@@ -157,6 +159,9 @@ pub struct AppFacade {
     pub settings: AppConfigFile,
     pub audio_output: BufferedAudioOutput,
     _audio_device: Option<AudioDeviceOutput>,
+    device_watcher: Option<DeviceWatcherHandle>,
+    current_audio_device_name: Option<String>,
+    audio_disconnected: bool,
     decoder: Decoder,
     decode_worker: Option<DecodeWorkerHandle>,
     decode_completion_pending: Option<TrackId>,
@@ -179,12 +184,29 @@ impl Default for AppFacade {
             AudioDeviceOutput::preferred_config().unwrap_or_else(AudioOutputConfig::default)
         };
         let audio_output = BufferedAudioOutput::new(audio_config, AUDIO_BLOCK_CAPACITY);
+        // capture the current default device name (if any) before attempting to start
+        let default_device_name = if cfg!(test) {
+            None
+        } else {
+            cpal::default_host()
+                .default_output_device()
+                .and_then(|d| d.name().ok())
+        };
+
         let audio_device = if cfg!(test) {
             None
         } else {
             AudioDeviceOutput::try_start(&audio_output).ok()
         };
+
+        let current_audio_device_name_val = audio_device.as_ref().and_then(|_| default_device_name.clone());
         audio_output.set_playback_active(false);
+
+        let device_watcher = if cfg!(test) {
+            None
+        } else {
+            Some(DeviceWatcherHandle::spawn(500))
+        };
 
         Self {
             strings,
@@ -196,6 +218,9 @@ impl Default for AppFacade {
             settings: AppConfigFile::default(),
             audio_output,
             _audio_device: audio_device,
+            device_watcher,
+            current_audio_device_name: current_audio_device_name_val,
+            audio_disconnected: false,
             decoder: Decoder::default(),
             decode_worker: None,
             decode_completion_pending: None,
@@ -331,6 +356,50 @@ impl AppFacade {
             AppCommand::TogglePlayPause => {
                 self.playback.toggle_pause();
                 self.sync_audio_transport();
+                // If playback is starting but we don't have an active audio device,
+                // attempt a best-effort restart of the output (preferred or default).
+                if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering)
+                    && self._audio_device.is_none()
+                {
+                    if let Some(pref) = self.settings.preferred_output_device.clone() {
+                        if let Ok(device) = AudioDeviceOutput::try_start_by_name(&self.audio_output, &pref) {
+                            self._audio_device = Some(device);
+                            self.current_audio_device_name = Some(pref);
+                            self.audio_disconnected = false;
+                            self.sync_audio_transport();
+                        }
+                    } else if let Some(default_name) = cpal::default_host()
+                        .default_output_device()
+                        .and_then(|d| d.name().ok())
+                    {
+                        let old_cfg = self.audio_output.config();
+                        let target_cfg = AudioDeviceOutput::config_for_name(&default_name).unwrap_or(old_cfg);
+                        if target_cfg.sample_rate == old_cfg.sample_rate {
+                            if let Ok(device) = AudioDeviceOutput::try_start_by_name(&self.audio_output, &default_name) {
+                                self._audio_device = Some(device);
+                                self.current_audio_device_name = Some(default_name);
+                                self.audio_disconnected = false;
+                                self.sync_audio_transport();
+                            }
+                        } else {
+                            // recreate buffered output and re-prime
+                            self.cancel_decode_worker();
+                            let old_block_capacity = self.audio_output.block_capacity();
+                            let new_output = BufferedAudioOutput::new(target_cfg, old_block_capacity);
+                            if let Ok(device) = AudioDeviceOutput::try_start_by_name(&new_output, &default_name) {
+                                self.audio_output = new_output;
+                                self._audio_device = Some(device);
+                                self.current_audio_device_name = Some(default_name.clone());
+                                if let Some(track_id) = self.playback.current_track {
+                                    let _ = self.prepare_audio(track_id);
+                                        // after priming, resume audio output
+                                        self.sync_audio_transport();
+                                }
+                            }
+                        }
+                    }
+                }
+
                 vec![AppEvent::Playback(PlaybackEvent::StateChanged(
                     self.playback.state,
                 ))]
@@ -389,11 +458,73 @@ impl AppFacade {
             }
             AppCommand::SetPreferredOutputDevice { device_name } => {
                 self.settings.preferred_output_device = device_name.clone();
-                let audio_device = match device_name {
-                    Some(ref name) => AudioDeviceOutput::try_start_by_name(&self.audio_output, name).ok(),
-                    None => AudioDeviceOutput::try_start(&self.audio_output).ok(),
+
+                // Stop any ongoing decoder so we can re-prime for the new device config.
+                self.cancel_decode_worker();
+
+                let old_block_capacity = self.audio_output.block_capacity();
+                let old_config = self.audio_output.config();
+
+                // Determine target config from the selected device (if available).
+                let target_config = match device_name.as_ref() {
+                    Some(name) => AudioDeviceOutput::config_for_name(name).unwrap_or(old_config),
+                    None => AudioDeviceOutput::preferred_config().unwrap_or(old_config),
                 };
-                self._audio_device = audio_device;
+
+                let new_output = BufferedAudioOutput::new(target_config, old_block_capacity);
+
+                // Try to start the device using the new buffered output. If successful,
+                // replace the current audio_output and re-prime playback. If not,
+                // keep the existing output and attempt a best-effort restart.
+                let started_device = match device_name.as_ref() {
+                    Some(name) => AudioDeviceOutput::try_start_by_name(&new_output, name).ok(),
+                    None => AudioDeviceOutput::try_start(&new_output).ok(),
+                };
+
+                if let Some(device) = started_device {
+                    self.audio_output = new_output;
+                    self._audio_device = Some(device);
+
+                    // record current device name
+                    self.current_audio_device_name = device_name.clone().or_else(|| {
+                        cpal::default_host()
+                            .default_output_device()
+                            .and_then(|d| d.name().ok())
+                    });
+
+                    // Re-prepare audio for the currently selected track so decoder will
+                    // resample to the device's sample rate, then resume audio output
+                    if let Some(track_id) = self.playback.current_track {
+                        let _ = self.prepare_audio(track_id);
+                    }
+                    if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                        self.sync_audio_transport();
+                    }
+                } else {
+                    // Could not start the new device. Try to restart using the old output
+                    // (best-effort) and keep current audio_output unchanged.
+                    let fallback = match device_name.as_ref() {
+                        Some(name) => AudioDeviceOutput::try_start_by_name(&self.audio_output, name).ok(),
+                        None => AudioDeviceOutput::try_start(&self.audio_output).ok(),
+                    };
+                    self._audio_device = fallback;
+                    // update current device name if fallback succeeded
+                    if self._audio_device.is_some() {
+                        self.current_audio_device_name = device_name.clone().or_else(|| {
+                            cpal::default_host()
+                                .default_output_device()
+                                .and_then(|d| d.name().ok())
+                        });
+                        // if playback was active, prime and resume audio
+                        if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                            if let Some(track_id) = self.playback.current_track {
+                                let _ = self.prepare_audio(track_id);
+                            }
+                            self.sync_audio_transport();
+                        }
+                    }
+                }
+
                 vec![AppEvent::TabChanged(self.current_tab)]
             }
             AppCommand::Scan(scan_command) => self.handle_scan_command(scan_command),
@@ -425,6 +556,135 @@ impl AppFacade {
         self.ensure_browse_cache_current();
         let mut events = Vec::new();
         let mut finished = None;
+
+        // Hotplug detection: prefer background watcher messages; fall back to inline polling if not available.
+        let mut handled_hotplug = false;
+        if let Some(watcher) = self.device_watcher.as_ref() {
+            handled_hotplug = true;
+            for message in watcher.drain_messages() {
+                match message {
+                    crate::audio::device_watcher::DeviceWatcherMessage::DevicesChanged { devices, default } => {
+                        if let Some(pref) = self.settings.preferred_output_device.clone() {
+                            let present = devices.iter().any(|d| d == &pref);
+                            if !present && self._audio_device.is_some() {
+                                // device disappeared: don't change playback state, just stop audio output
+                                self._audio_device = None;
+                                self.audio_output.set_playback_active(false);
+                                self.audio_disconnected = true;
+                                events.push(AppEvent::Playback(PlaybackEvent::DeviceUnderrun));
+                            } else if present && self._audio_device.is_none() {
+                                // device reappeared, try to restart output (do not auto-resume playback)
+                                if let Ok(device) = AudioDeviceOutput::try_start_by_name(&self.audio_output, &pref) {
+                                    self._audio_device = Some(device);
+                                    self.current_audio_device_name = Some(pref.clone());
+                                    self.audio_disconnected = false;
+                                    // If playback was active, re-prime playback and resume audio output
+                                    if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                                        if let Some(track_id) = self.playback.current_track {
+                                            let _ = self.prepare_audio(track_id);
+                                        }
+                                        self.sync_audio_transport();
+                                    }
+                                    events.push(AppEvent::Playback(PlaybackEvent::StateChanged(self.playback.state)));
+                                }
+                            }
+                        } else {
+                            // No preferred device configured: handle changes in the system default device.
+                            let default_name = default;
+
+                            // If default changed and we previously had a device, attempt to switch.
+                            if default_name != self.current_audio_device_name {
+                                // If no default now, clear existing device.
+                                    if default_name.is_none() {
+                                        if self._audio_device.is_some() {
+                                            self._audio_device = None;
+                                            self.audio_output.set_playback_active(false);
+                                            self.audio_disconnected = true;
+                                            self.current_audio_device_name = None;
+                                            events.push(AppEvent::Playback(PlaybackEvent::DeviceUnderrun));
+                                        }
+                                    } else if let Some(new_name) = default_name.clone() {
+                                    // Attempt to negotiate config and start the new default device.
+                                    let old_config = self.audio_output.config();
+                                    let target_cfg = AudioDeviceOutput::config_for_name(&new_name).unwrap_or(old_config);
+
+                                        if target_cfg.sample_rate == old_config.sample_rate {
+                                            // can reuse existing BufferedAudioOutput
+                                            if let Ok(device) = AudioDeviceOutput::try_start_by_name(&self.audio_output, &new_name) {
+                                                self._audio_device = Some(device);
+                                                self.current_audio_device_name = Some(new_name.clone());
+                                                self.audio_disconnected = false;
+                                                // resume audio output if playback is active
+                                                if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                                                    self.sync_audio_transport();
+                                                }
+                                                events.push(AppEvent::Playback(PlaybackEvent::StateChanged(self.playback.state)));
+                                            }
+                                        } else {
+                                            // sample-rate changed: recreate buffered output and re-prime from current position
+                                            self.cancel_decode_worker();
+                                            let old_block_capacity = self.audio_output.block_capacity();
+                                            let new_output = BufferedAudioOutput::new(target_cfg, old_block_capacity);
+                                            if let Ok(device) = AudioDeviceOutput::try_start_by_name(&new_output, &new_name) {
+                                                self.audio_output = new_output;
+                                                self._audio_device = Some(device);
+                                                self.current_audio_device_name = Some(new_name.clone());
+                                                if let Some(track_id) = self.playback.current_track {
+                                                    let _ = self.prepare_audio(track_id);
+                                                }
+                                                // after priming, resume audio if playback was active
+                                                if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                                                    self.sync_audio_transport();
+                                                }
+                                            } else {
+                                                // fallback: try start using existing audio_output
+                                                let fallback = AudioDeviceOutput::try_start_by_name(&self.audio_output, &new_name).ok();
+                                                if fallback.is_some() {
+                                                    self._audio_device = fallback;
+                                                    self.current_audio_device_name = Some(new_name.clone());
+                                                }
+                                            }
+                                        }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !handled_hotplug {
+            // Legacy/poll fallback (keeps previous behavior when watcher isn't running)
+            if let Some(pref) = self.settings.preferred_output_device.clone() {
+                let available = AudioDeviceOutput::list_output_devices();
+                let present = available.iter().any(|d| d == &pref);
+                if !present && self._audio_device.is_some() {
+                    // device disappeared
+                    self._audio_device = None;
+                    if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                        self.playback.state = PlaybackState::Paused;
+                    }
+                    self.audio_output.set_playback_active(false);
+                    self.audio_disconnected = true;
+                    events.push(AppEvent::Playback(PlaybackEvent::DeviceUnderrun));
+                } else if present && self._audio_device.is_none() {
+                    // device reappeared, try to restart output (do not auto-resume playback)
+                        if let Ok(device) = AudioDeviceOutput::try_start_by_name(&self.audio_output, &pref) {
+                            self._audio_device = Some(device);
+                            self.current_audio_device_name = Some(pref.clone());
+                            self.audio_disconnected = false;
+                            // resume audio output if playback is active
+                            if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                                if let Some(track_id) = self.playback.current_track {
+                                    let _ = self.prepare_audio(track_id);
+                                }
+                                self.sync_audio_transport();
+                            }
+                            events.push(AppEvent::Playback(PlaybackEvent::StateChanged(self.playback.state)));
+                        }
+                }
+            }
+        }
 
         if let Some(worker) = self.scan_worker.as_ref() {
             for message in worker.drain_messages() {
@@ -586,19 +846,47 @@ impl AppFacade {
             self.playback.buffered_ms = 0;
             return Ok(());
         };
+        let cfg = self.audio_output.config();
+        let frames_per_block = cfg.frames_per_buffer as u64;
+        let sample_rate = cfg.sample_rate as u64;
+        let desired_position_ms = self.playback.position_ms;
 
-        let initial_blocks = self.decoder.decode_blocks(
-            &source,
-            self.audio_output.config(),
-            INITIAL_DECODE_PRIME_BLOCKS.min(self.audio_output.block_capacity()),
-        )?;
-        let initial_count = self.audio_output.try_enqueue_many(initial_blocks);
-        self.decode_worker = Some(DecodeWorkerHandle::spawn(
-            source,
-            self.audio_output.config(),
-            self.audio_output.clone(),
-            initial_count,
-        ));
+        if desired_position_ms > 0 {
+            let skip_frames = desired_position_ms.saturating_mul(sample_rate) / 1000u64;
+            let skip_blocks = (skip_frames / frames_per_block) as usize;
+
+            // Decode entire file to obtain blocks starting at the desired position,
+            // then prime the output with a small number of blocks from that position.
+            let all_blocks = self
+                .decoder
+                .decode_all_blocks(&source, cfg)?;
+            let start = skip_blocks.min(all_blocks.len());
+            let prime_blocks: Vec<_> = all_blocks[start..]
+                .iter()
+                .take(INITIAL_DECODE_PRIME_BLOCKS.min(self.audio_output.block_capacity()))
+                .cloned()
+                .collect();
+
+            let primed = self.audio_output.try_enqueue_many(prime_blocks);
+            let worker_skip = skip_blocks.saturating_add(primed);
+            self.decode_worker = Some(DecodeWorkerHandle::spawn(
+                source,
+                cfg,
+                self.audio_output.clone(),
+                worker_skip,
+            ));
+        } else {
+            let initial_blocks = self
+                .decoder
+                .decode_blocks(&source, cfg, INITIAL_DECODE_PRIME_BLOCKS.min(self.audio_output.block_capacity()))?;
+            let initial_count = self.audio_output.try_enqueue_many(initial_blocks);
+            self.decode_worker = Some(DecodeWorkerHandle::spawn(
+                source,
+                cfg,
+                self.audio_output.clone(),
+                initial_count,
+            ));
+        }
         self.decode_completion_pending = None;
         self.playback.buffered_ms = self.audio_output.buffered_ms();
         Ok(())

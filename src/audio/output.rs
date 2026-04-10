@@ -180,6 +180,29 @@ impl AudioDeviceOutput {
         })
     }
 
+    pub fn config_for_name(device_name: &str) -> Option<AudioOutputConfig> {
+        let host = cpal::default_host();
+        let devices = host.output_devices().ok()?;
+        for device in devices {
+            if let Ok(name) = device.name() {
+                if name == device_name {
+                    if let Ok(supported) = device.default_output_config() {
+                        let cfg = supported.config();
+                        return Some(AudioOutputConfig {
+                            sample_rate: cfg.sample_rate.0,
+                            channels: cfg.channels,
+                            frames_per_buffer: match cfg.buffer_size {
+                                BufferSize::Fixed(frames) => frames,
+                                BufferSize::Default => 1_024,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub fn try_start(buffered_output: &BufferedAudioOutput) -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host
