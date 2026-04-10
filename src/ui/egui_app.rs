@@ -1,4 +1,8 @@
-use eframe::egui;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use eframe::{egui, CreationContext};
 use rfd::FileDialog;
 
 use crate::app::commands::{AppCommand, TrackListOrigin};
@@ -16,7 +20,9 @@ pub struct LrcPlayerEguiApp {
 }
 
 impl LrcPlayerEguiApp {
-    pub fn new(mut application: Application) -> Self {
+    pub fn new(cc: &CreationContext<'_>, mut application: Application) -> Self {
+        install_cjk_fonts(&cc.egui_ctx);
+
         if let Err(error) = application.initialize() {
             eprintln!("failed to restore application state: {error}");
         }
@@ -129,23 +135,45 @@ impl LrcPlayerEguiApp {
     }
 
     fn render_album_entry(&mut self, ui: &mut egui::Ui, album: &AlbumEntryVm, expanded: bool) {
-        if ui
-            .selectable_label(
-                expanded,
-                format!("{} - {} ({} tracks)", album.title, album.album_artist, album.track_count),
-            )
-            .clicked()
-        {
+        let log_label = if album.is_provisional { " [log]" } else { "" };
+        let text = format!(
+            "{} - {} ({} tracks){}",
+            album.title, album.album_artist, album.track_count, log_label
+        );
+        // ラベルの高さを計測して、行全体の矩形を確保し、その矩形でクリックを受け取る
+        let label_height = ui.text_style_height(&egui::TextStyle::Body);
+        let desired_height = label_height + ui.spacing().button_padding.y * 2.0;
+        let desired_size = egui::Vec2::new(ui.available_width(), desired_height);
+        // 領域を確保して矩形を得る（この矩形全体がクリック可能になる）
+        let (rect, reserve) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+        let response = ui.put(rect, egui::SelectableLabel::new(expanded, text));
+        if response.clicked() || reserve.clicked() {
+            println!("[egui_app] Album clicked: id={:?}, expanded={}", album.album_id, expanded);
             let next = if expanded { None } else { Some(album.album_id) };
             self.application.handle_command(AppCommand::SelectAlbum(next));
+            ui.ctx().request_repaint();
         }
     }
 
     fn render_album_tab(&mut self, ui: &mut egui::Ui, view_model: &AppViewModel) {
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "Albums hydrated: {}/{}",
+                view_model.album.loading.hydrated_entries, view_model.album.loading.total_entries
+            ));
+            if view_model.album.loading.is_loading {
+                ui.label("using log snapshot while background hydration continues");
+            }
+        });
+
         ui.columns(2, |columns| {
             egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
                 for album in &view_model.album.albums {
-                    self.render_album_entry(ui, album, view_model.album.expanded_album == Some(album.album_id));
+                    self.render_album_entry(
+                        ui,
+                        album,
+                        view_model.album.expanded_album == Some(album.album_id),
+                    );
                 }
             });
             self.render_track_rows(&mut columns[1], &view_model.album.visible_tracks, TrackListOrigin::Album);
@@ -153,12 +181,18 @@ impl LrcPlayerEguiApp {
     }
 
     fn render_artist_entry(&mut self, ui: &mut egui::Ui, artist: &ArtistEntryVm, selected: bool) {
-        if ui
-            .selectable_label(selected, format!("{} ({})", artist.name, artist.track_count))
-            .clicked()
-        {
+        let log_label = if artist.is_provisional { " [log]" } else { "" };
+        let text = format!("{} ({}){}", artist.name, artist.track_count, log_label);
+        let label_height = ui.text_style_height(&egui::TextStyle::Body);
+        let desired_height = label_height + ui.spacing().button_padding.y * 2.0;
+        let desired_size = egui::Vec2::new(ui.available_width(), desired_height);
+        let (rect, reserve) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+        let response = ui.put(rect, egui::SelectableLabel::new(selected, text));
+        if response.clicked() || reserve.clicked() {
+            println!("[egui_app] Artist clicked: id={:?}, selected={}", artist.artist_id, selected);
             let next = if selected { None } else { Some(artist.artist_id) };
             self.application.handle_command(AppCommand::SelectArtist(next));
+            ui.ctx().request_repaint();
         }
     }
 
@@ -172,6 +206,17 @@ impl LrcPlayerEguiApp {
                 if ui.selectable_label(view_model.artist.kind == kind, label).clicked() {
                     self.application.handle_command(AppCommand::SelectArtistKind(kind));
                 }
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "Artists hydrated: {}/{}",
+                view_model.artist.loading.hydrated_entries,
+                view_model.artist.loading.total_entries
+            ));
+            if view_model.artist.loading.is_loading {
+                ui.label("using log snapshot while background hydration continues");
             }
         });
 
@@ -333,9 +378,100 @@ impl LrcPlayerEguiApp {
     }
 }
 
+fn install_cjk_fonts(context: &egui::Context) {
+    let mut font_definitions = egui::FontDefinitions::default();
+    let mut installed_font_names = Vec::new();
+
+    for path in candidate_cjk_font_paths() {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let font_name = format!("cjk-{file_name}");
+        if font_definitions.font_data.contains_key(&font_name) {
+            continue;
+        }
+
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+
+        font_definitions.font_data.insert(
+            font_name.clone(),
+            egui::FontData::from_owned(bytes).into(),
+        );
+        installed_font_names.push(font_name);
+    }
+
+    if installed_font_names.is_empty() {
+        return;
+    }
+
+    if let Some(proportional) = font_definitions.families.get_mut(&egui::FontFamily::Proportional) {
+        for font_name in installed_font_names.iter().rev() {
+            proportional.insert(0, font_name.clone());
+        }
+    }
+    if let Some(monospace) = font_definitions.families.get_mut(&egui::FontFamily::Monospace) {
+        for font_name in installed_font_names.iter().rev() {
+            monospace.insert(0, font_name.clone());
+        }
+    }
+
+    context.set_fonts(font_definitions);
+}
+
+fn candidate_cjk_font_paths() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for path in [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansJP-Regular.otf",
+        "/usr/share/fonts/opentype/noto/NotoSansSC-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/arphic/ukai.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/Hiragino Sans W3.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "C:/Windows/Fonts/msgothic.ttc",
+        "C:/Windows/Fonts/YuGothR.ttc",
+        "C:/Windows/Fonts/meiryo.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simsun.ttc",
+        "C:/Windows/Fonts/msjh.ttc",
+    ] {
+        push_if_exists(&mut candidates, path);
+    }
+
+    candidates
+}
+
+fn push_if_exists(paths: &mut Vec<PathBuf>, candidate: impl AsRef<Path>) {
+    let path = candidate.as_ref();
+    if path.exists() {
+        paths.push(path.to_path_buf());
+    }
+}
+
 impl eframe::App for LrcPlayerEguiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.application.poll_background_tasks();
         let view_model = self.application.view_model();
+
+        if view_model.scan.cancel_visible
+            || view_model.album.loading.is_loading
+            || view_model.artist.loading.is_loading
+            || matches!(
+                view_model.play.playback_state,
+                crate::core::playback::PlaybackState::Playing
+                    | crate::core::playback::PlaybackState::Buffering
+                    | crate::core::playback::PlaybackState::Seeking
+            )
+        {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             self.top_tabs(ui, &view_model);

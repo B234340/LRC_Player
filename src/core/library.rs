@@ -83,6 +83,7 @@ pub struct LibraryIndexes {
 
 #[derive(Debug, Clone)]
 pub struct Library {
+    pub revision: u64,
     pub tracks: TrackTable,
     pub albums: AlbumTable,
     pub artists: ArtistTable,
@@ -103,6 +104,7 @@ impl Default for DirectoryTree {
 impl Default for Library {
     fn default() -> Self {
         Self {
+            revision: 0,
             tracks: TrackTable::default(),
             albums: AlbumTable::default(),
             artists: ArtistTable::default(),
@@ -164,6 +166,7 @@ impl Library {
 
         self.rebuild_indexes(strings);
         self.rebuild_directories(strings);
+        self.revision = self.revision.saturating_add(1);
         track_id
     }
 

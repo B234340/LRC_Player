@@ -51,6 +51,14 @@ pub struct AlbumEntryVm {
     pub title: String,
     pub album_artist: String,
     pub track_count: usize,
+    pub is_provisional: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeferredListStateVm {
+    pub total_entries: usize,
+    pub hydrated_entries: usize,
+    pub is_loading: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +66,7 @@ pub struct AlbumTabVm {
     pub albums: Vec<AlbumEntryVm>,
     pub expanded_album: Option<AlbumId>,
     pub visible_tracks: Vec<TrackRowVm>,
+    pub loading: DeferredListStateVm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +74,7 @@ pub struct ArtistEntryVm {
     pub artist_id: ArtistId,
     pub name: String,
     pub track_count: usize,
+    pub is_provisional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +83,7 @@ pub struct ArtistTabVm {
     pub artists: Vec<ArtistEntryVm>,
     pub selected_artist: Option<ArtistId>,
     pub visible_tracks: Vec<TrackRowVm>,
+    pub loading: DeferredListStateVm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

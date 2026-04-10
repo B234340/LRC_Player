@@ -1,5 +1,14 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
+use std::thread;
+
+use lofty::file::AudioFile;
+use lofty::prelude::{Accessor, ItemKey, TaggedFileExt};
+use lofty::probe::Probe;
 
 use crate::core::library::{Library, TrackInput};
 use crate::core::strings::StringInterner;
@@ -43,6 +52,24 @@ pub struct ScanSummary {
     pub discovered_files: u32,
     pub parsed_files: u32,
     pub skipped_files: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanOutcome {
+    pub result: ScanState,
+    pub progress: ScanProgress,
+    pub tracks: Vec<TrackInput>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScanWorkerMessage {
+    Progress(ScanProgress),
+    Finished(ScanOutcome),
+}
+
+pub struct ScanWorkerHandle {
+    cancel_requested: Arc<AtomicBool>,
+    receiver: Receiver<ScanWorkerMessage>,
 }
 
 impl Default for ScanModel {
@@ -119,120 +146,228 @@ impl ScanModel {
     }
 
     pub fn run_full_scan(&mut self, strings: &mut StringInterner) -> (Library, ScanSummary) {
-        self.state = ScanState::Scanning;
-        self.progress = ScanProgress::default();
+        let outcome = run_full_scan_collect(self.config.clone(), None, None);
+        let summary = outcome.summary();
+        self.progress = outcome.progress.clone();
+        self.finish_with(outcome.result);
+        (
+            build_library_from_track_inputs(strings, outcome.tracks),
+            summary,
+        )
+    }
+}
 
-        let include_dirs = normalize_paths(&self.config.include_dirs);
-        let exclude_dirs = normalize_paths(&self.config.exclude_dirs);
-        let mut library = Library::default();
-        let mut had_warning = false;
+impl ScanOutcome {
+    pub fn summary(&self) -> ScanSummary {
+        ScanSummary {
+            result: self.result,
+            discovered_files: self.progress.discovered_files,
+            parsed_files: self.progress.parsed_files,
+            skipped_files: self.progress.skipped_files,
+        }
+    }
+}
 
-        for include_dir in include_dirs {
-            if !include_dir.exists() {
-                had_warning = true;
-                self.progress.skipped_files += 1;
-                continue;
+impl ScanWorkerHandle {
+    pub fn spawn(config: ScanConfig) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel_requested);
+
+        thread::spawn(move || {
+            let outcome = run_full_scan_collect(config, Some(worker_cancel.as_ref()), Some(&sender));
+            let _ = sender.send(ScanWorkerMessage::Finished(outcome));
+        });
+
+        Self {
+            cancel_requested,
+            receiver,
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancel_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn drain_messages(&self) -> Vec<ScanWorkerMessage> {
+        let mut messages = Vec::new();
+        while let Ok(message) = self.receiver.try_recv() {
+            messages.push(message);
+        }
+        messages
+    }
+}
+
+pub fn build_library_from_track_inputs<I>(strings: &mut StringInterner, tracks: I) -> Library
+where
+    I: IntoIterator<Item = TrackInput>,
+{
+    let mut library = Library::default();
+    for track in tracks {
+        library.upsert_track(strings, track);
+    }
+    library
+}
+
+fn run_full_scan_collect(
+    config: ScanConfig,
+    cancel_requested: Option<&AtomicBool>,
+    sender: Option<&Sender<ScanWorkerMessage>>,
+) -> ScanOutcome {
+    let include_dirs = normalize_paths(&config.include_dirs);
+    let exclude_dirs = normalize_paths(&config.exclude_dirs);
+    let mut progress = ScanProgress::default();
+    let mut tracks = Vec::new();
+    let mut had_warning = false;
+    let mut cancelled = false;
+
+    for include_dir in include_dirs {
+        if is_cancel_requested(cancel_requested) {
+            cancelled = true;
+            break;
+        }
+
+        if !include_dir.exists() {
+            had_warning = true;
+            progress.skipped_files += 1;
+            send_progress(sender, &progress);
+            continue;
+        }
+
+        match scan_directory_collect(
+            &include_dir,
+            &exclude_dirs,
+            &mut progress,
+            &mut tracks,
+            cancel_requested,
+            sender,
+        ) {
+            Ok(true) => {
+                cancelled = true;
+                break;
             }
-
-            if self.scan_directory(&include_dir, &exclude_dirs, strings, &mut library).is_err() {
+            Ok(false) => {}
+            Err(_) => {
                 had_warning = true;
             }
         }
-
-        let result = if self.progress.discovered_files == 0 && self.progress.skipped_files > 0 {
-            ScanState::Failed
-        } else if had_warning || self.progress.skipped_files > 0 {
-            ScanState::Warning
-        } else {
-            ScanState::Completed
-        };
-
-        self.finish_with(result);
-
-        (
-            library,
-            ScanSummary {
-                result,
-                discovered_files: self.progress.discovered_files,
-                parsed_files: self.progress.parsed_files,
-                skipped_files: self.progress.skipped_files,
-            },
-        )
     }
 
-    fn scan_directory(
-        &mut self,
-        root: &Path,
-        exclude_dirs: &[PathBuf],
-        strings: &mut StringInterner,
-        library: &mut Library,
-    ) -> std::io::Result<()> {
-        let mut stack = vec![root.to_path_buf()];
+    let result = if cancelled {
+        ScanState::Cancelling
+    } else if progress.discovered_files == 0 && progress.skipped_files > 0 {
+        ScanState::Failed
+    } else if had_warning || progress.skipped_files > 0 {
+        ScanState::Warning
+    } else {
+        ScanState::Completed
+    };
 
-        while let Some(directory) = stack.pop() {
-            if should_skip_path(&directory, exclude_dirs) {
+    ScanOutcome {
+        result,
+        progress,
+        tracks,
+    }
+}
+
+fn scan_directory_collect(
+    root: &Path,
+    exclude_dirs: &[PathBuf],
+    progress: &mut ScanProgress,
+    tracks: &mut Vec<TrackInput>,
+    cancel_requested: Option<&AtomicBool>,
+    sender: Option<&Sender<ScanWorkerMessage>>,
+) -> io::Result<bool> {
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(directory) = stack.pop() {
+        if is_cancel_requested(cancel_requested) {
+            return Ok(true);
+        }
+
+        if should_skip_path(&directory, exclude_dirs) {
+            continue;
+        }
+
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => {
+                progress.skipped_files += 1;
+                send_progress(sender, progress);
+                continue;
+            }
+        };
+
+        for entry in entries {
+            if is_cancel_requested(cancel_requested) {
+                return Ok(true);
+            }
+
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    progress.skipped_files += 1;
+                    send_progress(sender, progress);
+                    continue;
+                }
+            };
+            let path = entry.path();
+            progress.current_path = Some(path.clone());
+            send_progress(sender, progress);
+
+            if should_skip_path(&path, exclude_dirs) {
                 continue;
             }
 
-            let entries = match fs::read_dir(&directory) {
-                Ok(entries) => entries,
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
                 Err(_) => {
-                    self.progress.skipped_files += 1;
+                    progress.skipped_files += 1;
+                    send_progress(sender, progress);
                     continue;
                 }
             };
 
-            for entry in entries {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(_) => {
-                        self.progress.skipped_files += 1;
-                        continue;
-                    }
-                };
-                let path = entry.path();
-                self.progress.current_path = Some(path.clone());
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
 
-                if should_skip_path(&path, exclude_dirs) {
-                    continue;
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            if !metadata.is_file() || !is_supported_music_file(&path) {
+                continue;
+            }
+
+            progress.discovered_files += 1;
+            match build_track_input(&path, &metadata) {
+                Some(track_input) => {
+                    tracks.push(track_input);
+                    progress.parsed_files += 1;
                 }
-
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(_) => {
-                        self.progress.skipped_files += 1;
-                        continue;
-                    }
-                };
-
-                if metadata.file_type().is_symlink() {
-                    continue;
-                }
-
-                if metadata.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-
-                if !metadata.is_file() || !is_supported_music_file(&path) {
-                    continue;
-                }
-
-                self.progress.discovered_files += 1;
-                match build_track_input(&path, &metadata) {
-                    Some(track_input) => {
-                        library.upsert_track(strings, track_input);
-                        self.progress.parsed_files += 1;
-                    }
-                    None => {
-                        self.progress.skipped_files += 1;
-                    }
+                None => {
+                    progress.skipped_files += 1;
                 }
             }
+            send_progress(sender, progress);
         }
-
-        Ok(())
     }
+
+    Ok(false)
+}
+
+fn send_progress(sender: Option<&Sender<ScanWorkerMessage>>, progress: &ScanProgress) {
+    if let Some(sender) = sender {
+        let _ = sender.send(ScanWorkerMessage::Progress(progress.clone()));
+    }
+}
+
+fn is_cancel_requested(cancel_requested: Option<&AtomicBool>) -> bool {
+    cancel_requested
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
 }
 
 fn normalize_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -265,17 +400,17 @@ fn build_track_input(path: &Path, metadata: &fs::Metadata) -> Option<TrackInput>
     let canonical_path = fs::canonicalize(path).ok()?;
     let normalized_path = canonical_path.to_string_lossy().to_string();
     let file_name = path.file_name()?.to_string_lossy().to_string();
-    let title = path.file_stem()?.to_string_lossy().to_string();
-    let album = path
+    let fallback_title = path.file_stem()?.to_string_lossy().to_string();
+    let fallback_album = path
         .parent()
         .and_then(|parent| parent.file_name())
         .map(|name| name.to_string_lossy().to_string());
-    let artist = path
+    let fallback_artist = path
         .parent()
         .and_then(|parent| parent.parent())
         .and_then(|parent| parent.file_name())
         .map(|name| name.to_string_lossy().to_string());
-    let track_number = title
+    let fallback_track_number = fallback_title
         .split(|character: char| !character.is_ascii_digit())
         .find(|segment| !segment.is_empty())
         .and_then(|segment| segment.parse::<u16>().ok())
@@ -286,30 +421,107 @@ fn build_track_input(path: &Path, metadata: &fs::Metadata) -> Option<TrackInput>
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
+    let tag_metadata = read_tag_metadata(path);
+    let title = tag_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.title.clone())
+        .unwrap_or(fallback_title);
+    let album = tag_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.album.clone())
+        .or(fallback_album.clone());
+    let artist = tag_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.artist.clone())
+        .or(fallback_artist.clone());
+    let album_artist = tag_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.album_artist.clone())
+        .or_else(|| artist.clone());
+    let composer = tag_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.composer.clone());
+    let track_number = tag_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.track_number)
+        .or(fallback_track_number);
+    let duration_ms = tag_metadata
+        .as_ref()
+        .map(|metadata| metadata.duration_ms)
+        .unwrap_or(0);
 
     Some(TrackInput {
         title,
-        album: album.clone(),
-        artist: artist.clone(),
-        album_artist: artist,
-        composer: None,
+        album,
+        artist,
+        album_artist,
+        composer,
         normalized_path,
         file_size: metadata.len(),
         modified_unix_secs,
         file_name,
         track_number,
-        duration_ms: 0,
+        duration_ms,
         artwork_key: None,
+    })
+}
+
+#[derive(Debug, Clone, Default)]
+struct TagMetadata {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    composer: Option<String>,
+    track_number: Option<std::num::NonZeroU16>,
+    duration_ms: u32,
+}
+
+fn read_tag_metadata(path: &Path) -> Option<TagMetadata> {
+    let tagged_file = Probe::open(path).ok()?.read().ok()?;
+    let properties = tagged_file.properties();
+    let duration_ms = properties.duration().as_millis().min(u32::MAX as u128) as u32;
+    let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
+
+    let Some(tag) = tag else {
+        return Some(TagMetadata {
+            duration_ms,
+            ..TagMetadata::default()
+        });
+    };
+
+    let composer = tag
+        .get_string(&ItemKey::Composer)
+        .map(|value| value.to_string())
+        .filter(|value| !value.trim().is_empty());
+    let album_artist = tag
+        .get_string(&ItemKey::AlbumArtist)
+        .map(|value| value.to_string())
+        .filter(|value| !value.trim().is_empty());
+
+    Some(TagMetadata {
+        title: tag.title().map(|value| value.to_string()).filter(|value| !value.trim().is_empty()),
+        artist: tag.artist().map(|value| value.to_string()).filter(|value| !value.trim().is_empty()),
+        album: tag.album().map(|value| value.to_string()).filter(|value| !value.trim().is_empty()),
+        album_artist,
+        composer,
+        track_number: tag
+            .track()
+            .and_then(|value| u16::try_from(value).ok())
+            .and_then(std::num::NonZeroU16::new),
+        duration_ms,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::thread;
 
+    use hound::{SampleFormat, WavSpec, WavWriter};
     use tempfile::TempDir;
 
-    use super::{ScanCommand, ScanModel, ScanState};
+    use super::{ScanCommand, ScanModel, ScanState, ScanWorkerHandle, ScanWorkerMessage};
     use crate::core::strings::StringInterner;
 
     #[test]
@@ -355,5 +567,80 @@ mod tests {
         assert_eq!(summary.result, ScanState::Completed);
         assert_eq!(library.tracks.titles.len(), 2);
         assert_eq!(library.visible_tracks_for_album(crate::core::ids::AlbumId(0)).len(), 2);
+    }
+
+    #[test]
+    fn background_scan_worker_finishes_and_reports_tracks() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let include_dir = temp_dir.path().join("music");
+        let artist_dir = include_dir.join("Artist").join("Album");
+
+        fs::create_dir_all(&artist_dir).expect("artist dir should be created");
+        fs::write(artist_dir.join("01-first.wav"), b"RIFFdemo").expect("audio file should be created");
+
+        let mut scan = ScanModel::default();
+        scan.config.include_dirs.push(include_dir);
+        let worker = ScanWorkerHandle::spawn(scan.config.clone());
+
+        let mut saw_progress = false;
+        let mut finished = None;
+        for _ in 0..10_000 {
+            for message in worker.drain_messages() {
+                match message {
+                    ScanWorkerMessage::Progress(progress) => {
+                        saw_progress = saw_progress || progress.current_path.is_some();
+                    }
+                    ScanWorkerMessage::Finished(outcome) => {
+                        finished = Some(outcome);
+                    }
+                }
+            }
+            if finished.is_some() {
+                break;
+            }
+            thread::yield_now();
+        }
+
+        let outcome = finished.expect("scan should finish");
+        assert!(saw_progress);
+        assert_eq!(outcome.result, ScanState::Completed);
+        assert_eq!(outcome.tracks.len(), 1);
+        assert_eq!(outcome.progress.parsed_files, 1);
+    }
+
+    #[test]
+    fn full_scan_extracts_duration_from_audio_properties() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let include_dir = temp_dir.path().join("music");
+        let artist_dir = include_dir.join("Artist").join("Album");
+
+        fs::create_dir_all(&artist_dir).expect("artist dir should be created");
+        let file_path = artist_dir.join("01-first.wav");
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::create(&file_path, spec).expect("wav file should be created");
+        for _ in 0..48_000u32 {
+            writer.write_sample(0i16).expect("left sample should be written");
+            writer.write_sample(0i16).expect("right sample should be written");
+        }
+        writer.finalize().expect("wav file should be finalized");
+
+        let mut scan = ScanModel::default();
+        scan.config.include_dirs.push(include_dir);
+        let mut strings = StringInterner::default();
+
+        let (library, summary) = scan.run_full_scan(&mut strings);
+
+        assert_eq!(summary.parsed_files, 1);
+        assert_eq!(library.tracks.durations_ms.len(), 1);
+        assert!(library.tracks.durations_ms[0] >= 900);
+        assert_eq!(
+            strings.resolve(library.tracks.titles[0]).as_deref(),
+            Some("01-first")
+        );
     }
 }
