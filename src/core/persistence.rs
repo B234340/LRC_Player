@@ -1,7 +1,7 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +13,7 @@ use crate::core::queue::Queue;
 use crate::core::queue::RepeatMode;
 use crate::core::scan::ScanModel;
 use crate::core::strings::StringInterner;
+use crate::core::artwork::ArtworkCache;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TabId {
@@ -106,7 +107,12 @@ impl Default for AppStateFile {
 }
 
 impl AppStateFile {
-    pub fn capture(last_tab: TabId, queue: &Queue, playback: &PlaybackModel, library: &Library) -> Self {
+    pub fn capture(
+        last_tab: TabId,
+        queue: &Queue,
+        playback: &PlaybackModel,
+        library: &Library,
+    ) -> Self {
         let restored_queue = queue
             .entries
             .iter()
@@ -221,6 +227,28 @@ impl PlaylistsFile {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AlbumIndexEntry {
+    pub title: String,
+    pub album_artist: String,
+    pub track_count: usize,
+    pub tracks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ArtistIndexEntry {
+    pub name: String,
+    pub track_count: usize,
+    pub tracks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ArtistIndexFile {
+    pub track_artists: Vec<ArtistIndexEntry>,
+    pub album_artists: Vec<ArtistIndexEntry>,
+    pub composers: Vec<ArtistIndexEntry>,
+}
+
 #[derive(Debug, Clone)]
 pub struct JsonStore {
     pub paths: PersistencePaths,
@@ -229,6 +257,103 @@ pub struct JsonStore {
 impl JsonStore {
     pub fn new(paths: PersistencePaths) -> Self {
         Self { paths }
+    }
+
+    pub fn base_dir(&self) -> std::path::PathBuf {
+        // config_json is data/<app>/config/config.json -> parent().parent() => data/<app>
+        self.paths
+            .config_json
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+    }
+
+    /// Compute the shared data root (the `data` directory) under which
+    /// application-specific folders live. For repo-local layout this will
+    /// return `.../data`, for platform layout it will return the platform
+    /// data dir (parent of the app directory).
+    pub fn data_root(&self) -> std::path::PathBuf {
+        // Honor an explicit override first.
+        if let Ok(dir) = std::env::var("LRC_PLAYER_DATA_DIR") {
+            return std::path::PathBuf::from(dir);
+        }
+
+        // If the configured json paths live under a directory named `data`, prefer that
+        // as the shared data root. Walk upwards from the configured config path to find
+        // a `data` component.
+        if let Some(mut p) = self.paths.config_json.parent() {
+            loop {
+                if p.file_name().map(|n| n == "data").unwrap_or(false) {
+                    return p.to_path_buf();
+                }
+                if let Some(parent) = p.parent() {
+                    p = parent;
+                    continue;
+                }
+                break;
+            }
+        }
+
+        // Prefer a repo-local `./data` directory when possible (create if necessary).
+        if let Ok(cwd) = std::env::current_dir() {
+            let local_base = cwd.join("data");
+            if fs::create_dir_all(&local_base).is_ok() {
+                return local_base;
+            }
+        }
+
+        // Fall back to platform data dirs.
+        dirs::data_local_dir()
+            .or_else(dirs::data_dir)
+            .unwrap_or(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+    }
+
+    pub fn cache_dir(&self) -> std::path::PathBuf {
+        self.data_root().join("cache")
+    }
+
+    pub fn logs_dir(&self) -> std::path::PathBuf {
+        self.data_root().join("logs")
+    }
+
+    pub fn album_index_path(&self) -> std::path::PathBuf {
+        self.data_root().join("index").join("albums.json")
+    }
+
+    pub fn artist_index_path(&self) -> std::path::PathBuf {
+        self.data_root().join("index").join("artists.json")
+    }
+
+    pub fn save_album_index(&self, index: &Vec<AlbumIndexEntry>) -> io::Result<()> {
+        let path = self.album_index_path();
+        self.save_json(&path, index)
+    }
+
+    pub fn load_album_index(&self) -> io::Result<Vec<AlbumIndexEntry>> {
+        let path = self.album_index_path();
+        self.load_json(&path)
+    }
+
+    pub fn save_artist_index(&self, index: &ArtistIndexFile) -> io::Result<()> {
+        let path = self.artist_index_path();
+        self.save_json(&path, index)
+    }
+
+    pub fn load_artist_index(&self) -> io::Result<ArtistIndexFile> {
+        let path = self.artist_index_path();
+        self.load_json(&path)
+    }
+
+    pub fn save_artwork_cache(&self, cache: &ArtworkCache) -> io::Result<()> {
+        let dir = self.cache_dir();
+        fs::create_dir_all(&dir)?;
+        cache.save_to_dir(dir)
+    }
+
+    pub fn load_artwork_cache(&self, capacity: usize) -> io::Result<ArtworkCache> {
+        let dir = self.cache_dir();
+        ArtworkCache::load_from_dir(dir, capacity)
     }
 
     pub fn load_config(&self) -> io::Result<AppConfigFile> {
@@ -286,10 +411,35 @@ impl JsonStore {
 
 impl PersistencePaths {
     pub fn for_app(app_name: &str) -> io::Result<Self> {
+        // Prefer explicit override via environment variable `LRC_PLAYER_DATA_DIR`.
+        if let Ok(dir) = std::env::var("LRC_PLAYER_DATA_DIR") {
+            let base = PathBuf::from(dir);
+            fs::create_dir_all(&base)?;
+            return Ok(Self {
+                config_json: base.join("config").join("config.json"),
+                state_json: base.join("state").join("state.json"),
+                playlists_json: base.join("playlists").join("playlists.json"),
+            });
+        }
+
+        // Prefer a repo-local `./data/...` directory when possible.
+        if let Ok(cwd) = std::env::current_dir() {
+            let local_base = cwd.join("data");
+            if fs::create_dir_all(&local_base).is_ok() {
+                return Ok(Self {
+                    config_json: local_base.join("config").join("config.json"),
+                    state_json: local_base.join("state").join("state.json"),
+                    playlists_json: local_base.join("playlists").join("playlists.json"),
+                });
+            }
+        }
+
+        // Fallback to the platform data directory (existing behavior).
         let data_root = dirs::data_local_dir()
             .or_else(dirs::data_dir)
             .unwrap_or(std::env::current_dir()?);
         let app_root = data_root.join(app_name);
+        fs::create_dir_all(&app_root)?;
 
         Ok(Self {
             config_json: app_root.join("config.json"),
@@ -304,7 +454,17 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{AppConfigFile, AppStateFile, JsonStore, PersistencePaths, PlaylistsFile, TabId};
+    use super::{
+        AppConfigFile,
+        AppStateFile,
+        JsonStore,
+        PersistencePaths,
+        PlaylistsFile,
+        TabId,
+        AlbumIndexEntry,
+        ArtistIndexEntry,
+        ArtistIndexFile,
+    };
     use crate::core::ids::TrackId;
     use crate::core::library::{Library, TrackInput};
     use crate::core::playback::PlaybackModel;
@@ -378,7 +538,10 @@ mod tests {
         playback.restore_track(TrackId(1), 4_321);
 
         let state = AppStateFile::capture(TabId::Play, &queue, &playback, &library);
-        assert_eq!(state.resolve_queue_track_ids(&library), vec![TrackId(0), TrackId(1)]);
+        assert_eq!(
+            state.resolve_queue_track_ids(&library),
+            vec![TrackId(0), TrackId(1)]
+        );
 
         let favorite_name = strings.intern("favorite");
         let playlist_name = strings.intern("Roadtrip");
@@ -394,8 +557,16 @@ mod tests {
 
         assert_eq!(favorite_id.0, 0);
         assert_eq!(restored.len(), 2);
-        assert!(restored.iter().any(|playlist| playlist.tracks.contains(&TrackId(0))));
-        assert!(restored.iter().any(|playlist| playlist.tracks.contains(&TrackId(1))));
+        assert!(
+            restored
+                .iter()
+                .any(|playlist| playlist.tracks.contains(&TrackId(0)))
+        );
+        assert!(
+            restored
+                .iter()
+                .any(|playlist| playlist.tracks.contains(&TrackId(1)))
+        );
     }
 
     #[test]
@@ -421,8 +592,14 @@ mod tests {
         assert!(paths.playlists_json.exists());
 
         let loaded = store.load_config().expect("config load should succeed");
-        assert_eq!(loaded.include_dirs, vec![std::path::PathBuf::from("/music")]);
-        assert_eq!(loaded.exclude_dirs, vec![std::path::PathBuf::from("/music/tmp")]);
+        assert_eq!(
+            loaded.include_dirs,
+            vec![std::path::PathBuf::from("/music")]
+        );
+        assert_eq!(
+            loaded.exclude_dirs,
+            vec![std::path::PathBuf::from("/music/tmp")]
+        );
 
         let root = paths
             .config_json
@@ -436,8 +613,79 @@ mod tests {
     fn persistence_paths_for_app_use_app_data_directory() {
         let paths = PersistencePaths::for_app("lrc_player_test").expect("paths should resolve");
 
-        assert!(paths.config_json.ends_with("lrc_player_test/config.json"));
-        assert!(paths.state_json.ends_with("lrc_player_test/state.json"));
-        assert!(paths.playlists_json.ends_with("lrc_player_test/playlists.json"));
+        assert!(paths.config_json.ends_with("data/config/config.json"));
+        assert!(paths.state_json.ends_with("data/state/state.json"));
+        assert!(paths.playlists_json.ends_with("data/playlists/playlists.json"));
+    }
+
+    #[test]
+    fn album_and_artist_index_round_trip() {
+        let paths = temp_paths();
+
+        // create store paths under a `data/` subdirectory of our temp root so
+        // JsonStore::data_root() will pick that up without touching global env
+        let base = paths
+            .config_json
+            .parent()
+            .expect("config parent should exist")
+            .to_path_buf();
+        let store_paths = PersistencePaths {
+            config_json: base.join("data").join("config").join("config.json"),
+            state_json: base.join("data").join("state").join("state.json"),
+            playlists_json: base.join("data").join("playlists").join("playlists.json"),
+        };
+
+        let store = JsonStore::new(store_paths.clone());
+
+        let album_entry = AlbumIndexEntry {
+            title: "Album".to_string(),
+            album_artist: "Artist".to_string(),
+            track_count: 2,
+            tracks: vec![
+                "/music/artist/album/01.flac".to_string(),
+                "/music/artist/album/02.flac".to_string(),
+            ],
+        };
+
+        let artist_entry = ArtistIndexEntry {
+            name: "Artist".to_string(),
+            track_count: 2,
+            tracks: vec![
+                "/music/artist/album/01.flac".to_string(),
+                "/music/artist/album/02.flac".to_string(),
+            ],
+        };
+
+        let artist_file = ArtistIndexFile {
+            track_artists: vec![artist_entry.clone()],
+            album_artists: Vec::new(),
+            composers: Vec::new(),
+        };
+
+        store
+            .save_album_index(&vec![album_entry.clone()])
+            .expect("save album index should succeed");
+        store
+            .save_artist_index(&artist_file)
+            .expect("save artist index should succeed");
+
+        let loaded_albums = store.load_album_index().expect("load album index should succeed");
+        let loaded_artists = store.load_artist_index().expect("load artist index should succeed");
+
+        assert_eq!(loaded_albums.len(), 1);
+        assert_eq!(loaded_albums[0].title, album_entry.title);
+        assert_eq!(loaded_albums[0].album_artist, album_entry.album_artist);
+        assert_eq!(loaded_albums[0].tracks, album_entry.tracks);
+
+        assert_eq!(loaded_artists.track_artists.len(), 1);
+        assert_eq!(loaded_artists.track_artists[0].name, artist_entry.name);
+        assert_eq!(loaded_artists.track_artists[0].tracks, artist_entry.tracks);
+
+        let root = store_paths
+            .config_json
+            .parent()
+            .expect("config parent should exist")
+            .to_path_buf();
+        let _ = fs::remove_dir_all(root);
     }
 }

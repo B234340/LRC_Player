@@ -3,15 +3,16 @@ pub mod events;
 pub mod facade;
 pub mod view_models;
 
+use self::facade::AppFacade;
 use crate::app::commands::AppCommand;
 use crate::app::events::{AppEvent, PlaybackEvent};
 use crate::app::view_models::AppViewModel;
-use self::facade::AppFacade;
 
 use crate::core::ids::TrackId;
 use crate::core::persistence::{JsonStore, PersistencePaths};
 use crate::core::playback::PlaybackState;
 use crate::core::time::POSITION_SAVE_THRESHOLD_MS;
+use crate::core::scan::ScanState;
 
 pub struct Application {
     facade: AppFacade,
@@ -27,6 +28,8 @@ impl Default for Application {
             state_json: "state.json".into(),
             playlists_json: "playlists.json".into(),
         });
+        // Initialize logging to the app data logs directory.
+        let _ = crate::logging::init(&paths);
         Self::with_store(AppFacade::default(), JsonStore::new(paths))
     }
 }
@@ -86,6 +89,7 @@ impl Application {
     fn maybe_persist_after_events(&mut self, events: &[AppEvent]) {
         let mut save_for_track_change = false;
         let mut save_for_position = false;
+        let mut save_for_scan = false;
 
         for event in events {
             if let AppEvent::Playback(playback_event) = event {
@@ -104,10 +108,17 @@ impl Application {
                     _ => {}
                 }
             }
+            if let AppEvent::ScanStateChanged(state) = event {
+                if *state == ScanState::Completed {
+                    save_for_scan = true;
+                }
+            }
         }
 
-        let should_persist = save_for_track_change
-            || (save_for_position && self.should_persist_position());
+        let should_persist =
+            save_for_track_change
+                || (save_for_position && self.should_persist_position())
+                || save_for_scan;
         if should_persist && let Err(error) = self.persist() {
             eprintln!("failed to persist application state: {error}");
         }

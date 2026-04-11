@@ -124,7 +124,9 @@ impl Library {
         let album_artist_id = input
             .album_artist
             .map(|value| self.artist_id_for(strings, value));
-        let composer_id = input.composer.map(|value| self.artist_id_for(strings, value));
+        let composer_id = input
+            .composer
+            .map(|value| self.artist_id_for(strings, value));
         let album_id = input
             .album
             .map(|value| self.album_id_for(strings, value, album_artist_id));
@@ -188,11 +190,17 @@ impl Library {
     }
 
     pub fn album_title(&self, album_id: AlbumId, strings: &StringInterner) -> Option<String> {
-        self.albums.titles.get(album_id.0 as usize).and_then(|id| strings.resolve(*id))
+        self.albums
+            .titles
+            .get(album_id.0 as usize)
+            .and_then(|id| strings.resolve(*id))
     }
 
     pub fn artist_name(&self, artist_id: ArtistId, strings: &StringInterner) -> Option<String> {
-        self.artists.names.get(artist_id.0 as usize).and_then(|id| strings.resolve(*id))
+        self.artists
+            .names
+            .get(artist_id.0 as usize)
+            .and_then(|id| strings.resolve(*id))
     }
 
     pub fn visible_tracks_for_album(&self, album_id: AlbumId) -> &[TrackId] {
@@ -203,7 +211,11 @@ impl Library {
             .unwrap_or(&[])
     }
 
-    pub fn visible_tracks_for_artist(&self, artist_kind: ArtistKind, artist_id: ArtistId) -> &[TrackId] {
+    pub fn visible_tracks_for_artist(
+        &self,
+        artist_kind: ArtistKind,
+        artist_id: ArtistId,
+    ) -> &[TrackId] {
         let index = artist_id.0 as usize;
         match artist_kind {
             ArtistKind::TrackArtist => self
@@ -239,7 +251,12 @@ impl Library {
 
     fn artist_id_for(&mut self, strings: &mut StringInterner, name: String) -> ArtistId {
         let name_id = strings.intern(name);
-        if let Some(index) = self.artists.names.iter().position(|existing| *existing == name_id) {
+        if let Some(index) = self
+            .artists
+            .names
+            .iter()
+            .position(|existing| *existing == name_id)
+        {
             return ArtistId(index as u32);
         }
 
@@ -303,7 +320,13 @@ impl Library {
 
         for tracks in &mut self.indexes.tracks_by_album {
             tracks.sort_by(|left, right| {
-                Self::compare_album_tracks_with(track_numbers, file_name_ids, *left, *right, strings)
+                Self::compare_album_tracks_with(
+                    track_numbers,
+                    file_name_ids,
+                    *left,
+                    *right,
+                    strings,
+                )
             });
         }
 
@@ -371,7 +394,8 @@ impl Library {
             if let Some(parent) = Path::new(&full_path).parent() {
                 for component in parent.components() {
                     let component_name = component.as_os_str().to_string_lossy().trim().to_string();
-                    if component_name.is_empty() || component_name == "/" || component_name == "\\" {
+                    if component_name.is_empty() || component_name == "/" || component_name == "\\"
+                    {
                         continue;
                     }
 
@@ -386,7 +410,9 @@ impl Library {
                             children: Vec::new(),
                             tracks: Vec::new(),
                         });
-                        self.directories.nodes[current.0 as usize].children.push(node_id);
+                        self.directories.nodes[current.0 as usize]
+                            .children
+                            .push(node_id);
                         child_lookup.insert(key, node_id);
                         node_id
                     };
@@ -394,7 +420,9 @@ impl Library {
                 }
             }
 
-            self.directories.nodes[current.0 as usize].tracks.push(track_id);
+            self.directories.nodes[current.0 as usize]
+                .tracks
+                .push(track_id);
         }
 
         for node in &mut self.directories.nodes {
@@ -532,7 +560,10 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(library.tracks.stable_keys.len(), 1);
-        assert_eq!(library.track_path(first), Some("/music/album_x/01-track-a.flac"));
+        assert_eq!(
+            library.track_path(first),
+            Some("/music/album_x/01-track-a.flac")
+        );
     }
 
     #[test]
@@ -565,9 +596,13 @@ mod tests {
             ),
         );
 
-        assert_eq!(library.visible_tracks_for_album(crate::core::ids::AlbumId(0)), &[first_track, second_track]);
         assert_eq!(
-            library.visible_tracks_for_artist(ArtistKind::TrackArtist, crate::core::ids::ArtistId(0)),
+            library.visible_tracks_for_album(crate::core::ids::AlbumId(0)),
+            &[first_track, second_track]
+        );
+        assert_eq!(
+            library
+                .visible_tracks_for_artist(ArtistKind::TrackArtist, crate::core::ids::ArtistId(0)),
             &[first_track, second_track]
         );
         assert_eq!(library.directories.nodes.len() >= 2, true);

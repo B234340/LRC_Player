@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
@@ -125,8 +125,7 @@ impl BufferedAudioOutput {
     }
 
     pub fn buffered_ms(&self) -> u32 {
-        ((self.pending_samples.load(Ordering::Relaxed) as u64
-            / self.config.channels.max(1) as u64
+        ((self.pending_samples.load(Ordering::Relaxed) as u64 / self.config.channels.max(1) as u64
             * 1_000)
             / self.config.sample_rate as u64) as u32
     }
@@ -218,9 +217,30 @@ impl AudioDeviceOutput {
         let reset_epoch = buffered_output.shared_reset_epoch();
 
         let stream = match supported.sample_format() {
-            SampleFormat::F32 => build_output_stream::<f32>(&device, &stream_config, queue, playback_active, pending_samples, reset_epoch),
-            SampleFormat::I16 => build_output_stream::<i16>(&device, &stream_config, queue, playback_active, pending_samples, reset_epoch),
-            SampleFormat::U16 => build_output_stream::<u16>(&device, &stream_config, queue, playback_active, pending_samples, reset_epoch),
+            SampleFormat::F32 => build_output_stream::<f32>(
+                &device,
+                &stream_config,
+                queue,
+                playback_active,
+                pending_samples,
+                reset_epoch,
+            ),
+            SampleFormat::I16 => build_output_stream::<i16>(
+                &device,
+                &stream_config,
+                queue,
+                playback_active,
+                pending_samples,
+                reset_epoch,
+            ),
+            SampleFormat::U16 => build_output_stream::<u16>(
+                &device,
+                &stream_config,
+                queue,
+                playback_active,
+                pending_samples,
+                reset_epoch,
+            ),
             other => Err(format!("unsupported output sample format: {other:?}")),
         }?;
 
@@ -234,14 +254,15 @@ impl AudioDeviceOutput {
     pub fn list_output_devices() -> Vec<String> {
         let host = cpal::default_host();
         match host.output_devices() {
-            Ok(devices) => devices
-                .filter_map(|d| d.name().ok())
-                .collect(),
+            Ok(devices) => devices.filter_map(|d| d.name().ok()).collect(),
             Err(_) => Vec::new(),
         }
     }
 
-    pub fn try_start_by_name(buffered_output: &BufferedAudioOutput, device_name: &str) -> Result<Self, String> {
+    pub fn try_start_by_name(
+        buffered_output: &BufferedAudioOutput,
+        device_name: &str,
+    ) -> Result<Self, String> {
         let host = cpal::default_host();
         let mut selected = None;
 
@@ -270,9 +291,30 @@ impl AudioDeviceOutput {
         let reset_epoch = buffered_output.shared_reset_epoch();
 
         let stream = match supported.sample_format() {
-            SampleFormat::F32 => build_output_stream::<f32>(&device, &stream_config, queue, playback_active, pending_samples, reset_epoch),
-            SampleFormat::I16 => build_output_stream::<i16>(&device, &stream_config, queue, playback_active, pending_samples, reset_epoch),
-            SampleFormat::U16 => build_output_stream::<u16>(&device, &stream_config, queue, playback_active, pending_samples, reset_epoch),
+            SampleFormat::F32 => build_output_stream::<f32>(
+                &device,
+                &stream_config,
+                queue,
+                playback_active,
+                pending_samples,
+                reset_epoch,
+            ),
+            SampleFormat::I16 => build_output_stream::<i16>(
+                &device,
+                &stream_config,
+                queue,
+                playback_active,
+                pending_samples,
+                reset_epoch,
+            ),
+            SampleFormat::U16 => build_output_stream::<u16>(
+                &device,
+                &stream_config,
+                queue,
+                playback_active,
+                pending_samples,
+                reset_epoch,
+            ),
             other => Err(format!("unsupported output sample format: {other:?}")),
         }?;
 

@@ -57,7 +57,11 @@ impl PlaylistStore {
     }
 
     pub fn add_track(&mut self, playlist_id: PlaylistId, track_id: TrackId) {
-        if let Some(playlist) = self.playlists.iter_mut().find(|playlist| playlist.id == playlist_id) {
+        if let Some(playlist) = self
+            .playlists
+            .iter_mut()
+            .find(|playlist| playlist.id == playlist_id)
+        {
             playlist.tracks.push(track_id);
         }
     }
@@ -68,7 +72,11 @@ impl PlaylistStore {
             .iter_mut()
             .find(|playlist| playlist.id == self.favorite_playlist)
         {
-            if let Some(index) = playlist.tracks.iter().position(|existing| *existing == track_id) {
+            if let Some(index) = playlist
+                .tracks
+                .iter()
+                .position(|existing| *existing == track_id)
+            {
                 playlist.tracks.remove(index);
             } else {
                 playlist.tracks.push(track_id);

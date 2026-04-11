@@ -1,4 +1,7 @@
 use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::io;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -7,14 +10,14 @@ pub struct ArtworkKey {
     pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtworkHandle {
     pub key: ArtworkKey,
     pub width: u32,
     pub height: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ArtworkCache {
     capacity: usize,
     order: VecDeque<ArtworkKey>,
@@ -54,5 +57,30 @@ impl ArtworkCache {
                 self.entries.remove(&oldest);
             }
         }
+    }
+
+    /// Save the artwork cache to the given directory as JSON.
+    pub fn save_to_dir<P: AsRef<Path>>(&self, dir: P) -> io::Result<()> {
+        let dir = dir.as_ref();
+        fs::create_dir_all(dir)?;
+        let file = dir.join("artwork_cache.json");
+        let contents = serde_json::to_vec_pretty(self)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        fs::write(file, contents)?;
+        Ok(())
+    }
+
+    /// Load the artwork cache from the given directory. If the file does not exist,
+    /// returns an empty cache with the given capacity.
+    pub fn load_from_dir<P: AsRef<Path>>(dir: P, capacity: usize) -> io::Result<Self> {
+        let dir = dir.as_ref();
+        let file = dir.join("artwork_cache.json");
+        if !file.exists() {
+            return Ok(ArtworkCache::new(capacity));
+        }
+        let data = fs::read(&file)?;
+        let cache: ArtworkCache = serde_json::from_slice(&data)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        Ok(cache)
     }
 }

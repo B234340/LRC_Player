@@ -67,6 +67,9 @@ pub struct AlbumTabVm {
     pub expanded_album: Option<AlbumId>,
     pub visible_tracks: Vec<TrackRowVm>,
     pub loading: DeferredListStateVm,
+    pub tracks_loading: bool,
+    pub tracks_loaded: usize,
+    pub tracks_total: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +87,9 @@ pub struct ArtistTabVm {
     pub selected_artist: Option<ArtistId>,
     pub visible_tracks: Vec<TrackRowVm>,
     pub loading: DeferredListStateVm,
+    pub tracks_loading: bool,
+    pub tracks_loaded: usize,
+    pub tracks_total: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

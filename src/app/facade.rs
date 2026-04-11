@@ -1,29 +1,43 @@
 use std::io;
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::thread;
+use std::path::{Path, PathBuf};
 
 use crate::app::commands::{AppCommand, TrackListOrigin};
 use crate::app::events::{AppEvent, PlaybackEvent};
 use crate::app::view_models::{
     AlbumEntryVm, AlbumTabVm, AppViewModel, ArtistEntryVm, ArtistTabVm, DeferredListStateVm,
-    DirectoryEntryVm, FavoriteStateVm, LibraryTabVm, PlayTabVm, PlaylistEntryVm,
-    PlaylistTabVm, QueueTabVm, ScanTabVm, SettingItemVm, SettingsTabVm, TrackRowVm,
+    DirectoryEntryVm, FavoriteStateVm, LibraryTabVm, PlayTabVm, PlaylistEntryVm, PlaylistTabVm,
+    QueueTabVm, ScanTabVm, SettingItemVm, SettingsTabVm, TrackRowVm,
 };
-use crate::audio::output::{AudioDeviceOutput, AudioOutputConfig, BufferedAudioOutput};
 use crate::audio::device_watcher::DeviceWatcherHandle;
-use cpal::traits::{HostTrait, DeviceTrait};
+use crate::audio::output::{AudioDeviceOutput, AudioOutputConfig, BufferedAudioOutput};
 use crate::core::ids::{AlbumId, ArtistId, StrId, TrackId};
 use crate::core::library::{ArtistKind, DirectoryNodeId, Library};
-use crate::core::persistence::{AppConfigFile, AppStateFile, JsonStore, PlaylistsFile, TabId};
-use crate::core::playback::PlaybackState;
+use crate::core::persistence::{
+    AppConfigFile,
+    AppStateFile,
+    JsonStore,
+    PlaylistsFile,
+    TabId,
+    AlbumIndexEntry,
+    ArtistIndexFile,
+    ArtistIndexEntry,
+};
+use crate::core::artwork::ArtworkCache;
 use crate::core::playback::PlaybackModel;
+use crate::core::playback::PlaybackState;
 use crate::core::playlists::{PlaylistKind, PlaylistStore};
 use crate::core::queue::Queue;
 use crate::core::scan::{
-    build_library_from_track_inputs, ScanCommand, ScanModel, ScanOutcome, ScanState,
-    ScanWorkerHandle, ScanWorkerMessage,
+    ScanCommand, ScanModel, ScanOutcome, ScanState, ScanWorkerHandle, ScanWorkerMessage,
+    build_library_from_track_inputs,
 };
 use crate::core::strings::StringInterner;
 use crate::decode::decoder::{DecodeWorkerHandle, DecodeWorkerMessage, Decoder};
 use crate::decode::source::DecodedSource;
+use cpal::traits::{DeviceTrait, HostTrait};
 
 const AUDIO_BLOCK_CAPACITY: usize = 8_192;
 const BROWSE_HYDRATE_BATCH_SIZE: usize = 64;
@@ -65,6 +79,62 @@ struct BrowseCacheState {
     composers: DeferredArtistListState,
 }
 
+#[derive(Debug)]
+enum BrowseLoaderMessage {
+    Track(crate::core::library::TrackInput),
+    Finished { missing_paths: Vec<String> },
+}
+
+struct BrowseLoaderHandle {
+    cancel_requested: Arc<AtomicBool>,
+    receiver: Receiver<BrowseLoaderMessage>,
+}
+
+impl BrowseLoaderHandle {
+    pub fn spawn(paths: Vec<String>) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel_requested);
+
+        thread::spawn(move || {
+            let mut missing_paths: Vec<String> = Vec::new();
+            for p in paths {
+                if worker_cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let path = Path::new(&p);
+                if !path.exists() {
+                    missing_paths.push(p.clone());
+                    continue;
+                }
+                if let Some(track_input) = crate::core::scan::build_track_input_from_path(path) {
+                    let _ = sender.send(BrowseLoaderMessage::Track(track_input));
+                } else {
+                    missing_paths.push(p.clone());
+                }
+            }
+            let _ = sender.send(BrowseLoaderMessage::Finished { missing_paths });
+        });
+
+        Self {
+            cancel_requested,
+            receiver,
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancel_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn drain_messages(&self) -> Vec<BrowseLoaderMessage> {
+        let mut messages = Vec::new();
+        while let Ok(msg) = self.receiver.try_recv() {
+            messages.push(msg);
+        }
+        messages
+    }
+}
+
 impl DeferredAlbumListState {
     fn reset(&mut self, log_entries: Vec<AlbumLogEntry>) {
         self.log_entries = log_entries;
@@ -78,24 +148,33 @@ impl DeferredAlbumListState {
             return;
         }
 
-        self.hydrated_entries.extend(self.log_entries[start..end].iter().map(|entry| AlbumEntryVm {
-            album_id: entry.album_id,
-            title: entry.title.clone(),
-            album_artist: entry.album_artist.clone(),
-            track_count: entry.track_count,
-            is_provisional: false,
-        }));
+        self.hydrated_entries
+            .extend(
+                self.log_entries[start..end]
+                    .iter()
+                    .map(|entry| AlbumEntryVm {
+                        album_id: entry.album_id,
+                        title: entry.title.clone(),
+                        album_artist: entry.album_artist.clone(),
+                        track_count: entry.track_count,
+                        is_provisional: false,
+                    }),
+            );
     }
 
     fn visible_entries(&self) -> Vec<AlbumEntryVm> {
         let mut entries = self.hydrated_entries.clone();
-        entries.extend(self.log_entries[self.hydrated_entries.len()..].iter().map(|entry| AlbumEntryVm {
-            album_id: entry.album_id,
-            title: entry.title.clone(),
-            album_artist: entry.album_artist.clone(),
-            track_count: entry.track_count,
-            is_provisional: true,
-        }));
+        entries.extend(
+            self.log_entries[self.hydrated_entries.len()..]
+                .iter()
+                .map(|entry| AlbumEntryVm {
+                    album_id: entry.album_id,
+                    title: entry.title.clone(),
+                    album_artist: entry.album_artist.clone(),
+                    track_count: entry.track_count,
+                    is_provisional: true,
+                }),
+        );
         entries
     }
 
@@ -121,22 +200,31 @@ impl DeferredArtistListState {
             return;
         }
 
-        self.hydrated_entries.extend(self.log_entries[start..end].iter().map(|entry| ArtistEntryVm {
-            artist_id: entry.artist_id,
-            name: entry.name.clone(),
-            track_count: entry.track_count,
-            is_provisional: false,
-        }));
+        self.hydrated_entries
+            .extend(
+                self.log_entries[start..end]
+                    .iter()
+                    .map(|entry| ArtistEntryVm {
+                        artist_id: entry.artist_id,
+                        name: entry.name.clone(),
+                        track_count: entry.track_count,
+                        is_provisional: false,
+                    }),
+            );
     }
 
     fn visible_entries(&self) -> Vec<ArtistEntryVm> {
         let mut entries = self.hydrated_entries.clone();
-        entries.extend(self.log_entries[self.hydrated_entries.len()..].iter().map(|entry| ArtistEntryVm {
-            artist_id: entry.artist_id,
-            name: entry.name.clone(),
-            track_count: entry.track_count,
-            is_provisional: true,
-        }));
+        entries.extend(
+            self.log_entries[self.hydrated_entries.len()..]
+                .iter()
+                .map(|entry| ArtistEntryVm {
+                    artist_id: entry.artist_id,
+                    name: entry.name.clone(),
+                    track_count: entry.track_count,
+                    is_provisional: true,
+                }),
+        );
         entries
     }
 
@@ -162,6 +250,9 @@ pub struct AppFacade {
     device_watcher: Option<DeviceWatcherHandle>,
     current_audio_device_name: Option<String>,
     audio_disconnected: bool,
+    #[cfg(test)]
+    test_audio_device_present: bool,
+    pub artwork_cache: ArtworkCache,
     decoder: Decoder,
     decode_worker: Option<DecodeWorkerHandle>,
     decode_completion_pending: Option<TrackId>,
@@ -172,6 +263,12 @@ pub struct AppFacade {
     selected_artist: Option<ArtistId>,
     selected_directory: Option<DirectoryNodeId>,
     browse_cache: BrowseCacheState,
+    // persisted indices loaded at startup (may be empty)
+    album_index: Vec<crate::core::persistence::AlbumIndexEntry>,
+    artist_index: crate::core::persistence::ArtistIndexFile,
+    // mapping of artist name -> ArtistId for quick lookup when lazy-loading
+    artist_name_to_id: std::collections::HashMap<String, ArtistId>,
+    browse_loader: Option<BrowseLoaderHandle>,
 }
 
 impl Default for AppFacade {
@@ -199,7 +296,9 @@ impl Default for AppFacade {
             AudioDeviceOutput::try_start(&audio_output).ok()
         };
 
-        let current_audio_device_name_val = audio_device.as_ref().and_then(|_| default_device_name.clone());
+        let current_audio_device_name_val = audio_device
+            .as_ref()
+            .and_then(|_| default_device_name.clone());
         audio_output.set_playback_active(false);
 
         let device_watcher = if cfg!(test) {
@@ -221,6 +320,9 @@ impl Default for AppFacade {
             device_watcher,
             current_audio_device_name: current_audio_device_name_val,
             audio_disconnected: false,
+            #[cfg(test)]
+            test_audio_device_present: false,
+            artwork_cache: ArtworkCache::new(64),
             decoder: Decoder::default(),
             decode_worker: None,
             decode_completion_pending: None,
@@ -231,6 +333,10 @@ impl Default for AppFacade {
             selected_artist: None,
             selected_directory: None,
             browse_cache: BrowseCacheState::default(),
+            album_index: Vec::new(),
+            artist_index: crate::core::persistence::ArtistIndexFile::default(),
+            artist_name_to_id: std::collections::HashMap::new(),
+            browse_loader: None,
         }
     }
 }
@@ -267,7 +373,145 @@ impl AppFacade {
             &self.playlists,
             &self.library,
             &self.strings,
-        ))
+        ))?;
+        // save artwork cache if present
+        let _ = store.save_artwork_cache(&self.artwork_cache);
+
+        // Build and save album index
+        let album_entries: Vec<AlbumIndexEntry> = self
+            .library
+            .albums
+            .titles
+            .iter()
+            .enumerate()
+            .map(|(index, title_id)| {
+                let title = self
+                    .strings
+                    .resolve(*title_id)
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let album_artist = self
+                    .library
+                    .albums
+                    .album_artist_ids
+                    .get(index)
+                    .and_then(|a| a.and_then(|id| self.library.artist_name(id, &self.strings)))
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let tracks: Vec<String> = self
+                    .library
+                    .indexes
+                    .tracks_by_album
+                    .get(index)
+                    .map(|v| {
+                        v.iter()
+                            .filter_map(|track_id| {
+                                self.library
+                                    .track_key(*track_id)
+                                    .map(|k| k.normalized_path.clone())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                AlbumIndexEntry {
+                    title,
+                    album_artist,
+                    track_count: tracks.len(),
+                    tracks,
+                }
+            })
+            .collect();
+
+        let _ = store.save_album_index(&album_entries);
+
+        // Build and save artist index file (track/artists, album_artists, composers)
+        let mut track_artists: Vec<ArtistIndexEntry> = Vec::new();
+        let mut album_artists: Vec<ArtistIndexEntry> = Vec::new();
+        let mut composers: Vec<ArtistIndexEntry> = Vec::new();
+
+        for (index, name_id) in self.library.artists.names.iter().enumerate() {
+            let name = self
+                .strings
+                .resolve(*name_id)
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let track_list: Vec<String> = self
+                .library
+                .indexes
+                .tracks_by_artist
+                .get(index)
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|tid| {
+                            self.library
+                                .track_key(*tid)
+                                .map(|k| k.normalized_path.clone())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !track_list.is_empty() {
+                track_artists.push(ArtistIndexEntry {
+                    name: name.clone(),
+                    track_count: track_list.len(),
+                    tracks: track_list.clone(),
+                });
+            }
+
+            let album_list: Vec<String> = self
+                .library
+                .indexes
+                .tracks_by_album_artist
+                .get(index)
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|tid| {
+                            self.library
+                                .track_key(*tid)
+                                .map(|k| k.normalized_path.clone())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !album_list.is_empty() {
+                album_artists.push(ArtistIndexEntry {
+                    name: name.clone(),
+                    track_count: album_list.len(),
+                    tracks: album_list.clone(),
+                });
+            }
+
+            let composer_list: Vec<String> = self
+                .library
+                .indexes
+                .tracks_by_composer
+                .get(index)
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|tid| {
+                            self.library
+                                .track_key(*tid)
+                                .map(|k| k.normalized_path.clone())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !composer_list.is_empty() {
+                composers.push(ArtistIndexEntry {
+                    name: name.clone(),
+                    track_count: composer_list.len(),
+                    tracks: composer_list.clone(),
+                });
+            }
+        }
+
+        let artist_file = ArtistIndexFile {
+            track_artists,
+            album_artists,
+            composers,
+        };
+
+        let _ = store.save_artist_index(&artist_file);
+
+        Ok(())
     }
 
     pub fn bootstrap_from_store(&mut self, store: &JsonStore) -> io::Result<()> {
@@ -304,7 +548,8 @@ impl AppFacade {
         self.queue.repeat_mode = state.repeat_mode;
 
         if let Some(track_id) = self.queue.current_track() {
-            self.playback.restore_track(track_id, state.playback_position_ms);
+            self.playback
+                .restore_track(track_id, state.playback_position_ms);
             let _ = self.prepare_audio(track_id);
         } else {
             self.playback.stop();
@@ -316,6 +561,131 @@ impl AppFacade {
             playlist_file.restore_playlists(&self.library, &mut self.strings);
         self.playlists
             .replace_all(playlists, Some(favorite_playlist), favorite_playlist);
+
+        // attempt to load artwork cache (best-effort)
+        if let Ok(cache) = store.load_artwork_cache(64) {
+            self.artwork_cache = cache;
+        }
+
+        // Attempt to load persisted album/artist indices (best-effort).
+        if let Ok(album_index) = store.load_album_index() {
+            let artist_index = store.load_artist_index().unwrap_or_default();
+
+            // keep copies of the persisted indices for lazy loading on demand
+            self.album_index = album_index.clone();
+            self.artist_index = artist_index.clone();
+
+            // Build a mapping of artist name -> ArtistId and pre-populate artist table
+            let mut artist_map: std::collections::HashMap<String, crate::core::ids::ArtistId> =
+                std::collections::HashMap::new();
+
+            for entry in artist_index
+                .track_artists
+                .iter()
+                .chain(artist_index.album_artists.iter())
+                .chain(artist_index.composers.iter())
+            {
+                if !artist_map.contains_key(&entry.name) {
+                    let id = crate::core::ids::ArtistId(self.library.artists.names.len() as u32);
+                    let sid = self.strings.intern(entry.name.clone());
+                    self.library.artists.names.push(sid);
+                    artist_map.insert(entry.name.clone(), id);
+                }
+            }
+
+            for album in &album_index {
+                if !album.album_artist.is_empty() && !artist_map.contains_key(&album.album_artist) {
+                    let id = crate::core::ids::ArtistId(self.library.artists.names.len() as u32);
+                    let sid = self.strings.intern(album.album_artist.clone());
+                    self.library.artists.names.push(sid);
+                    artist_map.insert(album.album_artist.clone(), id);
+                }
+            }
+
+            // Pre-populate albums in the same order as saved index so AlbumId values are stable
+            for album in &album_index {
+                let title_id = self.strings.intern(album.title.clone());
+                let artist_id_opt = artist_map.get(&album.album_artist).copied();
+                self.library.albums.titles.push(title_id);
+                self.library.albums.album_artist_ids.push(artist_id_opt);
+                self.library.albums.representative_artwork.push(None);
+            }
+
+            // Initialize empty index vectors sized to the prepopulated counts
+            self.library.indexes.tracks_by_album = vec![Vec::new(); self.library.albums.titles.len()];
+            self.library.indexes.tracks_by_artist = vec![Vec::new(); self.library.artists.names.len()];
+            self.library.indexes.tracks_by_album_artist = vec![Vec::new(); self.library.artists.names.len()];
+            self.library.indexes.tracks_by_composer = vec![Vec::new(); self.library.artists.names.len()];
+
+            // Populate browse_cache from the index entries so UI can show lists immediately
+            self.browse_cache.albums.reset(
+                album_index
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| AlbumLogEntry {
+                        album_id: crate::core::ids::AlbumId(i as u32),
+                        title: a.title.clone(),
+                        album_artist: a.album_artist.clone(),
+                        track_count: a.track_count,
+                    })
+                    .collect(),
+            );
+
+            self.browse_cache.track_artists.reset(
+                artist_index
+                    .track_artists
+                    .iter()
+                    .filter_map(|entry| {
+                        artist_map
+                            .get(&entry.name)
+                            .map(|&id| ArtistLogEntry {
+                                artist_id: id,
+                                name: entry.name.clone(),
+                                track_count: entry.track_count,
+                            })
+                    })
+                    .collect(),
+            );
+
+            self.browse_cache.album_artists.reset(
+                artist_index
+                    .album_artists
+                    .iter()
+                    .filter_map(|entry| {
+                        artist_map
+                            .get(&entry.name)
+                            .map(|&id| ArtistLogEntry {
+                                artist_id: id,
+                                name: entry.name.clone(),
+                                track_count: entry.track_count,
+                            })
+                    })
+                    .collect(),
+            );
+
+            self.browse_cache.composers.reset(
+                artist_index
+                    .composers
+                    .iter()
+                    .filter_map(|entry| {
+                        artist_map
+                            .get(&entry.name)
+                            .map(|&id| ArtistLogEntry {
+                                artist_id: id,
+                                name: entry.name.clone(),
+                                track_count: entry.track_count,
+                            })
+                    })
+                    .collect(),
+            );
+
+            // keep a copy of the artist name -> id mapping for lazy-load lookups
+            self.artist_name_to_id = artist_map;
+
+            // Keep the browse cache revision in sync with library revision so we don't
+            // rebuild it prematurely; the actual tracks will be filled in when lazy-loaded.
+            self.browse_cache.library_revision = self.library.revision;
+        }
 
         Ok(())
     }
@@ -358,13 +728,16 @@ impl AppFacade {
                 self.sync_audio_transport();
                 // If playback is starting but we don't have an active audio device,
                 // attempt a best-effort restart of the output (preferred or default).
-                if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering)
-                    && self._audio_device.is_none()
+                if matches!(
+                    self.playback.state,
+                    PlaybackState::Playing | PlaybackState::Buffering
+                ) && !self.audio_device_present()
                 {
                     if let Some(pref) = self.settings.preferred_output_device.clone() {
-                        if let Ok(device) = AudioDeviceOutput::try_start_by_name(&self.audio_output, &pref) {
-                            self._audio_device = Some(device);
-                            self.current_audio_device_name = Some(pref);
+                        if let Ok(device) =
+                            AudioDeviceOutput::try_start_by_name(&self.audio_output, &pref)
+                        {
+                            self.set_audio_device(Some(device), Some(pref));
                             self.audio_disconnected = false;
                             self.sync_audio_transport();
                         }
@@ -373,11 +746,14 @@ impl AppFacade {
                         .and_then(|d| d.name().ok())
                     {
                         let old_cfg = self.audio_output.config();
-                        let target_cfg = AudioDeviceOutput::config_for_name(&default_name).unwrap_or(old_cfg);
+                        let target_cfg =
+                            AudioDeviceOutput::config_for_name(&default_name).unwrap_or(old_cfg);
                         if target_cfg.sample_rate == old_cfg.sample_rate {
-                            if let Ok(device) = AudioDeviceOutput::try_start_by_name(&self.audio_output, &default_name) {
-                                self._audio_device = Some(device);
-                                self.current_audio_device_name = Some(default_name);
+                            if let Ok(device) = AudioDeviceOutput::try_start_by_name(
+                                &self.audio_output,
+                                &default_name,
+                            ) {
+                                self.set_audio_device(Some(device), Some(default_name));
                                 self.audio_disconnected = false;
                                 self.sync_audio_transport();
                             }
@@ -385,15 +761,17 @@ impl AppFacade {
                             // recreate buffered output and re-prime
                             self.cancel_decode_worker();
                             let old_block_capacity = self.audio_output.block_capacity();
-                            let new_output = BufferedAudioOutput::new(target_cfg, old_block_capacity);
-                            if let Ok(device) = AudioDeviceOutput::try_start_by_name(&new_output, &default_name) {
+                            let new_output =
+                                BufferedAudioOutput::new(target_cfg, old_block_capacity);
+                            if let Ok(device) =
+                                AudioDeviceOutput::try_start_by_name(&new_output, &default_name)
+                            {
                                 self.audio_output = new_output;
-                                self._audio_device = Some(device);
-                                self.current_audio_device_name = Some(default_name.clone());
+                                self.set_audio_device(Some(device), Some(default_name.clone()));
                                 if let Some(track_id) = self.playback.current_track {
                                     let _ = self.prepare_audio(track_id);
-                                        // after priming, resume audio output
-                                        self.sync_audio_transport();
+                                    // after priming, resume audio output
+                                    self.sync_audio_transport();
                                 }
                             }
                         }
@@ -406,6 +784,9 @@ impl AppFacade {
             }
             AppCommand::SeekBy { delta_ms } => {
                 self.playback.seek_by(delta_ms);
+                if let Some(track_id) = self.playback.current_track {
+                    let _ = self.prepare_audio(track_id);
+                }
                 self.sync_audio_transport();
                 vec![AppEvent::Playback(PlaybackEvent::PositionUpdated {
                     position_ms: self.playback.position_ms,
@@ -414,6 +795,9 @@ impl AppFacade {
             }
             AppCommand::SeekTo { position_ms } => {
                 self.playback.seek_to(position_ms);
+                if let Some(track_id) = self.playback.current_track {
+                    let _ = self.prepare_audio(track_id);
+                }
                 self.sync_audio_transport();
                 vec![AppEvent::Playback(PlaybackEvent::PositionUpdated {
                     position_ms: self.playback.position_ms,
@@ -437,6 +821,9 @@ impl AppFacade {
             }
             AppCommand::SelectAlbum(album_id) => {
                 self.selected_album = album_id;
+                if let Some(aid) = album_id {
+                    self.lazy_load_album_tracks(aid);
+                }
                 vec![AppEvent::TabChanged(self.current_tab)]
             }
             AppCommand::SelectArtistKind(kind) => {
@@ -446,6 +833,9 @@ impl AppFacade {
             }
             AppCommand::SelectArtist(artist_id) => {
                 self.selected_artist = artist_id;
+                if let Some(aid) = artist_id {
+                    self.lazy_load_artist_tracks(aid, self.selected_artist_kind);
+                }
                 vec![AppEvent::TabChanged(self.current_tab)]
             }
             AppCommand::SelectPlaylist(playlist_id) => {
@@ -483,40 +873,50 @@ impl AppFacade {
 
                 if let Some(device) = started_device {
                     self.audio_output = new_output;
-                    self._audio_device = Some(device);
-
-                    // record current device name
-                    self.current_audio_device_name = device_name.clone().or_else(|| {
-                        cpal::default_host()
-                            .default_output_device()
-                            .and_then(|d| d.name().ok())
-                    });
+                    self.set_audio_device(
+                        Some(device),
+                        device_name.clone().or_else(|| {
+                            cpal::default_host()
+                                .default_output_device()
+                                .and_then(|d| d.name().ok())
+                        }),
+                    );
 
                     // Re-prepare audio for the currently selected track so decoder will
                     // resample to the device's sample rate, then resume audio output
                     if let Some(track_id) = self.playback.current_track {
                         let _ = self.prepare_audio(track_id);
                     }
-                    if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                    if matches!(
+                        self.playback.state,
+                        PlaybackState::Playing | PlaybackState::Buffering
+                    ) {
                         self.sync_audio_transport();
                     }
                 } else {
                     // Could not start the new device. Try to restart using the old output
                     // (best-effort) and keep current audio_output unchanged.
                     let fallback = match device_name.as_ref() {
-                        Some(name) => AudioDeviceOutput::try_start_by_name(&self.audio_output, name).ok(),
+                        Some(name) => {
+                            AudioDeviceOutput::try_start_by_name(&self.audio_output, name).ok()
+                        }
                         None => AudioDeviceOutput::try_start(&self.audio_output).ok(),
                     };
-                    self._audio_device = fallback;
-                    // update current device name if fallback succeeded
-                    if self._audio_device.is_some() {
-                        self.current_audio_device_name = device_name.clone().or_else(|| {
+                    self.set_audio_device(
+                        fallback,
+                        device_name.clone().or_else(|| {
                             cpal::default_host()
                                 .default_output_device()
                                 .and_then(|d| d.name().ok())
-                        });
+                        }),
+                    );
+                    // update current device name if fallback succeeded (test helper will set name)
+                    if self.audio_device_present() {
                         // if playback was active, prime and resume audio
-                        if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                        if matches!(
+                            self.playback.state,
+                            PlaybackState::Playing | PlaybackState::Buffering
+                        ) {
                             if let Some(track_id) = self.playback.current_track {
                                 let _ = self.prepare_audio(track_id);
                             }
@@ -552,6 +952,42 @@ impl AppFacade {
         }
     }
 
+    fn audio_device_present(&self) -> bool {
+        #[cfg(test)]
+        {
+            self._audio_device.is_some() || self.test_audio_device_present
+        }
+        #[cfg(not(test))]
+        {
+            self._audio_device.is_some()
+        }
+    }
+
+    fn set_audio_device(&mut self, device: Option<AudioDeviceOutput>, name: Option<String>) {
+        #[cfg(test)]
+        {
+            // in tests we don't construct real AudioDeviceOutput streams; track presence with flag
+            self._audio_device = device;
+            self.test_audio_device_present = self._audio_device.is_some();
+            self.current_audio_device_name = name;
+        }
+        #[cfg(not(test))]
+        {
+            self._audio_device = device;
+            self.current_audio_device_name = name;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_test_audio_device_present(&mut self, present: bool, name: Option<String>) {
+        self.test_audio_device_present = present;
+        if present {
+            self.current_audio_device_name = name;
+        } else {
+            self.current_audio_device_name = None;
+        }
+    }
+
     pub fn poll_background_tasks(&mut self) -> Vec<AppEvent> {
         self.ensure_browse_cache_current();
         let mut events = Vec::new();
@@ -563,29 +999,38 @@ impl AppFacade {
             handled_hotplug = true;
             for message in watcher.drain_messages() {
                 match message {
-                    crate::audio::device_watcher::DeviceWatcherMessage::DevicesChanged { devices, default } => {
+                    crate::audio::device_watcher::DeviceWatcherMessage::DevicesChanged {
+                        devices,
+                        default,
+                    } => {
                         if let Some(pref) = self.settings.preferred_output_device.clone() {
                             let present = devices.iter().any(|d| d == &pref);
-                            if !present && self._audio_device.is_some() {
+                            if !present && self.audio_device_present() {
                                 // device disappeared: don't change playback state, just stop audio output
-                                self._audio_device = None;
+                                self.set_audio_device(None, None);
                                 self.audio_output.set_playback_active(false);
                                 self.audio_disconnected = true;
                                 events.push(AppEvent::Playback(PlaybackEvent::DeviceUnderrun));
-                            } else if present && self._audio_device.is_none() {
+                            } else if present && !self.audio_device_present() {
                                 // device reappeared, try to restart output (do not auto-resume playback)
-                                if let Ok(device) = AudioDeviceOutput::try_start_by_name(&self.audio_output, &pref) {
-                                    self._audio_device = Some(device);
-                                    self.current_audio_device_name = Some(pref.clone());
+                                if let Ok(device) =
+                                    AudioDeviceOutput::try_start_by_name(&self.audio_output, &pref)
+                                {
+                                    self.set_audio_device(Some(device), Some(pref.clone()));
                                     self.audio_disconnected = false;
                                     // If playback was active, re-prime playback and resume audio output
-                                    if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                                    if matches!(
+                                        self.playback.state,
+                                        PlaybackState::Playing | PlaybackState::Buffering
+                                    ) {
                                         if let Some(track_id) = self.playback.current_track {
                                             let _ = self.prepare_audio(track_id);
                                         }
                                         self.sync_audio_transport();
                                     }
-                                    events.push(AppEvent::Playback(PlaybackEvent::StateChanged(self.playback.state)));
+                                    events.push(AppEvent::Playback(PlaybackEvent::StateChanged(
+                                        self.playback.state,
+                                    )));
                                 }
                             }
                         } else {
@@ -595,56 +1040,77 @@ impl AppFacade {
                             // If default changed and we previously had a device, attempt to switch.
                             if default_name != self.current_audio_device_name {
                                 // If no default now, clear existing device.
-                                    if default_name.is_none() {
-                                        if self._audio_device.is_some() {
-                                            self._audio_device = None;
-                                            self.audio_output.set_playback_active(false);
-                                            self.audio_disconnected = true;
-                                            self.current_audio_device_name = None;
-                                            events.push(AppEvent::Playback(PlaybackEvent::DeviceUnderrun));
-                                        }
-                                    } else if let Some(new_name) = default_name.clone() {
+                                if default_name.is_none() {
+                                    if self.audio_device_present() {
+                                        self.set_audio_device(None, None);
+                                        self.audio_output.set_playback_active(false);
+                                        self.audio_disconnected = true;
+                                        self.current_audio_device_name = None;
+                                        events.push(AppEvent::Playback(
+                                            PlaybackEvent::DeviceUnderrun,
+                                        ));
+                                    }
+                                } else if let Some(new_name) = default_name.clone() {
                                     // Attempt to negotiate config and start the new default device.
                                     let old_config = self.audio_output.config();
-                                    let target_cfg = AudioDeviceOutput::config_for_name(&new_name).unwrap_or(old_config);
+                                    let target_cfg = AudioDeviceOutput::config_for_name(&new_name)
+                                        .unwrap_or(old_config);
 
-                                        if target_cfg.sample_rate == old_config.sample_rate {
-                                            // can reuse existing BufferedAudioOutput
-                                            if let Ok(device) = AudioDeviceOutput::try_start_by_name(&self.audio_output, &new_name) {
-                                                self._audio_device = Some(device);
-                                                self.current_audio_device_name = Some(new_name.clone());
-                                                self.audio_disconnected = false;
-                                                // resume audio output if playback is active
-                                                if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
-                                                    self.sync_audio_transport();
-                                                }
-                                                events.push(AppEvent::Playback(PlaybackEvent::StateChanged(self.playback.state)));
+                                    if target_cfg.sample_rate == old_config.sample_rate {
+                                        // can reuse existing BufferedAudioOutput
+                                        if let Ok(device) = AudioDeviceOutput::try_start_by_name(
+                                            &self.audio_output,
+                                            &new_name,
+                                        ) {
+                                            self.set_audio_device(Some(device), Some(new_name.clone()));
+                                            self.audio_disconnected = false;
+                                            // resume audio output if playback is active
+                                            if matches!(
+                                                self.playback.state,
+                                                PlaybackState::Playing | PlaybackState::Buffering
+                                            ) {
+                                                self.sync_audio_transport();
+                                            }
+                                            events.push(AppEvent::Playback(
+                                                PlaybackEvent::StateChanged(self.playback.state),
+                                            ));
+                                        }
+                                    } else {
+                                        // sample-rate changed: recreate buffered output and re-prime from current position
+                                        self.cancel_decode_worker();
+                                        let old_block_capacity = self.audio_output.block_capacity();
+                                        let new_output = BufferedAudioOutput::new(
+                                            target_cfg,
+                                            old_block_capacity,
+                                        );
+                                        if let Ok(device) = AudioDeviceOutput::try_start_by_name(
+                                            &new_output,
+                                            &new_name,
+                                        ) {
+                                            self.audio_output = new_output;
+                                            self.set_audio_device(Some(device), Some(new_name.clone()));
+                                            if let Some(track_id) = self.playback.current_track {
+                                                let _ = self.prepare_audio(track_id);
+                                            }
+                                            // after priming, resume audio if playback was active
+                                            if matches!(
+                                                self.playback.state,
+                                                PlaybackState::Playing | PlaybackState::Buffering
+                                            ) {
+                                                self.sync_audio_transport();
                                             }
                                         } else {
-                                            // sample-rate changed: recreate buffered output and re-prime from current position
-                                            self.cancel_decode_worker();
-                                            let old_block_capacity = self.audio_output.block_capacity();
-                                            let new_output = BufferedAudioOutput::new(target_cfg, old_block_capacity);
-                                            if let Ok(device) = AudioDeviceOutput::try_start_by_name(&new_output, &new_name) {
-                                                self.audio_output = new_output;
-                                                self._audio_device = Some(device);
-                                                self.current_audio_device_name = Some(new_name.clone());
-                                                if let Some(track_id) = self.playback.current_track {
-                                                    let _ = self.prepare_audio(track_id);
-                                                }
-                                                // after priming, resume audio if playback was active
-                                                if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
-                                                    self.sync_audio_transport();
-                                                }
-                                            } else {
-                                                // fallback: try start using existing audio_output
-                                                let fallback = AudioDeviceOutput::try_start_by_name(&self.audio_output, &new_name).ok();
-                                                if fallback.is_some() {
-                                                    self._audio_device = fallback;
-                                                    self.current_audio_device_name = Some(new_name.clone());
-                                                }
+                                            // fallback: try start using existing audio_output
+                                            let fallback = AudioDeviceOutput::try_start_by_name(
+                                                &self.audio_output,
+                                                &new_name,
+                                            )
+                                            .ok();
+                                            if fallback.is_some() {
+                                                self.set_audio_device(fallback, Some(new_name.clone()));
                                             }
                                         }
+                                    }
                                 }
                             }
                         }
@@ -658,30 +1124,39 @@ impl AppFacade {
             if let Some(pref) = self.settings.preferred_output_device.clone() {
                 let available = AudioDeviceOutput::list_output_devices();
                 let present = available.iter().any(|d| d == &pref);
-                if !present && self._audio_device.is_some() {
+                if !present && self.audio_device_present() {
                     // device disappeared
-                    self._audio_device = None;
-                    if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
+                    self.set_audio_device(None, None);
+                    if matches!(
+                        self.playback.state,
+                        PlaybackState::Playing | PlaybackState::Buffering
+                    ) {
                         self.playback.state = PlaybackState::Paused;
                     }
                     self.audio_output.set_playback_active(false);
                     self.audio_disconnected = true;
                     events.push(AppEvent::Playback(PlaybackEvent::DeviceUnderrun));
-                } else if present && self._audio_device.is_none() {
+                } else if present && !self.audio_device_present() {
                     // device reappeared, try to restart output (do not auto-resume playback)
-                        if let Ok(device) = AudioDeviceOutput::try_start_by_name(&self.audio_output, &pref) {
-                            self._audio_device = Some(device);
-                            self.current_audio_device_name = Some(pref.clone());
-                            self.audio_disconnected = false;
-                            // resume audio output if playback is active
-                            if matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering) {
-                                if let Some(track_id) = self.playback.current_track {
-                                    let _ = self.prepare_audio(track_id);
-                                }
-                                self.sync_audio_transport();
+                    if let Ok(device) =
+                        AudioDeviceOutput::try_start_by_name(&self.audio_output, &pref)
+                    {
+                        self.set_audio_device(Some(device), Some(pref.clone()));
+                        self.audio_disconnected = false;
+                        // resume audio output if playback is active
+                        if matches!(
+                            self.playback.state,
+                            PlaybackState::Playing | PlaybackState::Buffering
+                        ) {
+                            if let Some(track_id) = self.playback.current_track {
+                                let _ = self.prepare_audio(track_id);
                             }
-                            events.push(AppEvent::Playback(PlaybackEvent::StateChanged(self.playback.state)));
+                            self.sync_audio_transport();
                         }
+                        events.push(AppEvent::Playback(PlaybackEvent::StateChanged(
+                            self.playback.state,
+                        )));
+                    }
                 }
             }
         }
@@ -726,15 +1201,97 @@ impl AppFacade {
         }
 
         if let Some(track_id) = decode_failed_for {
-            if self.playback.current_track == Some(track_id) && self.audio_output.pending_samples() == 0 {
+            if self.playback.current_track == Some(track_id)
+                && self.audio_output.pending_samples() == 0
+            {
                 events.extend(self.advance_after_track_end());
             }
         }
 
         if let Some(track_id) = self.decode_completion_pending {
-            if self.playback.current_track == Some(track_id) && self.audio_output.pending_samples() == 0 {
+            if self.playback.current_track == Some(track_id)
+                && self.audio_output.pending_samples() == 0
+            {
                 self.decode_completion_pending = None;
                 events.extend(self.advance_after_track_end());
+            }
+        }
+
+        // Drain messages from the browse loader (background lazy-load of persisted index paths)
+        let mut browse_finished = false;
+        let mut browse_missing_paths: Vec<String> = Vec::new();
+        let mut library_changed = false;
+        if let Some(loader) = self.browse_loader.as_ref() {
+            for message in loader.drain_messages() {
+                match message {
+                    BrowseLoaderMessage::Track(track_input) => {
+                        let _ = self.library.upsert_track(&mut self.strings, track_input);
+                        library_changed = true;
+                    }
+                    BrowseLoaderMessage::Finished { missing_paths } => {
+                        browse_finished = true;
+                        browse_missing_paths = missing_paths;
+                    }
+                }
+            }
+        }
+
+        if library_changed {
+            // Ensure browse cache is rebuilt from the updated library so UI shows hydrated rows.
+            self.ensure_browse_cache_current();
+            events.push(AppEvent::TabChanged(self.current_tab));
+        }
+
+        if browse_finished {
+            // keep the loader cleared and refresh UI
+            self.browse_loader = None;
+            events.push(AppEvent::TabChanged(self.current_tab));
+
+            // If there were missing paths, attempt a targeted re-scan of likely roots
+            if !browse_missing_paths.is_empty() {
+                // compute candidate roots: prefer configured include dirs that contain the missing path,
+                // otherwise use the nearest existing ancestor directory
+                let mut roots: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+                for missing in browse_missing_paths.iter() {
+                    let p = Path::new(missing);
+                    if let Some(mut ancestor) = p.parent() {
+                        // climb until we find an existing directory or run out
+                        while !ancestor.exists() {
+                            if let Some(parent) = ancestor.parent() {
+                                ancestor = parent;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        // pick the include dir that is an ancestor of this path if any
+                        let mut added = false;
+                        for include in &self.scan.config.include_dirs {
+                            if ancestor.starts_with(include) {
+                                roots.insert(include.clone());
+                                added = true;
+                                break;
+                            }
+                        }
+                        if !added && ancestor.exists() {
+                            roots.insert(ancestor.to_path_buf());
+                        }
+                    }
+                }
+
+                if roots.is_empty() {
+                    // fallback to full scan if we couldn't locate candidate roots
+                    if self.scan_worker.is_none() {
+                        events.extend(self.handle_scan_command(ScanCommand::StartFullScan));
+                    }
+                } else {
+                    // spawn targeted scan for the computed roots
+                    if self.scan_worker.is_none() {
+                        self.scan.apply(ScanCommand::StartFullScan);
+                        let roots_vec: Vec<PathBuf> = roots.into_iter().collect();
+                        self.scan_worker = Some(ScanWorkerHandle::spawn_targeted(roots_vec, self.scan.config.exclude_dirs.clone()));
+                    }
+                }
             }
         }
 
@@ -857,9 +1414,7 @@ impl AppFacade {
 
             // Decode entire file to obtain blocks starting at the desired position,
             // then prime the output with a small number of blocks from that position.
-            let all_blocks = self
-                .decoder
-                .decode_all_blocks(&source, cfg)?;
+            let all_blocks = self.decoder.decode_all_blocks(&source, cfg)?;
             let start = skip_blocks.min(all_blocks.len());
             let prime_blocks: Vec<_> = all_blocks[start..]
                 .iter()
@@ -876,9 +1431,11 @@ impl AppFacade {
                 worker_skip,
             ));
         } else {
-            let initial_blocks = self
-                .decoder
-                .decode_blocks(&source, cfg, INITIAL_DECODE_PRIME_BLOCKS.min(self.audio_output.block_capacity()))?;
+            let initial_blocks = self.decoder.decode_blocks(
+                &source,
+                cfg,
+                INITIAL_DECODE_PRIME_BLOCKS.min(self.audio_output.block_capacity()),
+            )?;
             let initial_count = self.audio_output.try_enqueue_many(initial_blocks);
             self.decode_worker = Some(DecodeWorkerHandle::spawn(
                 source,
@@ -906,14 +1463,23 @@ impl AppFacade {
     }
 
     fn sync_audio_transport(&self) {
-        let active = matches!(self.playback.state, PlaybackState::Playing | PlaybackState::Buffering);
+        let active = matches!(
+            self.playback.state,
+            PlaybackState::Playing | PlaybackState::Buffering
+        );
         self.audio_output.set_playback_active(active);
     }
 
     fn complete_scan(&mut self, outcome: ScanOutcome) {
         self.scan.progress = outcome.progress.clone();
         self.scan.finish_with(outcome.result);
-        self.library = build_library_from_track_inputs(&mut self.strings, outcome.tracks);
+        if outcome.targeted {
+            for track in outcome.tracks {
+                let _ = self.library.upsert_track(&mut self.strings, track);
+            }
+        } else {
+            self.library = build_library_from_track_inputs(&mut self.strings, outcome.tracks);
+        }
         self.ensure_browse_cache_current();
     }
 
@@ -952,9 +1518,15 @@ impl AppFacade {
                 })
                 .collect(),
         );
-        self.browse_cache.track_artists.reset(self.artist_log_entries_for(ArtistKind::TrackArtist));
-        self.browse_cache.album_artists.reset(self.artist_log_entries_for(ArtistKind::AlbumArtist));
-        self.browse_cache.composers.reset(self.artist_log_entries_for(ArtistKind::Composer));
+        self.browse_cache
+            .track_artists
+            .reset(self.artist_log_entries_for(ArtistKind::TrackArtist));
+        self.browse_cache
+            .album_artists
+            .reset(self.artist_log_entries_for(ArtistKind::AlbumArtist));
+        self.browse_cache
+            .composers
+            .reset(self.artist_log_entries_for(ArtistKind::Composer));
         self.browse_cache.library_revision = self.library.revision;
     }
 
@@ -963,6 +1535,59 @@ impl AppFacade {
         self.browse_cache.track_artists.hydrate_next_batch();
         self.browse_cache.album_artists.hydrate_next_batch();
         self.browse_cache.composers.hydrate_next_batch();
+    }
+
+    fn lazy_load_album_tracks(&mut self, album_id: AlbumId) {
+        let idx = album_id.0 as usize;
+        if idx >= self.album_index.len() {
+            return;
+        }
+
+        // If already have tracks in library for this album, skip.
+        if self
+            .library
+            .indexes
+            .tracks_by_album
+            .get(idx)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        // cancel any existing loader and spawn a new background loader for this album
+        if let Some(loader) = self.browse_loader.as_ref() {
+            loader.cancel();
+        }
+        let paths: Vec<String> = self.album_index[idx].tracks.clone();
+        if paths.is_empty() {
+            return;
+        }
+        self.browse_loader = Some(BrowseLoaderHandle::spawn(paths));
+    }
+
+    fn lazy_load_artist_tracks(&mut self, artist_id: ArtistId, kind: ArtistKind) {
+        let entries = match kind {
+            ArtistKind::TrackArtist => &self.artist_index.track_artists,
+            ArtistKind::AlbumArtist => &self.artist_index.album_artists,
+            ArtistKind::Composer => &self.artist_index.composers,
+        };
+
+        // find the persisted artist entry and spawn background loader for its paths
+        for entry in entries.iter() {
+            if let Some(&id) = self.artist_name_to_id.get(&entry.name) {
+                if id == artist_id {
+                    if let Some(loader) = self.browse_loader.as_ref() {
+                        loader.cancel();
+                    }
+                    let paths: Vec<String> = entry.tracks.clone();
+                    if !paths.is_empty() {
+                        self.browse_loader = Some(BrowseLoaderHandle::spawn(paths));
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     fn artist_log_entries_for(&self, kind: ArtistKind) -> Vec<ArtistLogEntry> {
@@ -1021,14 +1646,40 @@ impl AppFacade {
     fn album_tab_vm(&self) -> AlbumTabVm {
         let visible_tracks = self
             .selected_album
-            .map(|album_id| self.track_rows_for_tracks(self.library.visible_tracks_for_album(album_id)))
+            .map(|album_id| {
+                self.track_rows_for_tracks(self.library.visible_tracks_for_album(album_id))
+            })
             .unwrap_or_default();
+
+        // Compute per-album track hydration progress
+        let (tracks_loading, tracks_loaded, tracks_total) = if let Some(album_id) = self.selected_album {
+            let idx = album_id.0 as usize;
+            let total = self
+                .album_index
+                .get(idx)
+                .map(|a| a.tracks.len())
+                .or_else(|| self.library.indexes.tracks_by_album.get(idx).map(|v| v.len()))
+                .unwrap_or(0);
+            let loaded = self
+                .library
+                .indexes
+                .tracks_by_album
+                .get(idx)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            (self.browse_loader.is_some() && loaded < total, loaded, total)
+        } else {
+            (false, 0, 0)
+        };
 
         AlbumTabVm {
             albums: self.browse_cache.albums.visible_entries(),
             expanded_album: self.selected_album,
             visible_tracks,
             loading: self.browse_cache.albums.loading_state(),
+            tracks_loading,
+            tracks_loaded,
+            tracks_total,
         }
     }
 
@@ -1058,12 +1709,58 @@ impl AppFacade {
             ),
         };
 
+        // Compute per-artist track hydration progress
+        let (tracks_loading, tracks_loaded, tracks_total) = if let Some(artist_id) = self.selected_artist {
+            let idx = artist_id.0 as usize;
+            let loaded = self
+                .library
+                .indexes
+                .tracks_by_artist
+                .get(idx)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            // try to resolve total from persisted index entries; fallback to library index
+            let total = match self.selected_artist_kind {
+                ArtistKind::TrackArtist => self
+                    .artist_index
+                    .track_artists
+                    .iter()
+                    .find(|e| self.library.artist_name(artist_id, &self.strings) == Some(e.name.clone()))
+                    .map(|e| e.tracks.len())
+                    .or_else(|| self.library.indexes.tracks_by_artist.get(idx).map(|v| v.len()))
+                    .unwrap_or(0),
+                ArtistKind::AlbumArtist => self
+                    .artist_index
+                    .album_artists
+                    .iter()
+                    .find(|e| self.library.artist_name(artist_id, &self.strings) == Some(e.name.clone()))
+                    .map(|e| e.tracks.len())
+                    .or_else(|| self.library.indexes.tracks_by_album_artist.get(idx).map(|v| v.len()))
+                    .unwrap_or(0),
+                ArtistKind::Composer => self
+                    .artist_index
+                    .composers
+                    .iter()
+                    .find(|e| self.library.artist_name(artist_id, &self.strings) == Some(e.name.clone()))
+                    .map(|e| e.tracks.len())
+                    .or_else(|| self.library.indexes.tracks_by_composer.get(idx).map(|v| v.len()))
+                    .unwrap_or(0),
+            };
+
+            (self.browse_loader.is_some() && loaded < total, loaded, total)
+        } else {
+            (false, 0, 0)
+        };
+
         ArtistTabVm {
             kind: self.selected_artist_kind,
             artists,
             selected_artist: self.selected_artist,
             visible_tracks,
             loading,
+            tracks_loading,
+            tracks_loaded,
+            tracks_total,
         }
     }
 
@@ -1112,8 +1809,11 @@ impl AppFacade {
                 root.children
                     .iter()
                     .filter_map(|node_id| {
-                        self.library.directories.nodes.get(node_id.0 as usize).map(|node| {
-                            DirectoryEntryVm {
+                        self.library
+                            .directories
+                            .nodes
+                            .get(node_id.0 as usize)
+                            .map(|node| DirectoryEntryVm {
                                 node_id: *node_id,
                                 name: self
                                     .strings
@@ -1121,8 +1821,7 @@ impl AppFacade {
                                     .unwrap_or_else(|| "Unknown".to_string()),
                                 child_count: node.children.len(),
                                 track_count: node.tracks.len(),
-                            }
-                        })
+                            })
                     })
                     .collect()
             })
@@ -1226,14 +1925,18 @@ impl AppFacade {
             .tracks
             .artist_ids
             .get(track_index)
-            .and_then(|artist_id| artist_id.and_then(|id| self.library.artist_name(id, &self.strings)))
+            .and_then(|artist_id| {
+                artist_id.and_then(|id| self.library.artist_name(id, &self.strings))
+            })
             .unwrap_or_else(|| "Unknown".to_string());
         let album = self
             .library
             .tracks
             .album_ids
             .get(track_index)
-            .and_then(|album_id| album_id.and_then(|id| self.library.album_title(id, &self.strings)))
+            .and_then(|album_id| {
+                album_id.and_then(|id| self.library.album_title(id, &self.strings))
+            })
             .unwrap_or_else(|| "Unknown".to_string());
 
         TrackRowVm {
@@ -1273,7 +1976,7 @@ mod tests {
 
     use super::AppFacade;
     use crate::app::commands::{AppCommand, TrackListOrigin};
-    use crate::app::events::AppEvent;
+    use crate::app::events::{AppEvent, PlaybackEvent};
     use crate::core::ids::TrackId;
     use crate::core::library::TrackInput;
     use crate::core::persistence::{JsonStore, PersistencePaths, TabId};
@@ -1296,7 +1999,10 @@ mod tests {
     fn poll_scan_until_finished(facade: &mut AppFacade) {
         for _ in 0..10_000 {
             facade.poll_background_tasks();
-            if !matches!(facade.scan.state, ScanState::Scanning | ScanState::Cancelling) {
+            if !matches!(
+                facade.scan.state,
+                ScanState::Scanning | ScanState::Cancelling
+            ) {
                 return;
             }
             thread::yield_now();
@@ -1316,8 +2022,12 @@ mod tests {
         for index in 0..frames {
             let phase = (index % 256) as i16;
             let sample = (phase * 128) - 16_384;
-            writer.write_sample(sample).expect("left sample should be written");
-            writer.write_sample(sample).expect("right sample should be written");
+            writer
+                .write_sample(sample)
+                .expect("left sample should be written");
+            writer
+                .write_sample(sample)
+                .expect("right sample should be written");
         }
         writer.finalize().expect("wav file should finalize");
     }
@@ -1367,7 +2077,9 @@ mod tests {
         facade.queue.set_current_index(1);
         facade.playback.restore_track(TrackId(1), 3_210);
         facade.current_tab = TabId::Play;
-        let _ = facade.handle_command(AppCommand::Scan(ScanCommand::AddIncludeDir("/music".into())));
+        let _ = facade.handle_command(AppCommand::Scan(ScanCommand::AddIncludeDir(
+            "/music".into(),
+        )));
         let _ = facade.handle_command(AppCommand::CreatePlaylist {
             name: "Roadtrip".to_string(),
         });
@@ -1377,7 +2089,9 @@ mod tests {
                 track_id: TrackId(1),
             });
         }
-        let _ = facade.handle_command(AppCommand::ToggleFavorite { track_id: TrackId(0) });
+        let _ = facade.handle_command(AppCommand::ToggleFavorite {
+            track_id: TrackId(0),
+        });
 
         facade.save_to_store(&store).expect("save should succeed");
 
@@ -1391,7 +2105,10 @@ mod tests {
         assert_eq!(restored.current_tab, TabId::Play);
         assert_eq!(restored.queue.current_track(), Some(TrackId(1)));
         assert_eq!(restored.playback.position_ms, 3_210);
-        assert_eq!(restored.scan.config.include_dirs, vec![std::path::PathBuf::from("/music")]);
+        assert_eq!(
+            restored.scan.config.include_dirs,
+            vec![std::path::PathBuf::from("/music")]
+        );
         assert!(restored.playlists.contains_in_favorite(TrackId(0)));
 
         let root = paths
@@ -1408,24 +2125,22 @@ mod tests {
         let include_root = temp_dir.path().join("library_root");
         let music_dir = include_root.join("Artist").join("Album");
         fs::create_dir_all(&music_dir).expect("music dir should be created");
-        fs::write(music_dir.join("01-track-one.flac"), b"fLaCdemo").expect("track one should be created");
-        fs::write(music_dir.join("02-track-two.flac"), b"fLaCdemo").expect("track two should be created");
+        fs::write(music_dir.join("01-track-one.flac"), b"fLaCdemo")
+            .expect("track one should be created");
+        fs::write(music_dir.join("02-track-two.flac"), b"fLaCdemo")
+            .expect("track two should be created");
 
         let paths = temp_paths();
         let store = JsonStore::new(paths.clone());
 
         let mut facade = AppFacade::default();
-        let _ = facade.handle_command(AppCommand::Scan(ScanCommand::AddIncludeDir(
-            include_root,
-        )));
+        let _ = facade.handle_command(AppCommand::Scan(ScanCommand::AddIncludeDir(include_root)));
         let _ = facade.handle_command(AppCommand::Scan(ScanCommand::StartFullScan));
         poll_scan_until_finished(&mut facade);
         facade.queue.replace_with_tracks(&[TrackId(0), TrackId(1)]);
         facade.queue.set_current_index(1);
         facade.playback.restore_track(TrackId(1), 999);
-        facade
-            .save_to_store(&store)
-            .expect("save should succeed");
+        facade.save_to_store(&store).expect("save should succeed");
 
         let mut restored = AppFacade::default();
         restored
@@ -1472,7 +2187,10 @@ mod tests {
         facade.playlists.selected = Some(playlist_id);
         facade.selected_album = Some(crate::core::ids::AlbumId(0));
         facade.selected_artist = Some(crate::core::ids::ArtistId(0));
-        facade.selected_directory = facade.library.directories.nodes[0].children.first().copied();
+        facade.selected_directory = facade.library.directories.nodes[0]
+            .children
+            .first()
+            .copied();
 
         let view_model = facade.view_model();
 
@@ -1528,7 +2246,10 @@ mod tests {
         let _ = facade.handle_command(AppCommand::SelectAlbum(Some(crate::core::ids::AlbumId(1))));
         let view_model = facade.view_model();
 
-        assert_eq!(view_model.album.expanded_album, Some(crate::core::ids::AlbumId(1)));
+        assert_eq!(
+            view_model.album.expanded_album,
+            Some(crate::core::ids::AlbumId(1))
+        );
         assert_eq!(view_model.album.visible_tracks.len(), 1);
         assert_eq!(view_model.album.visible_tracks[0].title, "track-b");
     }
@@ -1572,10 +2293,15 @@ mod tests {
         );
 
         let _ = facade.view_model();
-        let _ = facade.handle_command(AppCommand::SelectArtist(Some(crate::core::ids::ArtistId(1))));
+        let _ = facade.handle_command(AppCommand::SelectArtist(Some(crate::core::ids::ArtistId(
+            1,
+        ))));
         let view_model = facade.view_model();
 
-        assert_eq!(view_model.artist.selected_artist, Some(crate::core::ids::ArtistId(1)));
+        assert_eq!(
+            view_model.artist.selected_artist,
+            Some(crate::core::ids::ArtistId(1))
+        );
         assert_eq!(view_model.artist.visible_tracks.len(), 1);
         assert_eq!(view_model.artist.visible_tracks[0].title, "track-b");
     }
@@ -1607,30 +2333,46 @@ mod tests {
 
         assert_eq!(initial.album.loading.hydrated_entries, 0);
         assert!(initial.album.loading.is_loading);
-        assert!(initial.album.albums.iter().all(|entry| entry.is_provisional));
+        assert!(
+            initial
+                .album
+                .albums
+                .iter()
+                .all(|entry| entry.is_provisional)
+        );
         assert_eq!(initial.artist.loading.hydrated_entries, 0);
         assert!(initial.artist.loading.is_loading);
-        assert!(initial.artist.artists.iter().all(|entry| entry.is_provisional));
+        assert!(
+            initial
+                .artist
+                .artists
+                .iter()
+                .all(|entry| entry.is_provisional)
+        );
 
         facade.poll_background_tasks();
         let hydrated = facade.view_model();
 
         assert!(hydrated.album.loading.hydrated_entries > 0);
         assert!(hydrated.album.loading.hydrated_entries < hydrated.album.loading.total_entries);
-        assert!(hydrated
-            .album
-            .albums
-            .iter()
-            .take(hydrated.album.loading.hydrated_entries)
-            .all(|entry| !entry.is_provisional));
+        assert!(
+            hydrated
+                .album
+                .albums
+                .iter()
+                .take(hydrated.album.loading.hydrated_entries)
+                .all(|entry| !entry.is_provisional)
+        );
         assert!(hydrated.artist.loading.hydrated_entries > 0);
         assert!(hydrated.artist.loading.hydrated_entries < hydrated.artist.loading.total_entries);
-        assert!(hydrated
-            .artist
-            .artists
-            .iter()
-            .take(hydrated.artist.loading.hydrated_entries)
-            .all(|entry| !entry.is_provisional));
+        assert!(
+            hydrated
+                .artist
+                .artists
+                .iter()
+                .take(hydrated.artist.loading.hydrated_entries)
+                .all(|entry| !entry.is_provisional)
+        );
     }
 
     #[test]
@@ -1646,8 +2388,12 @@ mod tests {
         let mut writer = WavWriter::create(&file_path, spec).expect("wav file should be created");
         for index in 0..16i16 {
             let sample = (index * 256) - 2048;
-            writer.write_sample(sample).expect("left sample should be written");
-            writer.write_sample(sample).expect("right sample should be written");
+            writer
+                .write_sample(sample)
+                .expect("left sample should be written");
+            writer
+                .write_sample(sample)
+                .expect("right sample should be written");
         }
         writer.finalize().expect("wav file should finalize");
 
@@ -1693,7 +2439,10 @@ mod tests {
 
         let events = facade.handle_command(AppCommand::Scan(ScanCommand::StartFullScan));
 
-        assert_eq!(events, vec![AppEvent::ScanStateChanged(ScanState::Scanning)]);
+        assert_eq!(
+            events,
+            vec![AppEvent::ScanStateChanged(ScanState::Scanning)]
+        );
         assert_eq!(facade.library.tracks.titles.len(), 0);
 
         poll_scan_until_finished(&mut facade);
@@ -1767,10 +2516,15 @@ mod tests {
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
-        let mut writer = hound::WavWriter::create(&valid, spec).expect("wav file should be created");
+        let mut writer =
+            hound::WavWriter::create(&valid, spec).expect("wav file should be created");
         for _ in 0..16 {
-            writer.write_sample(0i16).expect("left sample should be written");
-            writer.write_sample(0i16).expect("right sample should be written");
+            writer
+                .write_sample(0i16)
+                .expect("left sample should be written");
+            writer
+                .write_sample(0i16)
+                .expect("right sample should be written");
         }
         writer.finalize().expect("wav file should finalize");
 
@@ -1821,5 +2575,123 @@ mod tests {
         assert!(!events.is_empty());
         assert_eq!(facade.queue.current_track(), Some(TrackId(1)));
         assert!(facade.audio_output.buffered_blocks() > 0);
+    }
+
+    #[test]
+    fn device_watcher_preferred_device_disappears_emits_underrun() {
+        use std::sync::mpsc;
+        use crate::audio::device_watcher::DeviceWatcherMessage;
+
+        let (sender, receiver) = mpsc::channel();
+
+        let mut facade = AppFacade::default();
+        facade.settings.preferred_output_device = Some("test-dev".to_string());
+
+        // simulate that a device is currently present (test-only flag)
+        facade.set_test_audio_device_present(true, Some("test-dev".to_string()));
+
+        // install a test watcher that uses our receiver
+        let handle = crate::audio::device_watcher::DeviceWatcherHandle::from_receiver_for_test(receiver);
+        facade.device_watcher = Some(handle);
+
+        // send a DevicesChanged message with no devices -> preferred device disappeared
+        let _ = sender.send(DeviceWatcherMessage::DevicesChanged {
+            devices: vec![],
+            default: None,
+        });
+
+        let events = facade.poll_background_tasks();
+
+        assert!(events.iter().any(|e| matches!(e, AppEvent::Playback(PlaybackEvent::DeviceUnderrun))));
+        assert!(facade.audio_disconnected);
+        assert!(!facade.audio_device_present());
+    }
+
+    #[test]
+    fn background_lazy_loader_loads_album_tracks_from_persisted_index() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let music_dir = temp_dir.path().join("Artist").join("Album");
+        fs::create_dir_all(&music_dir).expect("music dir should be created");
+
+        let file1 = music_dir.join("01.wav");
+        let file2 = music_dir.join("02.wav");
+        write_wav(&file1, 16);
+        write_wav(&file2, 16);
+
+        // create a JsonStore that uses a `data/` subdirectory inside our temp dir
+        let base = temp_dir.path().to_path_buf();
+        let store_paths = PersistencePaths {
+            config_json: base.join("data").join("config").join("config.json"),
+            state_json: base.join("data").join("state").join("state.json"),
+            playlists_json: base.join("data").join("playlists").join("playlists.json"),
+        };
+        let store = JsonStore::new(store_paths.clone());
+
+        let album_entry = crate::core::persistence::AlbumIndexEntry {
+            title: "Album".to_string(),
+            album_artist: "Artist".to_string(),
+            track_count: 2,
+            tracks: vec![file1.to_string_lossy().to_string(), file2.to_string_lossy().to_string()],
+        };
+
+        let artist_entry = crate::core::persistence::ArtistIndexEntry {
+            name: "Artist".to_string(),
+            track_count: 2,
+            tracks: vec![file1.to_string_lossy().to_string(), file2.to_string_lossy().to_string()],
+        };
+
+        let artist_file = crate::core::persistence::ArtistIndexFile {
+            track_artists: vec![artist_entry],
+            album_artists: Vec::new(),
+            composers: Vec::new(),
+        };
+
+        store
+            .save_album_index(&vec![album_entry])
+            .expect("save album index should succeed");
+        store
+            .save_artist_index(&artist_file)
+            .expect("save artist index should succeed");
+
+        let mut facade = AppFacade::default();
+        facade
+            .restore_from_store(&store)
+            .expect("restore should succeed");
+
+        let _ = facade.handle_command(AppCommand::SelectAlbum(Some(crate::core::ids::AlbumId(0))));
+
+        for _ in 0..10_000 {
+            facade.poll_background_tasks();
+            if facade
+                .library
+                .indexes
+                .tracks_by_album
+                .get(0)
+                .map(|v| v.len())
+                .unwrap_or(0)
+                == 2
+            {
+                break;
+            }
+            thread::yield_now();
+        }
+
+        assert_eq!(
+            facade
+                .library
+                .indexes
+                .tracks_by_album
+                .get(0)
+                .map(|v| v.len())
+                .unwrap_or(0),
+            2
+        );
+
+        let root = store_paths
+            .config_json
+            .parent()
+            .expect("config parent should exist")
+            .to_path_buf();
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -1971,6 +1971,7 @@ dependencies = [
  "eframe",
  "hound",
  "lofty",
+ "log",
  "rfd",
  "serde",
  "serde_json",

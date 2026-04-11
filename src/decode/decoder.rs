@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
 use std::thread;
 
 use crate::audio::output::{AudioFrameBlock, AudioOutputConfig, BufferedAudioOutput};
@@ -31,7 +31,12 @@ pub struct DecodeWorkerHandle {
 }
 
 impl Decoder {
-    pub fn decode_preview(&self, _source: &DecodedSource, channels: u16, frames: u32) -> AudioFrameBlock {
+    pub fn decode_preview(
+        &self,
+        _source: &DecodedSource,
+        channels: u16,
+        frames: u32,
+    ) -> AudioFrameBlock {
         AudioFrameBlock::silence(channels, frames)
     }
 
@@ -70,7 +75,12 @@ impl Decoder {
         }
 
         let probed = symphonia::default::get_probe()
-            .format(&hint, media_source, &FormatOptions::default(), &MetadataOptions::default())
+            .format(
+                &hint,
+                media_source,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
             .map_err(map_symphonia_error)?;
         let mut format = probed.format;
         let track = format
@@ -90,14 +100,18 @@ impl Decoder {
         let mut source_sample_rate = None;
         let mut decoded_samples: Vec<f32> = Vec::new();
 
-        while decoded_samples.len() / output_channels < max_required_input_frames(
-            max_output_frames,
-            source_sample_rate.unwrap_or(config.sample_rate),
-            config.sample_rate,
-        ) {
+        while decoded_samples.len() / output_channels
+            < max_required_input_frames(
+                max_output_frames,
+                source_sample_rate.unwrap_or(config.sample_rate),
+                config.sample_rate,
+            )
+        {
             let packet = match format.next_packet() {
                 Ok(packet) => packet,
-                Err(SymphoniaError::IoError(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                Err(SymphoniaError::IoError(error))
+                    if error.kind() == io::ErrorKind::UnexpectedEof =>
+                {
                     break;
                 }
                 Err(error) => return Err(map_symphonia_error(error)),
@@ -225,14 +239,20 @@ impl DecodeWorkerHandle {
     }
 }
 
-fn append_output_channels(decoded_samples: &mut Vec<f32>, input_frame: &[f32], output_channels: usize) {
+fn append_output_channels(
+    decoded_samples: &mut Vec<f32>,
+    input_frame: &[f32],
+    output_channels: usize,
+) {
     if input_frame.is_empty() {
         return;
     }
 
     match input_frame.len().cmp(&output_channels) {
         std::cmp::Ordering::Equal => decoded_samples.extend_from_slice(input_frame),
-        std::cmp::Ordering::Greater => decoded_samples.extend_from_slice(&input_frame[..output_channels]),
+        std::cmp::Ordering::Greater => {
+            decoded_samples.extend_from_slice(&input_frame[..output_channels])
+        }
         std::cmp::Ordering::Less => {
             let fill = input_frame[0];
             decoded_samples.extend_from_slice(input_frame);
@@ -243,7 +263,11 @@ fn append_output_channels(decoded_samples: &mut Vec<f32>, input_frame: &[f32], o
     }
 }
 
-fn max_required_input_frames(max_output_frames: usize, source_rate: u32, output_rate: u32) -> usize {
+fn max_required_input_frames(
+    max_output_frames: usize,
+    source_rate: u32,
+    output_rate: u32,
+) -> usize {
     if max_output_frames == 0 || source_rate == 0 || output_rate == 0 {
         return 0;
     }
@@ -270,8 +294,8 @@ fn resample_interleaved(
     let target_frames = if source_rate == 0 || output_rate == 0 || source_rate == output_rate {
         input_frames.min(max_output_frames)
     } else {
-        (((input_frames as u128 * output_rate as u128) + (source_rate as u128 / 2)) / source_rate as u128)
-            as usize
+        (((input_frames as u128 * output_rate as u128) + (source_rate as u128 / 2))
+            / source_rate as u128) as usize
     }
     .min(max_output_frames);
 
@@ -331,8 +355,12 @@ mod tests {
         let mut writer = WavWriter::create(&file_path, spec).expect("wav file should be created");
         for index in 0..16u16 {
             let sample = (index as i16 * 256) - 2048;
-            writer.write_sample(sample).expect("left sample should be written");
-            writer.write_sample(sample).expect("right sample should be written");
+            writer
+                .write_sample(sample)
+                .expect("left sample should be written");
+            writer
+                .write_sample(sample)
+                .expect("right sample should be written");
         }
         writer.finalize().expect("wav file should be finalized");
 
@@ -371,8 +399,12 @@ mod tests {
         for index in 0..48_000u32 {
             let phase = (index % 256) as i16;
             let sample = (phase * 128) - 16_384;
-            writer.write_sample(sample).expect("left sample should be written");
-            writer.write_sample(sample).expect("right sample should be written");
+            writer
+                .write_sample(sample)
+                .expect("left sample should be written");
+            writer
+                .write_sample(sample)
+                .expect("right sample should be written");
         }
         writer.finalize().expect("wav file should be finalized");
 
@@ -394,7 +426,11 @@ mod tests {
 
         assert_eq!(blocks.len(), 100);
         assert!(blocks.iter().all(|block| block.frames == 441));
-        assert!(blocks.iter().any(|block| block.samples.iter().any(|sample| *sample != 0.0)));
+        assert!(
+            blocks
+                .iter()
+                .any(|block| block.samples.iter().any(|sample| *sample != 0.0))
+        );
     }
 
     #[test]
@@ -411,8 +447,12 @@ mod tests {
         for index in 0..48_000u32 {
             let phase = (index % 256) as i16;
             let sample = (phase * 128) - 16_384;
-            writer.write_sample(sample).expect("left sample should be written");
-            writer.write_sample(sample).expect("right sample should be written");
+            writer
+                .write_sample(sample)
+                .expect("left sample should be written");
+            writer
+                .write_sample(sample)
+                .expect("right sample should be written");
         }
         writer.finalize().expect("wav file should finalize");
 

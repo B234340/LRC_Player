@@ -1,9 +1,9 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::thread;
 
 use lofty::file::AudioFile;
@@ -59,6 +59,7 @@ pub struct ScanOutcome {
     pub result: ScanState,
     pub progress: ScanProgress,
     pub tracks: Vec<TrackInput>,
+    pub targeted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +87,7 @@ impl Default for ScanModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanCommand {
     StartFullScan,
+    StartTargetedScan(Vec<PathBuf>),
     Stop,
     AddIncludeDir(PathBuf),
     RemoveIncludeDir(PathBuf),
@@ -110,7 +112,9 @@ impl ScanModel {
                 }
             }
             ScanCommand::RemoveIncludeDir(path) => {
-                self.config.include_dirs.retain(|existing| existing != &path);
+                self.config
+                    .include_dirs
+                    .retain(|existing| existing != &path);
             }
             ScanCommand::AddExcludeDir(path) => {
                 if !self.config.exclude_dirs.contains(&path) {
@@ -118,7 +122,9 @@ impl ScanModel {
                 }
             }
             ScanCommand::RemoveExcludeDir(path) => {
-                self.config.exclude_dirs.retain(|existing| existing != &path);
+                self.config
+                    .exclude_dirs
+                    .retain(|existing| existing != &path);
             }
             _ => {}
         }
@@ -155,6 +161,17 @@ impl ScanModel {
             summary,
         )
     }
+
+    pub fn run_targeted_scan(&mut self, roots: Vec<PathBuf>, strings: &mut StringInterner) -> (Library, ScanSummary) {
+        let outcome = run_targeted_scan_collect(roots, self.config.exclude_dirs.clone(), None, None);
+        let summary = outcome.summary();
+        self.progress = outcome.progress.clone();
+        self.finish_with(outcome.result);
+        (
+            build_library_from_track_inputs(strings, outcome.tracks),
+            summary,
+        )
+    }
 }
 
 impl ScanOutcome {
@@ -175,7 +192,24 @@ impl ScanWorkerHandle {
         let worker_cancel = Arc::clone(&cancel_requested);
 
         thread::spawn(move || {
-            let outcome = run_full_scan_collect(config, Some(worker_cancel.as_ref()), Some(&sender));
+            let outcome =
+                run_full_scan_collect(config, Some(worker_cancel.as_ref()), Some(&sender));
+            let _ = sender.send(ScanWorkerMessage::Finished(outcome));
+        });
+
+        Self {
+            cancel_requested,
+            receiver,
+        }
+    }
+
+    pub fn spawn_targeted(roots: Vec<PathBuf>, exclude_dirs: Vec<PathBuf>) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel_requested);
+
+        thread::spawn(move || {
+            let outcome = run_targeted_scan_collect(roots, exclude_dirs, Some(worker_cancel.as_ref()), Some(&sender));
             let _ = sender.send(ScanWorkerMessage::Finished(outcome));
         });
 
@@ -267,6 +301,70 @@ fn run_full_scan_collect(
         result,
         progress,
         tracks,
+        targeted: false,
+    }
+}
+
+fn run_targeted_scan_collect(
+    roots: Vec<PathBuf>,
+    exclude_dirs: Vec<PathBuf>,
+    cancel_requested: Option<&AtomicBool>,
+    sender: Option<&Sender<ScanWorkerMessage>>,
+) -> ScanOutcome {
+    let include_dirs = normalize_paths(&roots);
+    let exclude_dirs = normalize_paths(&exclude_dirs);
+    let mut progress = ScanProgress::default();
+    let mut tracks = Vec::new();
+    let mut had_warning = false;
+    let mut cancelled = false;
+
+    for include_dir in include_dirs {
+        if is_cancel_requested(cancel_requested) {
+            cancelled = true;
+            break;
+        }
+
+        if !include_dir.exists() {
+            had_warning = true;
+            progress.skipped_files += 1;
+            send_progress(sender, &progress);
+            continue;
+        }
+
+        match scan_directory_collect(
+            &include_dir,
+            &exclude_dirs,
+            &mut progress,
+            &mut tracks,
+            cancel_requested,
+            sender,
+        ) {
+            Ok(true) => {
+                cancelled = true;
+                break;
+            }
+            Ok(false) => {}
+            Err(_) => {
+                had_warning = true;
+            }
+        }
+    }
+
+    let result = if cancelled {
+        ScanState::Cancelling
+    } else if progress.discovered_files == 0 && progress.skipped_files > 0 {
+        ScanState::Failed
+    } else if had_warning || progress.skipped_files > 0 {
+        ScanState::Warning
+    } else {
+        ScanState::Completed
+    };
+
+    ScanOutcome {
+        result,
+        progress,
+        tracks,
+        targeted: true,
     }
 }
 
@@ -371,13 +469,17 @@ fn is_cancel_requested(cancel_requested: Option<&AtomicBool>) -> bool {
 }
 
 fn normalize_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
-    paths.iter()
+    paths
+        .iter()
         .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
         .collect()
 }
 
 fn should_skip_path(path: &Path, exclude_dirs: &[PathBuf]) -> bool {
-    is_hidden_path(path) || exclude_dirs.iter().any(|excluded| path.starts_with(excluded))
+    is_hidden_path(path)
+        || exclude_dirs
+            .iter()
+            .any(|excluded| path.starts_with(excluded))
 }
 
 fn is_hidden_path(path: &Path) -> bool {
@@ -391,7 +493,10 @@ fn is_hidden_path(path: &Path) -> bool {
 
 fn is_supported_music_file(path: &Path) -> bool {
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some(extension) => matches!(extension.to_ascii_lowercase().as_str(), "mp3" | "wav" | "flac"),
+        Some(extension) => matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "mp3" | "wav" | "flac"
+        ),
         None => false,
     }
 }
@@ -466,6 +571,14 @@ fn build_track_input(path: &Path, metadata: &fs::Metadata) -> Option<TrackInput>
     })
 }
 
+/// Public helper to build a `TrackInput` from a file path by collecting
+/// filesystem metadata and tag metadata. Returns `None` if the file cannot
+/// be read or parsed.
+pub fn build_track_input_from_path(path: &Path) -> Option<TrackInput> {
+    let metadata = fs::metadata(path).ok()?;
+    build_track_input(path, &metadata)
+}
+
 #[derive(Debug, Clone, Default)]
 struct TagMetadata {
     title: Option<String>,
@@ -481,7 +594,9 @@ fn read_tag_metadata(path: &Path) -> Option<TagMetadata> {
     let tagged_file = Probe::open(path).ok()?.read().ok()?;
     let properties = tagged_file.properties();
     let duration_ms = properties.duration().as_millis().min(u32::MAX as u128) as u32;
-    let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
+    let tag = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag());
 
     let Some(tag) = tag else {
         return Some(TagMetadata {
@@ -500,9 +615,18 @@ fn read_tag_metadata(path: &Path) -> Option<TagMetadata> {
         .filter(|value| !value.trim().is_empty());
 
     Some(TagMetadata {
-        title: tag.title().map(|value| value.to_string()).filter(|value| !value.trim().is_empty()),
-        artist: tag.artist().map(|value| value.to_string()).filter(|value| !value.trim().is_empty()),
-        album: tag.album().map(|value| value.to_string()).filter(|value| !value.trim().is_empty()),
+        title: tag
+            .title()
+            .map(|value| value.to_string())
+            .filter(|value| !value.trim().is_empty()),
+        artist: tag
+            .artist()
+            .map(|value| value.to_string())
+            .filter(|value| !value.trim().is_empty()),
+        album: tag
+            .album()
+            .map(|value| value.to_string())
+            .filter(|value| !value.trim().is_empty()),
         album_artist,
         composer,
         track_number: tag
@@ -549,11 +673,16 @@ mod tests {
         fs::create_dir_all(&excluded_dir).expect("excluded dir should be created");
         fs::create_dir_all(&hidden_dir).expect("hidden dir should be created");
 
-        fs::write(artist_dir.join("01-first.wav"), b"RIFFdemo").expect("audio file should be created");
-        fs::write(artist_dir.join("02-second.flac"), b"fLaCdemo").expect("audio file should be created");
-        fs::write(artist_dir.join("notes.txt"), b"lyrics").expect("non-music file should be created");
-        fs::write(excluded_dir.join("03-excluded.mp3"), b"ID3demo").expect("excluded file should be created");
-        fs::write(hidden_dir.join("04-hidden.mp3"), b"ID3demo").expect("hidden file should be created");
+        fs::write(artist_dir.join("01-first.wav"), b"RIFFdemo")
+            .expect("audio file should be created");
+        fs::write(artist_dir.join("02-second.flac"), b"fLaCdemo")
+            .expect("audio file should be created");
+        fs::write(artist_dir.join("notes.txt"), b"lyrics")
+            .expect("non-music file should be created");
+        fs::write(excluded_dir.join("03-excluded.mp3"), b"ID3demo")
+            .expect("excluded file should be created");
+        fs::write(hidden_dir.join("04-hidden.mp3"), b"ID3demo")
+            .expect("hidden file should be created");
 
         let mut scan = ScanModel::default();
         scan.config.include_dirs.push(include_dir.clone());
@@ -566,7 +695,12 @@ mod tests {
         assert_eq!(summary.parsed_files, 2);
         assert_eq!(summary.result, ScanState::Completed);
         assert_eq!(library.tracks.titles.len(), 2);
-        assert_eq!(library.visible_tracks_for_album(crate::core::ids::AlbumId(0)).len(), 2);
+        assert_eq!(
+            library
+                .visible_tracks_for_album(crate::core::ids::AlbumId(0))
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -576,7 +710,8 @@ mod tests {
         let artist_dir = include_dir.join("Artist").join("Album");
 
         fs::create_dir_all(&artist_dir).expect("artist dir should be created");
-        fs::write(artist_dir.join("01-first.wav"), b"RIFFdemo").expect("audio file should be created");
+        fs::write(artist_dir.join("01-first.wav"), b"RIFFdemo")
+            .expect("audio file should be created");
 
         let mut scan = ScanModel::default();
         scan.config.include_dirs.push(include_dir);
@@ -624,8 +759,12 @@ mod tests {
         };
         let mut writer = WavWriter::create(&file_path, spec).expect("wav file should be created");
         for _ in 0..48_000u32 {
-            writer.write_sample(0i16).expect("left sample should be written");
-            writer.write_sample(0i16).expect("right sample should be written");
+            writer
+                .write_sample(0i16)
+                .expect("left sample should be written");
+            writer
+                .write_sample(0i16)
+                .expect("right sample should be written");
         }
         writer.finalize().expect("wav file should be finalized");
 

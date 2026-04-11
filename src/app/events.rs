@@ -7,10 +7,7 @@ use crate::core::scan::ScanState;
 pub enum PlaybackEvent {
     StateChanged(PlaybackState),
     TrackChanged(Option<TrackId>),
-    PositionUpdated {
-        position_ms: u64,
-        buffered_ms: u32,
-    },
+    PositionUpdated { position_ms: u64, buffered_ms: u32 },
     DeviceUnderrun,
 }
 

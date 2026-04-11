@@ -1,14 +1,17 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use cpal::traits::{HostTrait, DeviceTrait};
+use cpal::traits::{DeviceTrait, HostTrait};
 
 #[derive(Debug, Clone)]
 pub enum DeviceWatcherMessage {
-    DevicesChanged { devices: Vec<String>, default: Option<String> },
+    DevicesChanged {
+        devices: Vec<String>,
+        default: Option<String>,
+    },
 }
 
 pub struct DeviceWatcherHandle {
@@ -33,9 +36,7 @@ impl DeviceWatcherHandle {
                     .map(|iter| iter.filter_map(|d| d.name().ok()).collect::<Vec<_>>())
                     .unwrap_or_default();
 
-                let current_default = host
-                    .default_output_device()
-                    .and_then(|d| d.name().ok());
+                let current_default = host.default_output_device().and_then(|d| d.name().ok());
 
                 if current_devices != last_devices || current_default != last_default {
                     let _ = sender.send(DeviceWatcherMessage::DevicesChanged {
@@ -50,7 +51,10 @@ impl DeviceWatcherHandle {
             }
         });
 
-        Self { cancel_requested, receiver }
+        Self {
+            cancel_requested,
+            receiver,
+        }
     }
 
     pub fn cancel(&self) {
@@ -63,5 +67,15 @@ impl DeviceWatcherHandle {
             messages.push(message);
         }
         messages
+    }
+}
+
+#[cfg(test)]
+impl DeviceWatcherHandle {
+    pub fn from_receiver_for_test(receiver: Receiver<DeviceWatcherMessage>) -> DeviceWatcherHandle {
+        DeviceWatcherHandle {
+            cancel_requested: Arc::new(AtomicBool::new(false)),
+            receiver,
+        }
     }
 }

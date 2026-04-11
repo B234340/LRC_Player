@@ -44,7 +44,11 @@ impl Queue {
                 track_id: *track_id,
             })
             .collect();
-        self.current_index = if self.entries.is_empty() { None } else { Some(0) };
+        self.current_index = if self.entries.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
         self.selected.clear();
         self.next_entry_id = self.entries.len() as u32;
         self.shuffle_state = None;
@@ -78,7 +82,10 @@ impl Queue {
             return;
         }
 
-        let insert_at = self.current_index.map(|index| index as usize + 1).unwrap_or(self.entries.len());
+        let insert_at = self
+            .current_index
+            .map(|index| index as usize + 1)
+            .unwrap_or(self.entries.len());
         let id = QueueEntryId(self.next_entry_id);
         self.next_entry_id += 1;
         self.entries.insert(insert_at, QueueEntry { id, track_id });
@@ -92,12 +99,15 @@ impl Queue {
 
         match self.current_index.map(|index| index as usize) {
             Some(_) if self.entries.is_empty() => self.current_index = None,
-            Some(current) if current > remove_index => self.current_index = Some((current - 1) as u32),
+            Some(current) if current > remove_index => {
+                self.current_index = Some((current - 1) as u32)
+            }
             Some(current) if current == remove_index => {
                 if remove_index < self.entries.len() {
                     self.current_index = Some(remove_index as u32);
                 } else {
-                    self.current_index = self.entries.len().checked_sub(1).map(|index| index as u32);
+                    self.current_index =
+                        self.entries.len().checked_sub(1).map(|index| index as u32);
                 }
             }
             _ => {}
@@ -155,7 +165,11 @@ impl Queue {
             .and_then(|cur_idx| order.iter().position(|&v| v == cur_idx).map(|p| p as u32))
             .unwrap_or(0);
 
-        self.shuffle_state = Some(ShuffleState { order, cursor, seed });
+        self.shuffle_state = Some(ShuffleState {
+            order,
+            cursor,
+            seed,
+        });
     }
 
     pub fn remove_selected(&mut self) {
@@ -180,7 +194,11 @@ impl Queue {
             }
             RepeatMode::RepeatQueue => {
                 let current = self.current_index.unwrap_or(0) as usize;
-                let next = if current + 1 < self.entries.len() { current + 1 } else { 0 };
+                let next = if current + 1 < self.entries.len() {
+                    current + 1
+                } else {
+                    0
+                };
                 self.current_index = Some(next as u32);
             }
             RepeatMode::ShuffleQueue => {
@@ -211,7 +229,11 @@ impl Queue {
             }
             RepeatMode::RepeatQueue => {
                 let current = self.current_index.unwrap_or(0) as usize;
-                let previous = if current == 0 { self.entries.len() - 1 } else { current - 1 };
+                let previous = if current == 0 {
+                    self.entries.len() - 1
+                } else {
+                    current - 1
+                };
                 self.current_index = Some(previous as u32);
             }
             RepeatMode::ShuffleQueue => {
@@ -222,7 +244,11 @@ impl Queue {
                         self.current_index = None;
                         return;
                     }
-                    state.cursor = if state.cursor == 0 { (len - 1) as u32 } else { state.cursor - 1 };
+                    state.cursor = if state.cursor == 0 {
+                        (len - 1) as u32
+                    } else {
+                        state.cursor - 1
+                    };
                     let idx = state.order[state.cursor as usize] as usize;
                     self.current_index = Some(idx as u32);
                 }

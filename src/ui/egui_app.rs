@@ -2,14 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use eframe::{egui, CreationContext};
+use eframe::{CreationContext, egui};
 use rfd::FileDialog;
 
+use crate::app::Application;
 use crate::app::commands::{AppCommand, TrackListOrigin};
 use crate::app::view_models::{
     AlbumEntryVm, AppViewModel, ArtistEntryVm, DirectoryEntryVm, PlaylistEntryVm, TrackRowVm,
 };
-use crate::app::Application;
 use crate::core::library::ArtistKind;
 use crate::core::persistence::TabId;
 use crate::core::scan::ScanCommand;
@@ -83,8 +83,9 @@ impl LrcPlayerEguiApp {
                         crate::app::view_models::FavoriteStateVm::Excluded => "☆",
                     };
                     if ui.button(favorite_label).clicked() {
-                        self.application
-                            .handle_command(AppCommand::ToggleFavorite { track_id: row.track_id });
+                        self.application.handle_command(AppCommand::ToggleFavorite {
+                            track_id: row.track_id,
+                        });
                     }
                 });
             }
@@ -123,13 +124,15 @@ impl LrcPlayerEguiApp {
 
         ui.horizontal(|ui| {
             if ui.button("-10s").clicked() {
-                self.application.handle_command(AppCommand::SeekBy { delta_ms: -10_000 });
+                self.application
+                    .handle_command(AppCommand::SeekBy { delta_ms: -10_000 });
             }
             if ui.button("Play/Pause").clicked() {
                 self.application.handle_command(AppCommand::TogglePlayPause);
             }
             if ui.button("+10s").clicked() {
-                self.application.handle_command(AppCommand::SeekBy { delta_ms: 10_000 });
+                self.application
+                    .handle_command(AppCommand::SeekBy { delta_ms: 10_000 });
             }
         });
     }
@@ -148,9 +151,13 @@ impl LrcPlayerEguiApp {
         let (rect, reserve) = ui.allocate_exact_size(desired_size, egui::Sense::click());
         let response = ui.put(rect, egui::SelectableLabel::new(expanded, text));
         if response.clicked() || reserve.clicked() {
-            println!("[egui_app] Album clicked: id={:?}, expanded={}", album.album_id, expanded);
+            println!(
+                "[egui_app] Album clicked: id={:?}, expanded={}",
+                album.album_id, expanded
+            );
             let next = if expanded { None } else { Some(album.album_id) };
-            self.application.handle_command(AppCommand::SelectAlbum(next));
+            self.application
+                .handle_command(AppCommand::SelectAlbum(next));
             ui.ctx().request_repaint();
         }
     }
@@ -176,7 +183,29 @@ impl LrcPlayerEguiApp {
                     );
                 }
             });
-            self.render_track_rows(&mut columns[1], &view_model.album.visible_tracks, TrackListOrigin::Album);
+            // Right column: show loading progress for tracks if background hydrate is in progress
+            egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
+                if view_model.album.tracks_loading {
+                    if view_model.album.tracks_total > 0 {
+                        let fraction = view_model.album.tracks_loaded as f32
+                            / view_model.album.tracks_total as f32;
+                        ui.label(format!(
+                            "Loading tracks: {}/{}",
+                            view_model.album.tracks_loaded, view_model.album.tracks_total
+                        ));
+                        ui.add(egui::ProgressBar::new(fraction).show_percentage());
+                    } else {
+                        ui.label("Loading tracks...");
+                    }
+                    ui.separator();
+                }
+
+                self.render_track_rows(
+                    ui,
+                    &view_model.album.visible_tracks,
+                    TrackListOrigin::Album,
+                );
+            });
         });
     }
 
@@ -189,9 +218,17 @@ impl LrcPlayerEguiApp {
         let (rect, reserve) = ui.allocate_exact_size(desired_size, egui::Sense::click());
         let response = ui.put(rect, egui::SelectableLabel::new(selected, text));
         if response.clicked() || reserve.clicked() {
-            println!("[egui_app] Artist clicked: id={:?}, selected={}", artist.artist_id, selected);
-            let next = if selected { None } else { Some(artist.artist_id) };
-            self.application.handle_command(AppCommand::SelectArtist(next));
+            println!(
+                "[egui_app] Artist clicked: id={:?}, selected={}",
+                artist.artist_id, selected
+            );
+            let next = if selected {
+                None
+            } else {
+                Some(artist.artist_id)
+            };
+            self.application
+                .handle_command(AppCommand::SelectArtist(next));
             ui.ctx().request_repaint();
         }
     }
@@ -203,8 +240,12 @@ impl LrcPlayerEguiApp {
                 (ArtistKind::AlbumArtist, "Album Artist"),
                 (ArtistKind::Composer, "Composer"),
             ] {
-                if ui.selectable_label(view_model.artist.kind == kind, label).clicked() {
-                    self.application.handle_command(AppCommand::SelectArtistKind(kind));
+                if ui
+                    .selectable_label(view_model.artist.kind == kind, label)
+                    .clicked()
+                {
+                    self.application
+                        .handle_command(AppCommand::SelectArtistKind(kind));
                 }
             }
         });
@@ -212,8 +253,7 @@ impl LrcPlayerEguiApp {
         ui.horizontal(|ui| {
             ui.label(format!(
                 "Artists hydrated: {}/{}",
-                view_model.artist.loading.hydrated_entries,
-                view_model.artist.loading.total_entries
+                view_model.artist.loading.hydrated_entries, view_model.artist.loading.total_entries
             ));
             if view_model.artist.loading.is_loading {
                 ui.label("using log snapshot while background hydration continues");
@@ -230,11 +270,37 @@ impl LrcPlayerEguiApp {
                     );
                 }
             });
-            self.render_track_rows(&mut columns[1], &view_model.artist.visible_tracks, TrackListOrigin::Artist);
+            egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
+                if view_model.artist.tracks_loading {
+                    if view_model.artist.tracks_total > 0 {
+                        let fraction = view_model.artist.tracks_loaded as f32
+                            / view_model.artist.tracks_total as f32;
+                        ui.label(format!(
+                            "Loading tracks: {}/{}",
+                            view_model.artist.tracks_loaded, view_model.artist.tracks_total
+                        ));
+                        ui.add(egui::ProgressBar::new(fraction).show_percentage());
+                    } else {
+                        ui.label("Loading tracks...");
+                    }
+                    ui.separator();
+                }
+
+                self.render_track_rows(
+                    ui,
+                    &view_model.artist.visible_tracks,
+                    TrackListOrigin::Artist,
+                );
+            });
         });
     }
 
-    fn render_playlist_entry(&mut self, ui: &mut egui::Ui, playlist: &PlaylistEntryVm, selected: bool) {
+    fn render_playlist_entry(
+        &mut self,
+        ui: &mut egui::Ui,
+        playlist: &PlaylistEntryVm,
+        selected: bool,
+    ) {
         let label = if playlist.is_system {
             format!("{} ({}) [system]", playlist.name, playlist.track_count)
         } else {
@@ -267,7 +333,11 @@ impl LrcPlayerEguiApp {
                     );
                 }
             });
-            self.render_track_rows(&mut columns[1], &view_model.playlist.visible_tracks, TrackListOrigin::Playlist);
+            self.render_track_rows(
+                &mut columns[1],
+                &view_model.playlist.visible_tracks,
+                TrackListOrigin::Playlist,
+            );
         });
     }
 
@@ -280,7 +350,8 @@ impl LrcPlayerEguiApp {
             .clicked()
         {
             let next = if selected { None } else { Some(node.node_id) };
-            self.application.handle_command(AppCommand::SelectDirectory(next));
+            self.application
+                .handle_command(AppCommand::SelectDirectory(next));
         }
     }
 
@@ -295,7 +366,11 @@ impl LrcPlayerEguiApp {
                     );
                 }
             });
-            self.render_track_rows(&mut columns[1], &view_model.library.visible_tracks, TrackListOrigin::Library);
+            self.render_track_rows(
+                &mut columns[1],
+                &view_model.library.visible_tracks,
+                TrackListOrigin::Library,
+            );
         });
     }
 
@@ -306,7 +381,8 @@ impl LrcPlayerEguiApp {
                     .handle_command(AppCommand::Scan(ScanCommand::StartFullScan));
             }
             if view_model.scan.cancel_visible && ui.button("Cancel").clicked() {
-                self.application.handle_command(AppCommand::Scan(ScanCommand::Stop));
+                self.application
+                    .handle_command(AppCommand::Scan(ScanCommand::Stop));
             }
             ui.label(format!("Status: {:?}", view_model.scan.visible_status));
         });
@@ -355,13 +431,15 @@ impl LrcPlayerEguiApp {
     }
 
     fn render_settings_tab(&mut self, ui: &mut egui::Ui, view_model: &AppViewModel) {
-        egui::Grid::new("settings-grid").striped(true).show(ui, |ui| {
-            for item in &view_model.settings.items {
-                ui.label(&item.key);
-                ui.label(&item.value);
-                ui.end_row();
-            }
-        });
+        egui::Grid::new("settings-grid")
+            .striped(true)
+            .show(ui, |ui| {
+                for item in &view_model.settings.items {
+                    ui.label(&item.key);
+                    ui.label(&item.value);
+                    ui.end_row();
+                }
+            });
 
         ui.separator();
         ui.horizontal(|ui| {
@@ -372,12 +450,21 @@ impl LrcPlayerEguiApp {
                 .selected_text(selected_text)
                 .show_ui(ui, |ui| {
                     if ui.selectable_label(selected.is_none(), "Default").clicked() {
-                        self.application.handle_command(AppCommand::SetPreferredOutputDevice { device_name: None });
+                        self.application
+                            .handle_command(AppCommand::SetPreferredOutputDevice {
+                                device_name: None,
+                            });
                     }
 
                     for device in &view_model.settings.available_output_devices {
-                        if ui.selectable_label(selected == Some(device.clone()), device).clicked() {
-                            self.application.handle_command(AppCommand::SetPreferredOutputDevice { device_name: Some(device.clone()) });
+                        if ui
+                            .selectable_label(selected == Some(device.clone()), device)
+                            .clicked()
+                        {
+                            self.application
+                                .handle_command(AppCommand::SetPreferredOutputDevice {
+                                    device_name: Some(device.clone()),
+                                });
                         }
                     }
                 });
@@ -415,10 +502,9 @@ fn install_cjk_fonts(context: &egui::Context) {
             continue;
         };
 
-        font_definitions.font_data.insert(
-            font_name.clone(),
-            egui::FontData::from_owned(bytes).into(),
-        );
+        font_definitions
+            .font_data
+            .insert(font_name.clone(), egui::FontData::from_owned(bytes).into());
         installed_font_names.push(font_name);
     }
 
@@ -426,12 +512,18 @@ fn install_cjk_fonts(context: &egui::Context) {
         return;
     }
 
-    if let Some(proportional) = font_definitions.families.get_mut(&egui::FontFamily::Proportional) {
+    if let Some(proportional) = font_definitions
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+    {
         for font_name in installed_font_names.iter().rev() {
             proportional.insert(0, font_name.clone());
         }
     }
-    if let Some(monospace) = font_definitions.families.get_mut(&egui::FontFamily::Monospace) {
+    if let Some(monospace) = font_definitions
+        .families
+        .get_mut(&egui::FontFamily::Monospace)
+    {
         for font_name in installed_font_names.iter().rev() {
             monospace.insert(0, font_name.clone());
         }
