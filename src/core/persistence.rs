@@ -51,6 +51,10 @@ pub struct AppConfigFile {
     pub restore_position_policy: String,
     pub full_auto_scan: bool,
     pub fallback_artwork_path: Option<PathBuf>,
+            #[serde(default)]
+            pub debug_mode: bool,
+            #[serde(default)]
+            pub log_filters: Vec<String>,
     pub play_empty_state: String,
     pub include_dirs: Vec<PathBuf>,
     pub exclude_dirs: Vec<PathBuf>,
@@ -67,6 +71,8 @@ impl Default for AppConfigFile {
             restore_position_policy: "resume".to_string(),
             full_auto_scan: false,
             fallback_artwork_path: None,
+            debug_mode: false,
+            log_filters: Vec::new(),
             play_empty_state: "none".to_string(),
             include_dirs: Vec::new(),
             exclude_dirs: Vec::new(),
@@ -384,9 +390,12 @@ impl JsonStore {
     where
         T: for<'de> Deserialize<'de> + Default,
     {
-        match fs::read_to_string(path) {
-            Ok(contents) => serde_json::from_str(&contents)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+        match std::fs::File::open(path) {
+            Ok(file) => {
+                let reader = std::io::BufReader::new(file);
+                serde_json::from_reader(reader)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(T::default()),
             Err(error) => Err(error),
         }
@@ -401,9 +410,10 @@ impl JsonStore {
         }
 
         let tmp_path = path.with_extension("tmp");
-        let contents = serde_json::to_vec_pretty(value)
+        let file = std::fs::File::create(&tmp_path)?;
+        let writer = std::io::BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, value)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        fs::write(&tmp_path, contents)?;
         fs::rename(tmp_path, path)?;
         Ok(())
     }

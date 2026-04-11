@@ -133,6 +133,9 @@ pub struct SettingsTabVm {
     pub items: Vec<SettingItemVm>,
     pub available_output_devices: Vec<String>,
     pub preferred_output_device: Option<String>,
+    pub debug_mode: bool,
+    pub available_log_categories: Vec<String>,
+    pub selected_log_filters: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -2,10 +2,17 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::path::Path;
+use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use crate::core::artwork::ArtworkKey;
 use crate::core::ids::{AlbumId, ArtistId, PathId, StrId, TrackId, TrackKey};
 use crate::core::strings::StringInterner;
+
+// Investigation counters: track upsert totals and directory-rebuild spikes.
+static LIB_UPSERT_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static LIB_UPSERT_DIR_GT_1000: AtomicUsize = AtomicUsize::new(0);
+static LIB_UPSERT_DIR_GT_2000: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct DirectoryNodeId(pub u32);
@@ -136,6 +143,8 @@ impl Library {
             modified_unix_secs: input.modified_unix_secs,
         };
 
+        let upsert_start = Instant::now();
+
         let track_id = if let Some(existing) = self.resolve_track_key(&track_key) {
             let index = existing.0 as usize;
             self.tracks.titles[index] = title_id;
@@ -166,10 +175,147 @@ impl Library {
             track_id
         };
 
+        let idx_start = Instant::now();
         self.rebuild_indexes(strings);
+        let idx_dur = idx_start.elapsed();
+
+        let dir_start = Instant::now();
         self.rebuild_directories(strings);
+        let dir_dur = dir_start.elapsed();
+
         self.revision = self.revision.saturating_add(1);
+        let total_dur = upsert_start.elapsed();
+
+        let idx_us = idx_dur.as_micros();
+        let dir_us = dir_dur.as_micros();
+        let total_us = total_dur.as_micros();
+
+        // Log microsecond measurements; print to stdout for test runs without a logger.
+        log::info!(
+            "library::upsert_track: track_id={} idx_us={} dir_us={} total_us={}",
+            track_id.0,
+            idx_us,
+            dir_us,
+            total_us
+        );
+        eprintln!(
+            "library::upsert_track: track_id={} idx_us={} dir_us={} total_us={}",
+            track_id.0,
+            idx_us,
+            dir_us,
+            total_us
+        );
+
+        // Update simple counters for investigation
+        LIB_UPSERT_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+        if dir_us > 1_000 {
+            LIB_UPSERT_DIR_GT_1000.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        if dir_us > 2_000 {
+            LIB_UPSERT_DIR_GT_2000.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+
         track_id
+    }
+
+    /// Upsert many tracks in a batch and rebuild indexes/directories once.
+    pub fn upsert_tracks_batch<I>(&mut self, strings: &mut StringInterner, inputs: I) -> Vec<TrackId>
+    where
+        I: IntoIterator<Item = TrackInput>,
+    {
+        let mut ids: Vec<TrackId> = Vec::new();
+        let mut new_count: usize = 0;
+        let start = Instant::now();
+
+        for input in inputs {
+            let title_id = strings.intern(input.title);
+            let file_name_id = strings.intern(input.file_name);
+            let path_id = self.path_id_for(&input.normalized_path);
+            let artist_id = input.artist.map(|value| self.artist_id_for(strings, value));
+            let album_artist_id = input
+                .album_artist
+                .map(|value| self.artist_id_for(strings, value));
+            let composer_id = input
+                .composer
+                .map(|value| self.artist_id_for(strings, value));
+            let album_id = input
+                .album
+                .map(|value| self.album_id_for(strings, value, album_artist_id));
+            let track_key = TrackKey {
+                normalized_path: input.normalized_path,
+                file_size: input.file_size,
+                modified_unix_secs: input.modified_unix_secs,
+            };
+
+            let track_id = if let Some(existing) = self.resolve_track_key(&track_key) {
+                let index = existing.0 as usize;
+                self.tracks.titles[index] = title_id;
+                self.tracks.stable_keys[index] = track_key;
+                self.tracks.album_ids[index] = album_id;
+                self.tracks.artist_ids[index] = artist_id;
+                self.tracks.album_artist_ids[index] = album_artist_id;
+                self.tracks.composer_ids[index] = composer_id;
+                self.tracks.path_ids[index] = path_id;
+                self.tracks.file_name_ids[index] = file_name_id;
+                self.tracks.track_numbers[index] = input.track_number;
+                self.tracks.durations_ms[index] = input.duration_ms;
+                self.tracks.artwork_keys[index] = input.artwork_key;
+                existing
+            } else {
+                let id = TrackId(self.tracks.titles.len() as u32);
+                self.tracks.titles.push(title_id);
+                self.tracks.stable_keys.push(track_key);
+                self.tracks.album_ids.push(album_id);
+                self.tracks.artist_ids.push(artist_id);
+                self.tracks.album_artist_ids.push(album_artist_id);
+                self.tracks.composer_ids.push(composer_id);
+                self.tracks.path_ids.push(path_id);
+                self.tracks.file_name_ids.push(file_name_id);
+                self.tracks.track_numbers.push(input.track_number);
+                self.tracks.durations_ms.push(input.duration_ms);
+                self.tracks.artwork_keys.push(input.artwork_key);
+                new_count += 1;
+                id
+            };
+
+            ids.push(track_id);
+        }
+
+        // Rebuild once for the whole batch
+        let idx_start = Instant::now();
+        self.rebuild_indexes(strings);
+        let idx_dur = idx_start.elapsed();
+
+        let dir_start = Instant::now();
+        self.rebuild_directories(strings);
+        let dir_dur = dir_start.elapsed();
+
+        self.revision = self.revision.saturating_add(ids.len() as u64);
+
+        let total_dur = start.elapsed();
+        log::info!(
+            "library::upsert_tracks_batch: count={} new={} idx_ms={} dir_ms={} total_ms={}",
+            ids.len(),
+            new_count,
+            idx_dur.as_millis(),
+            dir_dur.as_millis(),
+            total_dur.as_millis()
+        );
+
+        // Also print to stderr for test runs to make measurements visible.
+        eprintln!(
+            "library::upsert_tracks_batch: count={} new={} idx_ms={} dir_ms={} total_ms={}",
+            ids.len(),
+            new_count,
+            idx_dur.as_millis(),
+            dir_dur.as_millis(),
+            total_dur.as_millis()
+        );
+
+        // Account for batched upserts in the total counter (coarse)
+        LIB_UPSERT_TOTAL.fetch_add(ids.len(), AtomicOrdering::Relaxed);
+
+        ids
     }
 
     pub fn resolve_track_key(&self, key: &TrackKey) -> Option<TrackId> {
@@ -606,5 +752,54 @@ mod tests {
             &[first_track, second_track]
         );
         assert_eq!(library.directories.nodes.len() >= 2, true);
+    }
+
+    #[test]
+    fn bench_upsert_batch_vs_loop() {
+        use std::time::Instant;
+
+        let n = 500usize;
+
+        let mut inputs: Vec<TrackInput> = (0..n)
+            .map(|index|
+                TrackInput {
+                    title: format!("Track {index}"),
+                    album: Some(format!("Album {index}")),
+                    artist: Some(format!("Artist {index}")),
+                    album_artist: Some(format!("Artist {index}")),
+                    composer: None,
+                    normalized_path: format!("/music/Artist{index}/Album{index}/{index:02}.flac"),
+                    file_size: index as u64 + 1,
+                    modified_unix_secs: 10,
+                    file_name: format!("{index:02}.flac"),
+                    track_number: None,
+                    duration_ms: 1_000,
+                    artwork_key: None,
+                }
+            )
+            .collect();
+
+        // looped upserts
+        let mut lib_loop = Library::default();
+        let mut strings_loop = StringInterner::default();
+        let start = Instant::now();
+        for input in inputs.clone() {
+            let _ = lib_loop.upsert_track(&mut strings_loop, input);
+        }
+        let loop_dur = start.elapsed();
+
+        // batched upserts
+        let mut lib_batch = Library::default();
+        let mut strings_batch = StringInterner::default();
+        let start2 = Instant::now();
+        let ids = lib_batch.upsert_tracks_batch(&mut strings_batch, inputs.into_iter());
+        let batch_dur = start2.elapsed();
+
+        eprintln!(
+            "bench_upsert: loop_ms={} batch_ms={} count={}",
+            loop_dur.as_millis(),
+            batch_dur.as_millis(),
+            ids.len()
+        );
     }
 }

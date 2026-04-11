@@ -16,6 +16,7 @@ pub enum AppEvent {
     Playback(PlaybackEvent),
     QueueChanged,
     PlaylistChanged,
+    SettingsChanged,
     ScanStateChanged(ScanState),
     TabChanged(TabId),
     TrackDetailsRequested(TrackId),

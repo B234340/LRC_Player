@@ -1,2 +1,34 @@
-/target
-/releases
+/target/
+/releases/
+
+# Logs
+*.log
+**/logs/
+
+# Caches / runtime state
+**/cache/
+**/state/
+data/**/cache/
+data/**/logs/
+data/**/state/
+LRC_Player/data/**/cache/
+LRC_Player/data/**/logs/
+LRC_Player/data/**/state/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts / binaries
+*.exe
+*.dll
+*.so
+*.dylib
+/build/
+/dist/

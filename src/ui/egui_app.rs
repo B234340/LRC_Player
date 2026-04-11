@@ -11,12 +11,15 @@ use crate::app::view_models::{
     AlbumEntryVm, AppViewModel, ArtistEntryVm, DirectoryEntryVm, PlaylistEntryVm, TrackRowVm,
 };
 use crate::core::library::ArtistKind;
+use crate::core::ids::{AlbumId, ArtistId};
 use crate::core::persistence::TabId;
 use crate::core::scan::ScanCommand;
 
 pub struct LrcPlayerEguiApp {
     application: Application,
     new_playlist_name: String,
+    last_highlighted_album: Option<AlbumId>,
+    last_highlighted_artist: Option<ArtistId>,
 }
 
 impl LrcPlayerEguiApp {
@@ -30,6 +33,8 @@ impl LrcPlayerEguiApp {
         Self {
             application,
             new_playlist_name: String::new(),
+            last_highlighted_album: None,
+            last_highlighted_artist: None,
         }
     }
 
@@ -150,10 +155,16 @@ impl LrcPlayerEguiApp {
         // 領域を確保して矩形を得る（この矩形全体がクリック可能になる）
         let (rect, reserve) = ui.allocate_exact_size(desired_size, egui::Sense::click());
         let response = ui.put(rect, egui::SelectableLabel::new(expanded, text));
+        // Log when an album becomes highlighted (expanded) so we can trace UI highlight display
+        if expanded && self.last_highlighted_album != Some(album.album_id) {
+            log::info!("[egui_app] Album highlighted: id={:?}", album.album_id);
+            self.last_highlighted_album = Some(album.album_id);
+        }
         if response.clicked() || reserve.clicked() {
-            println!(
+            log::info!(
                 "[egui_app] Album clicked: id={:?}, expanded={}",
-                album.album_id, expanded
+                album.album_id,
+                expanded
             );
             let next = if expanded { None } else { Some(album.album_id) };
             self.application
@@ -217,10 +228,16 @@ impl LrcPlayerEguiApp {
         let desired_size = egui::Vec2::new(ui.available_width(), desired_height);
         let (rect, reserve) = ui.allocate_exact_size(desired_size, egui::Sense::click());
         let response = ui.put(rect, egui::SelectableLabel::new(selected, text));
+        // Log when an artist becomes highlighted (selected)
+        if selected && self.last_highlighted_artist != Some(artist.artist_id) {
+            log::info!("[egui_app] Artist highlighted: id={:?}", artist.artist_id);
+            self.last_highlighted_artist = Some(artist.artist_id);
+        }
         if response.clicked() || reserve.clicked() {
-            println!(
+            log::info!(
                 "[egui_app] Artist clicked: id={:?}, selected={}",
-                artist.artist_id, selected
+                artist.artist_id,
+                selected
             );
             let next = if selected {
                 None
@@ -469,6 +486,42 @@ impl LrcPlayerEguiApp {
                     }
                 });
         });
+
+        // Debug mode toggle
+        ui.separator();
+        ui.horizontal(|ui| {
+            let mut debug_enabled = view_model.settings.debug_mode;
+            if ui.checkbox(&mut debug_enabled, "Enable debug mode").changed() {
+                self.application
+                    .handle_command(AppCommand::SetDebugMode { enabled: debug_enabled });
+            }
+        });
+        // When debug mode is enabled, allow selecting which log categories to output.
+        if view_model.settings.debug_mode {
+            ui.horizontal(|ui| {
+                ui.label("Log filters");
+                let mut selected: Vec<String> = view_model.settings.selected_log_filters.clone();
+                let categories = &view_model.settings.available_log_categories;
+                let display = if selected.is_empty() { "All".to_string() } else { selected.join(", ") };
+                egui::ComboBox::from_label("")
+                    .selected_text(display)
+                    .show_ui(ui, |ui| {
+                        for cat in categories.iter() {
+                            let mut checked = selected.contains(cat);
+                            if ui.checkbox(&mut checked, cat).changed() {
+                                if checked {
+                                    if !selected.contains(cat) {
+                                        selected.push(cat.clone());
+                                    }
+                                } else {
+                                    selected.retain(|s| s != cat);
+                                }
+                                self.application.handle_command(AppCommand::SetLogFilters { filters: selected.clone() });
+                            }
+                        }
+                    });
+            });
+        }
     }
 
     fn pick_scan_directory(&mut self, include: bool) {
@@ -599,6 +652,8 @@ impl eframe::App for LrcPlayerEguiApp {
             TabId::Scan => self.render_scan_tab(ui, &view_model),
             TabId::Settings => self.render_settings_tab(ui, &view_model),
         });
+
+        // frame timing and periodic logging removed
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

@@ -12,6 +12,7 @@ use lofty::probe::Probe;
 
 use crate::core::library::{Library, TrackInput};
 use crate::core::strings::StringInterner;
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScanState {
@@ -395,6 +396,10 @@ fn scan_directory_collect(
                 continue;
             }
         };
+        // Collect files in this directory and parse them in parallel to speed up
+        // metadata/tag extraction (lofty/symphonia work). We still traverse
+        // subdirectories serially to avoid explosion of work-stealing overhead.
+        let mut files_to_parse: Vec<PathBuf> = Vec::new();
 
         for entry in entries {
             if is_cancel_requested(cancel_requested) {
@@ -410,8 +415,6 @@ fn scan_directory_collect(
                 }
             };
             let path = entry.path();
-            progress.current_path = Some(path.clone());
-            send_progress(sender, progress);
 
             if should_skip_path(&path, exclude_dirs) {
                 continue;
@@ -440,16 +443,35 @@ fn scan_directory_collect(
             }
 
             progress.discovered_files += 1;
-            match build_track_input(&path, &metadata) {
-                Some(track_input) => {
-                    tracks.push(track_input);
-                    progress.parsed_files += 1;
-                }
-                None => {
-                    progress.skipped_files += 1;
-                }
-            }
+            files_to_parse.push(path);
+        }
+
+        if !files_to_parse.is_empty() {
+            // indicate work in progress for this directory
+            progress.current_path = Some(directory.clone());
             send_progress(sender, progress);
+
+            // Parse files in parallel; collect results and update progress.
+            let results: Vec<Option<TrackInput>> = files_to_parse
+                .par_iter()
+                .map(|p| build_track_input_from_path(p))
+                .collect();
+
+            for res in results {
+                if is_cancel_requested(cancel_requested) {
+                    return Ok(true);
+                }
+                match res {
+                    Some(track_input) => {
+                        tracks.push(track_input);
+                        progress.parsed_files += 1;
+                    }
+                    None => {
+                        progress.skipped_files += 1;
+                    }
+                }
+                send_progress(sender, progress);
+            }
         }
     }
 

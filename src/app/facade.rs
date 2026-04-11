@@ -3,6 +3,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::app::commands::{AppCommand, TrackListOrigin};
 use crate::app::events::{AppEvent, PlaybackEvent};
@@ -82,6 +83,7 @@ struct BrowseCacheState {
 #[derive(Debug)]
 enum BrowseLoaderMessage {
     Track(crate::core::library::TrackInput),
+    TrackBatch(Vec<crate::core::library::TrackInput>),
     Finished { missing_paths: Vec<String> },
 }
 
@@ -98,6 +100,7 @@ impl BrowseLoaderHandle {
 
         thread::spawn(move || {
             let mut missing_paths: Vec<String> = Vec::new();
+            let mut batch: Vec<crate::core::library::TrackInput> = Vec::new();
             for p in paths {
                 if worker_cancel.load(Ordering::Relaxed) {
                     break;
@@ -108,10 +111,17 @@ impl BrowseLoaderHandle {
                     continue;
                 }
                 if let Some(track_input) = crate::core::scan::build_track_input_from_path(path) {
-                    let _ = sender.send(BrowseLoaderMessage::Track(track_input));
+                    batch.push(track_input);
+                    if batch.len() >= BROWSE_HYDRATE_BATCH_SIZE {
+                        let send_batch = std::mem::take(&mut batch);
+                        let _ = sender.send(BrowseLoaderMessage::TrackBatch(send_batch));
+                    }
                 } else {
                     missing_paths.push(p.clone());
                 }
+            }
+            if !batch.is_empty() {
+                let _ = sender.send(BrowseLoaderMessage::TrackBatch(batch));
             }
             let _ = sender.send(BrowseLoaderMessage::Finished { missing_paths });
         });
@@ -128,10 +138,137 @@ impl BrowseLoaderHandle {
 
     pub fn drain_messages(&self) -> Vec<BrowseLoaderMessage> {
         let mut messages = Vec::new();
+        // throttle per-poll work to avoid processing an unbounded number of
+        // background loader messages in a single UI frame (prevents freezes)
+        for _ in 0..BROWSE_HYDRATE_BATCH_SIZE {
+            if let Ok(msg) = self.receiver.try_recv() {
+                messages.push(msg);
+            } else {
+                break;
+            }
+        }
+        messages
+    }
+}
+
+// Background builder for the full browse cache. Builds a BrowseCacheState
+// from cloned `Library` + `StringInterner` on a worker thread and sends
+// the completed cache back to the main thread for an atomic swap.
+struct BrowseCacheBuilderHandle {
+    cancel_requested: Arc<AtomicBool>,
+    receiver: Receiver<BrowseCacheState>,
+    target_revision: u64,
+}
+
+impl BrowseCacheBuilderHandle {
+    pub fn spawn(library: Library, strings: StringInterner) -> Self {
+        let target_revision = library.revision;
+        let (sender, receiver) = mpsc::channel();
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel_requested);
+
+        thread::spawn(move || {
+            if worker_cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let mut state = BrowseCacheState::default();
+            state.library_revision = target_revision;
+
+            // Build albums
+            let album_entries: Vec<AlbumLogEntry> = library
+                .albums
+                .titles
+                .iter()
+                .enumerate()
+                .map(|(index, title_id)| AlbumLogEntry {
+                    album_id: AlbumId(index as u32),
+                    title: strings
+                        .resolve(*title_id)
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    album_artist: library
+                        .albums
+                        .album_artist_ids
+                        .get(index)
+                        .and_then(|artist_id| {
+                            artist_id.and_then(|id| library.artist_name(id, &strings))
+                        })
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    track_count: library.indexes.tracks_by_album.get(index).map_or(0, Vec::len),
+                })
+                .collect();
+
+            if worker_cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            state.albums.reset(album_entries);
+
+            // Build artist lists (track artists / album artists / composers)
+            let build_artist_entries = |source: &Vec<Vec<TrackId>>| -> Vec<ArtistLogEntry> {
+                let mut out: Vec<ArtistLogEntry> = Vec::new();
+                for (index, name_id) in library.artists.names.iter().enumerate() {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        return Vec::new();
+                    }
+                    let track_count = source.get(index).map_or(0, Vec::len);
+                    if track_count == 0 {
+                        continue;
+                    }
+                    let name = strings
+                        .resolve(*name_id)
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    out.push(ArtistLogEntry { artist_id: ArtistId(index as u32), name, track_count });
+                }
+                out
+            };
+
+            if worker_cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let track_artist_entries = build_artist_entries(&library.indexes.tracks_by_artist);
+            state.track_artists.reset(track_artist_entries);
+
+            if worker_cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let album_artist_entries = build_artist_entries(&library.indexes.tracks_by_album_artist);
+            state.album_artists.reset(album_artist_entries);
+
+            if worker_cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let composer_entries = build_artist_entries(&library.indexes.tracks_by_composer);
+            state.composers.reset(composer_entries);
+
+            if worker_cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let _ = sender.send(state);
+        });
+
+        Self { cancel_requested, receiver, target_revision }
+    }
+
+    pub fn cancel(&self) {
+        self.cancel_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn drain_messages(&self) -> Vec<BrowseCacheState> {
+        let mut messages = Vec::new();
+        // Only expect a single final message, but drain any that exist
         while let Ok(msg) = self.receiver.try_recv() {
             messages.push(msg);
         }
         messages
+    }
+
+    pub fn target_revision(&self) -> u64 {
+        self.target_revision
     }
 }
 
@@ -268,7 +405,8 @@ pub struct AppFacade {
     artist_index: crate::core::persistence::ArtistIndexFile,
     // mapping of artist name -> ArtistId for quick lookup when lazy-loading
     artist_name_to_id: std::collections::HashMap<String, ArtistId>,
-    browse_loader: Option<BrowseLoaderHandle>,
+    pub browse_loader: Option<BrowseLoaderHandle>,
+    pub browse_cache_builder: Option<BrowseCacheBuilderHandle>,
 }
 
 impl Default for AppFacade {
@@ -337,6 +475,7 @@ impl Default for AppFacade {
             artist_index: crate::core::persistence::ArtistIndexFile::default(),
             artist_name_to_id: std::collections::HashMap::new(),
             browse_loader: None,
+            browse_cache_builder: None,
         }
     }
 }
@@ -691,7 +830,8 @@ impl AppFacade {
     }
 
     pub fn handle_command(&mut self, command: AppCommand) -> Vec<AppEvent> {
-        match command {
+        log::info!("handle_command start: {:?}", command);
+        let events = match command {
             AppCommand::ClickTrack {
                 visible_tracks,
                 clicked_index,
@@ -820,7 +960,9 @@ impl AppFacade {
                 vec![AppEvent::TabChanged(tab)]
             }
             AppCommand::SelectAlbum(album_id) => {
+                let prev = self.selected_album;
                 self.selected_album = album_id;
+                log::info!("[facade] SelectAlbum: prev={:?} new={:?}", prev, album_id);
                 if let Some(aid) = album_id {
                     self.lazy_load_album_tracks(aid);
                 }
@@ -832,7 +974,9 @@ impl AppFacade {
                 vec![AppEvent::TabChanged(self.current_tab)]
             }
             AppCommand::SelectArtist(artist_id) => {
+                let prev = self.selected_artist;
                 self.selected_artist = artist_id;
+                log::info!("[facade] SelectArtist: prev={:?} new={:?}", prev, artist_id);
                 if let Some(aid) = artist_id {
                     self.lazy_load_artist_tracks(aid, self.selected_artist_kind);
                 }
@@ -927,17 +1071,58 @@ impl AppFacade {
 
                 vec![AppEvent::TabChanged(self.current_tab)]
             }
+            AppCommand::SetDebugMode { enabled } => {
+                self.settings.debug_mode = enabled;
+                if enabled {
+                    log::set_max_level(log::LevelFilter::Debug);
+                    log::info!("[facade] debug mode enabled");
+                } else {
+                    log::set_max_level(log::LevelFilter::Info);
+                    log::info!("[facade] debug mode disabled");
+                }
+                vec![AppEvent::SettingsChanged]
+            }
+            AppCommand::SetLogFilters { filters } => {
+                self.settings.log_filters = filters.clone();
+                // update runtime logger filters
+                crate::logging::set_log_filters(filters.clone());
+                log::info!("[facade] log filters set: {:?}", self.settings.log_filters);
+                vec![AppEvent::SettingsChanged]
+            }
             AppCommand::Scan(scan_command) => self.handle_scan_command(scan_command),
             AppCommand::CreatePlaylist { name } => {
                 let name_id = self.strings.intern(name);
                 let _ = self.playlists.create_user_playlist(name_id);
                 vec![AppEvent::PlaylistChanged]
             }
-        }
+        };
+        log::info!("handle_command end: produced {} events", events.len());
+        events
     }
 
     pub fn view_model(&mut self) -> AppViewModel {
+        // Capture selection snapshot to detect unexpected overwrites
+        let prev_selected_album = self.selected_album;
+        let prev_selected_artist = self.selected_artist;
+
         self.ensure_browse_cache_current();
+
+        if prev_selected_album != self.selected_album || prev_selected_artist != self.selected_artist {
+            log::warn!(
+                "[facade] selection_overwrite: prev_album={:?} prev_artist={:?} new_album={:?} new_artist={:?}",
+                prev_selected_album,
+                prev_selected_artist,
+                self.selected_album,
+                self.selected_artist
+            );
+            eprintln!(
+                "selection_overwrite: prev_album={:?} prev_artist={:?} new_album={:?} new_artist={:?}",
+                prev_selected_album,
+                prev_selected_artist,
+                self.selected_album,
+                self.selected_artist
+            );
+        }
 
         AppViewModel {
             current_tab: self.current_tab,
@@ -989,9 +1174,12 @@ impl AppFacade {
     }
 
     pub fn poll_background_tasks(&mut self) -> Vec<AppEvent> {
-        self.ensure_browse_cache_current();
+        // Defer browse-cache rebuilds to `view_model()` so we don't rebuild
+        // the entire cache multiple times while processing background messages.
         let mut events = Vec::new();
         let mut finished = None;
+        let poll_start = Instant::now();
+        let mut total_upserts = 0usize;
 
         // Hotplug detection: prefer background watcher messages; fall back to inline polling if not available.
         let mut handled_hotplug = false;
@@ -1003,11 +1191,11 @@ impl AppFacade {
                         devices,
                         default,
                     } => {
-                        if let Some(pref) = self.settings.preferred_output_device.clone() {
-                            let present = devices.iter().any(|d| d == &pref);
-                            if !present && self.audio_device_present() {
-                                // device disappeared: don't change playback state, just stop audio output
-                                self.set_audio_device(None, None);
+                                if let Some(pref) = self.settings.preferred_output_device.clone() {
+                                    let present = devices.iter().any(|d| d == &pref);
+                                    if !present && self.audio_device_present() {
+                                        // device disappeared: don't change playback state, just stop audio output
+                                        self.set_audio_device(None, None);
                                 self.audio_output.set_playback_active(false);
                                 self.audio_disconnected = true;
                                 events.push(AppEvent::Playback(PlaybackEvent::DeviceUnderrun));
@@ -1221,24 +1409,64 @@ impl AppFacade {
         let mut browse_finished = false;
         let mut browse_missing_paths: Vec<String> = Vec::new();
         let mut library_changed = false;
+        // Limit total upserts per poll to avoid long blocking periods.
+        // Increased for investigation to amortize directory/index rebuilds.
+        const MAX_UPSERTS_PER_POLL: usize = 1024;
         if let Some(loader) = self.browse_loader.as_ref() {
-            for message in loader.drain_messages() {
+            // Drain into a Vec first so we can report how many messages were available
+            let drained_msgs = loader.drain_messages();
+            let drained_count = drained_msgs.len();
+            let mut upserts_done = 0usize;
+            let mut batch: Vec<crate::core::library::TrackInput> = Vec::new();
+
+            'drain_loop: for message in drained_msgs.into_iter() {
                 match message {
                     BrowseLoaderMessage::Track(track_input) => {
-                        let _ = self.library.upsert_track(&mut self.strings, track_input);
-                        library_changed = true;
+                        batch.push(track_input);
+                        upserts_done += 1;
+                        if upserts_done >= MAX_UPSERTS_PER_POLL {
+                            break 'drain_loop;
+                        }
+                    }
+                    BrowseLoaderMessage::TrackBatch(vec) => {
+                        for track_input in vec {
+                            batch.push(track_input);
+                            upserts_done += 1;
+                            if upserts_done >= MAX_UPSERTS_PER_POLL {
+                                break 'drain_loop;
+                            }
+                        }
                     }
                     BrowseLoaderMessage::Finished { missing_paths } => {
                         browse_finished = true;
                         browse_missing_paths = missing_paths;
+                        // continue draining to collect other finished messages
                     }
                 }
+            }
+
+            if !batch.is_empty() {
+                let batch_len = batch.len();
+                let upsert_start = Instant::now();
+                let _ids = self.library.upsert_tracks_batch(&mut self.strings, batch);
+                let upsert_dur = upsert_start.elapsed();
+                total_upserts = upserts_done;
+                library_changed = true;
+                log::info!(
+                    "poll_background_upsert: drained_msgs={} collected_inputs={} upserts={} upsert_ms={}",
+                    drained_count,
+                    batch_len,
+                    upserts_done,
+                    upsert_dur.as_millis()
+                );
+            } else {
+                log::info!("poll_background: drained_msgs={} no_upserts", drained_count);
             }
         }
 
         if library_changed {
-            // Ensure browse cache is rebuilt from the updated library so UI shows hydrated rows.
-            self.ensure_browse_cache_current();
+            // Defer actual rebuild — signal UI to refresh; `view_model()` will
+            // call `ensure_browse_cache_current()` once during the next frame.
             events.push(AppEvent::TabChanged(self.current_tab));
         }
 
@@ -1247,6 +1475,13 @@ impl AppFacade {
             self.browse_loader = None;
             events.push(AppEvent::TabChanged(self.current_tab));
 
+
+        let poll_dur = poll_start.elapsed();
+        log::info!(
+            "poll_background_tasks: duration_ms={} upserts={}",
+            poll_dur.as_millis(),
+            total_upserts
+        );
             // If there were missing paths, attempt a targeted re-scan of likely roots
             if !browse_missing_paths.is_empty() {
                 // compute candidate roots: prefer configured include dirs that contain the missing path,
@@ -1474,60 +1709,105 @@ impl AppFacade {
         self.scan.progress = outcome.progress.clone();
         self.scan.finish_with(outcome.result);
         if outcome.targeted {
-            for track in outcome.tracks {
-                let _ = self.library.upsert_track(&mut self.strings, track);
-            }
+            // Batch upserts for targeted scans to amortize rebuilds.
+            let inputs = outcome.tracks;
+            let _ids = self.library.upsert_tracks_batch(&mut self.strings, inputs.into_iter());
         } else {
-            self.library = build_library_from_track_inputs(&mut self.strings, outcome.tracks);
+            // Preserve current selection names so we can re-resolve after rebuilding
+            let preserved_album = self
+                .selected_album
+                .and_then(|aid| self.library.album_title(aid, &self.strings));
+            let preserved_artist = self
+                .selected_artist
+                .and_then(|aid| self.library.artist_name(aid, &self.strings));
+
+            let new_library = build_library_from_track_inputs(&mut self.strings, outcome.tracks);
+
+            // Attempt to remap preserved selections into the new library by name
+            let mut new_selected_album: Option<AlbumId> = None;
+            if let Some(album_name) = preserved_album {
+                for (i, title_id) in new_library.albums.titles.iter().enumerate() {
+                    if let Some(title) = self.strings.resolve(*title_id) {
+                        if title == album_name {
+                            new_selected_album = Some(AlbumId(i as u32));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let mut new_selected_artist: Option<ArtistId> = None;
+            if let Some(artist_name) = preserved_artist {
+                for (i, name_id) in new_library.artists.names.iter().enumerate() {
+                    if let Some(name) = self.strings.resolve(*name_id) {
+                        if name == artist_name {
+                            new_selected_artist = Some(ArtistId(i as u32));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            self.library = new_library;
+            log::info!(
+                "[facade] restore bootstrap selected_album: prev={:?} new={:?}, selected_artist: prev={:?} new={:?}",
+                self.selected_album,
+                new_selected_album,
+                self.selected_artist,
+                new_selected_artist
+            );
+            self.selected_album = new_selected_album;
+            self.selected_artist = new_selected_artist;
         }
         self.ensure_browse_cache_current();
     }
 
     fn ensure_browse_cache_current(&mut self) {
+        // If already up-to-date, nothing to do.
         if self.browse_cache.library_revision == self.library.revision {
             return;
         }
 
-        self.browse_cache.albums.reset(
-            self.library
-                .albums
-                .titles
-                .iter()
-                .enumerate()
-                .map(|(index, title_id)| AlbumLogEntry {
-                    album_id: AlbumId(index as u32),
-                    title: self
-                        .strings
-                        .resolve(*title_id)
-                        .unwrap_or_else(|| "Unknown".to_string()),
-                    album_artist: self
-                        .library
-                        .albums
-                        .album_artist_ids
-                        .get(index)
-                        .and_then(|artist_id| {
-                            artist_id.and_then(|id| self.library.artist_name(id, &self.strings))
-                        })
-                        .unwrap_or_else(|| "Unknown".to_string()),
-                    track_count: self
-                        .library
-                        .indexes
-                        .tracks_by_album
-                        .get(index)
-                        .map_or(0, Vec::len),
-                })
-                .collect(),
+        // If a builder is already running, try to drain its result. If it completed
+        // with a cache matching the current library revision, apply an atomic swap.
+        if let Some(builder) = self.browse_cache_builder.as_ref() {
+            let msgs = builder.drain_messages();
+            if !msgs.is_empty() {
+                // take first completed state that matches current revision
+                for state in msgs {
+                    if state.library_revision == self.library.revision {
+                        self.browse_cache = state;
+                        log::info!(
+                            "ensure_browse_cache_current: swapped browse cache rev={}",
+                            self.browse_cache.library_revision
+                        );
+                        break;
+                    }
+                }
+                // builder finished (or delivered a result) — clear it
+                self.browse_cache_builder = None;
+                return;
+            }
+
+            // still building; if builder target differs from current revision, cancel and restart
+            if builder.target_revision() != self.library.revision {
+                builder.cancel();
+                self.browse_cache_builder = None;
+            } else {
+                // builder is producing the right revision; defer swap until it completes
+                return;
+            }
+        }
+
+        // No builder running: spawn one using cloned library + strings so the heavy
+        // work occurs off the UI thread and we can atomically swap when ready.
+        let lib_clone = self.library.clone();
+        let strings_clone = self.strings.clone();
+        self.browse_cache_builder = Some(BrowseCacheBuilderHandle::spawn(lib_clone, strings_clone));
+        log::info!(
+            "ensure_browse_cache_current: spawned background builder for rev={}",
+            self.library.revision
         );
-        self.browse_cache
-            .track_artists
-            .reset(self.artist_log_entries_for(ArtistKind::TrackArtist));
-        self.browse_cache
-            .album_artists
-            .reset(self.artist_log_entries_for(ArtistKind::AlbumArtist));
-        self.browse_cache
-            .composers
-            .reset(self.artist_log_entries_for(ArtistKind::Composer));
-        self.browse_cache.library_revision = self.library.revision;
     }
 
     fn hydrate_browse_lists(&mut self) {
@@ -1900,6 +2180,9 @@ impl AppFacade {
             ],
             available_output_devices: AudioDeviceOutput::list_output_devices(),
             preferred_output_device: self.settings.preferred_output_device.clone(),
+            debug_mode: self.settings.debug_mode,
+            available_log_categories: crate::logging::available_log_categories(),
+            selected_log_filters: self.settings.log_filters.clone(),
         }
     }
 
@@ -2693,5 +2976,274 @@ mod tests {
             .expect("config parent should exist")
             .to_path_buf();
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn measure_poll_and_browse_cache_timings() {
+        use std::sync::{mpsc, Arc, atomic::{AtomicBool, Ordering}};
+        use std::time::Instant;
+
+        let mut facade = AppFacade::default();
+
+        // Prepare a batch of synthetic TrackInput entries and send them via a
+        // fake BrowseLoaderHandle so `poll_background_tasks()` will process
+        // them and call `upsert_tracks_batch`.
+        let n = 200usize;
+        let mut inputs: Vec<crate::core::library::TrackInput> = Vec::with_capacity(n);
+        for i in 0..n {
+            inputs.push(crate::core::library::TrackInput {
+                title: format!("Track {i}"),
+                album: Some(format!("Album {}", i % 10)),
+                artist: Some(format!("Artist {}", i % 20)),
+                album_artist: Some(format!("Artist {}", i % 20)),
+                composer: None,
+                normalized_path: format!("/music/Artist{}/Album{}/{:02}.flac", i, i, i),
+                file_size: i as u64 + 1,
+                modified_unix_secs: 10,
+                file_name: format!("{:02}.flac", i),
+                track_number: None,
+                duration_ms: 1_000,
+                artwork_key: None,
+            });
+        }
+
+        let (sender, receiver) = mpsc::channel::<super::BrowseLoaderMessage>();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        // send a single TrackBatch message containing all inputs
+        let _ = sender.send(super::BrowseLoaderMessage::TrackBatch(inputs));
+
+        let loader = super::BrowseLoaderHandle { cancel_requested: Arc::clone(&cancel), receiver };
+        facade.browse_loader = Some(loader);
+
+        // Measure poll duration (will process up to MAX_UPSERTS_PER_POLL)
+        let start = Instant::now();
+        let events = facade.poll_background_tasks();
+        let poll_dur = start.elapsed();
+        eprintln!(
+            "measure: poll_background_tasks duration_ms={} events={} tracks_after_poll={}",
+            poll_dur.as_millis(),
+            events.len(),
+            facade.library.tracks.titles.len()
+        );
+
+        // Measure view_model() which triggers ensure_browse_cache_current() when
+        // the library revision changed as a result of the poll upserts.
+        let start2 = Instant::now();
+        let _vm = facade.view_model();
+        let view_dur = start2.elapsed();
+        eprintln!(
+            "measure: view_model (ensure_browse_cache_current) duration_ms={} albums={} artists={}",
+            view_dur.as_millis(),
+            facade.library.albums.titles.len(),
+            facade.library.artists.names.len()
+        );
+
+        assert!(facade.library.tracks.titles.len() > 0);
+    }
+
+    #[test]
+    fn measure_poll_with_many_tracks() {
+        use std::sync::{mpsc, Arc, atomic::{AtomicBool, Ordering}};
+        use std::time::Instant;
+
+        let mut facade = AppFacade::default();
+
+        // Large synthetic workload (reduced to 1k for timely measurement)
+        let total = 1_024usize;
+        let chunk_size = 64usize;
+
+        // Build batches and send as separate TrackBatch messages so loader
+        // simulates streaming many small batches like a real background loader.
+        let (sender, receiver) = mpsc::channel::<super::BrowseLoaderMessage>();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let mut i = 0usize;
+        while i < total {
+            let mut batch: Vec<crate::core::library::TrackInput> = Vec::new();
+            for j in i..(i + chunk_size).min(total) {
+                batch.push(crate::core::library::TrackInput {
+                    title: format!("Track {j}"),
+                    album: Some(format!("Album {}", j % 100)),
+                    artist: Some(format!("Artist {}", j % 200)),
+                    album_artist: Some(format!("Artist {}", j % 200)),
+                    composer: None,
+                    normalized_path: format!("/music/Artist{}/Album{}/{:05}.flac", j % 200, j % 100, j),
+                    file_size: j as u64 + 1,
+                    modified_unix_secs: 10,
+                    file_name: format!("{:05}.flac", j),
+                    track_number: None,
+                    duration_ms: 1_000,
+                    artwork_key: None,
+                });
+            }
+            let _ = sender.send(super::BrowseLoaderMessage::TrackBatch(batch));
+            i += chunk_size;
+        }
+
+        // send finished marker
+        let _ = sender.send(super::BrowseLoaderMessage::Finished { missing_paths: Vec::new() });
+
+        let loader = super::BrowseLoaderHandle { cancel_requested: Arc::clone(&cancel), receiver };
+        facade.browse_loader = Some(loader);
+
+        // Poll until loader completes; measure total poll time and number of polls.
+        let start = Instant::now();
+        let mut polls = 0usize;
+        while facade.browse_loader.is_some() {
+            let _ = facade.poll_background_tasks();
+            polls += 1;
+        }
+        let total_dur = start.elapsed();
+        eprintln!(
+            "measure_large: total_polls={} total_duration_ms={} tracks_after={} albums={} artists={}",
+            polls,
+            total_dur.as_millis(),
+            facade.library.tracks.titles.len(),
+            facade.library.albums.titles.len(),
+            facade.library.artists.names.len()
+        );
+
+        // Measure browse-cache rebuild via view_model()
+        let start2 = Instant::now();
+        let _vm = facade.view_model();
+        let vm_dur = start2.elapsed();
+        eprintln!(
+            "measure_large: ensure_browse_cache_current_ms={} albums={} artists={}",
+            vm_dur.as_millis(),
+            facade.library.albums.titles.len(),
+            facade.library.artists.names.len()
+        );
+
+        assert_eq!(facade.library.tracks.titles.len(), total);
+    }
+
+    #[test]
+    fn measure_upsert_batch_and_browse_cache() {
+        use std::time::Instant;
+
+        // Measure a single batched upsert and the subsequent browse-cache rebuild.
+        let total = 1_024usize;
+        let mut inputs: Vec<crate::core::library::TrackInput> = Vec::with_capacity(total);
+        for i in 0..total {
+            inputs.push(crate::core::library::TrackInput {
+                title: format!("Track {i}"),
+                album: Some(format!("Album {}", i % 100)),
+                artist: Some(format!("Artist {}", i % 200)),
+                album_artist: Some(format!("Artist {}", i % 200)),
+                composer: None,
+                normalized_path: format!("/music/Artist{}/Album{}/{:05}.flac", i % 200, i % 100, i),
+                file_size: i as u64 + 1,
+                modified_unix_secs: 10,
+                file_name: format!("{:05}.flac", i),
+                track_number: None,
+                duration_ms: 1_000,
+                artwork_key: None,
+            });
+        }
+
+        let mut lib = crate::core::library::Library::default();
+        let mut strings = crate::core::strings::StringInterner::default();
+
+        let start = Instant::now();
+        let ids = lib.upsert_tracks_batch(&mut strings, inputs.into_iter());
+        let upsert_dur = start.elapsed();
+        eprintln!(
+            "measure_upsert: total={} upsert_ms={} ids={}",
+            total,
+            upsert_dur.as_millis(),
+            ids.len()
+        );
+
+        // Move into facade and measure browse-cache rebuild via view_model()
+        let mut facade = AppFacade::default();
+        facade.library = lib;
+        facade.strings = strings;
+
+        let start2 = Instant::now();
+        let _vm = facade.view_model();
+        let vm_dur = start2.elapsed();
+        eprintln!(
+            "measure_upsert: ensure_browse_cache_current_ms={} albums={} artists={}",
+            vm_dur.as_millis(),
+            facade.library.albums.titles.len(),
+            facade.library.artists.names.len()
+        );
+
+        assert_eq!(facade.library.tracks.titles.len(), total);
+    }
+
+    #[test]
+    fn burst_upserts_repro() {
+        use std::time::Instant;
+
+        // Initialize logger to a temp data root so SimpleFileLogger is active
+        let tmp = std::env::temp_dir().join("lrc_player_lock_test");
+        let _ = std::fs::create_dir_all(tmp.join("config"));
+        let paths = crate::core::persistence::PersistencePaths {
+            config_json: tmp.join("config").join("config.json"),
+            state_json: tmp.join("state.json"),
+            playlists_json: tmp.join("playlists.json"),
+        };
+        match crate::logging::init(&paths) {
+            Ok(_) => eprintln!("[test] logger initialized"),
+            Err(e) => eprintln!("[test] logger init error: {}", e),
+        }
+
+        // Spawn background threads that log frequently to create contention
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut bg_handles = Vec::new();
+        for _ in 0..4 {
+            let stopc = Arc::clone(&stop);
+            bg_handles.push(std::thread::spawn(move || {
+                while !stopc.load(Ordering::Relaxed) {
+                    log::info!("bg_logger: heartbeat");
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
+            }));
+        }
+
+        // Reproduce burst of small upserts via targeted scan outcome
+        let count = 1024usize;
+        let mut tracks: Vec<crate::core::library::TrackInput> = Vec::with_capacity(count);
+        for i in 0..count {
+            tracks.push(crate::core::library::TrackInput {
+                title: format!("Track {i}"),
+                album: Some(format!("Album {}", i % 100)),
+                artist: Some(format!("Artist {}", i % 200)),
+                album_artist: Some(format!("Artist {}", i % 200)),
+                composer: None,
+                normalized_path: format!("/music/Artist{}/Album{}/{:05}.flac", i % 200, i % 100, i),
+                file_size: i as u64 + 1,
+                modified_unix_secs: 10,
+                file_name: format!("{:05}.flac", i),
+                track_number: None,
+                duration_ms: 1_000,
+                artwork_key: None,
+            });
+        }
+
+        let mut facade = AppFacade::default();
+
+        let outcome = crate::core::scan::ScanOutcome {
+            result: crate::core::scan::ScanState::Completed,
+            progress: crate::core::scan::ScanProgress::default(),
+            tracks,
+            targeted: true,
+        };
+
+        let start = Instant::now();
+        facade.complete_scan(outcome);
+        let dur = start.elapsed();
+        eprintln!(
+            "burst_upserts: count={} total_ms={} albums={} artists={}",
+            count,
+            dur.as_millis(),
+            facade.library.albums.titles.len(),
+            facade.library.artists.names.len()
+        );
+
+        assert_eq!(facade.library.tracks.titles.len(), count);
     }
 }

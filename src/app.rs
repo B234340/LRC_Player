@@ -90,6 +90,7 @@ impl Application {
         let mut save_for_track_change = false;
         let mut save_for_position = false;
         let mut save_for_scan = false;
+        let mut save_for_settings = false;
 
         for event in events {
             if let AppEvent::Playback(playback_event) = event {
@@ -113,12 +114,16 @@ impl Application {
                     save_for_scan = true;
                 }
             }
+            if let AppEvent::SettingsChanged = event {
+                save_for_settings = true;
+            }
         }
 
         let should_persist =
             save_for_track_change
                 || (save_for_position && self.should_persist_position())
                 || save_for_scan;
+        let should_persist = should_persist || save_for_settings;
         if should_persist && let Err(error) = self.persist() {
             eprintln!("failed to persist application state: {error}");
         }

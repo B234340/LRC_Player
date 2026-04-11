@@ -57,6 +57,12 @@ pub enum AppCommand {
     SetPreferredOutputDevice {
         device_name: Option<String>,
     },
+    SetDebugMode {
+        enabled: bool,
+    },
+    SetLogFilters {
+        filters: Vec<String>,
+    },
     Scan(ScanCommand),
     CreatePlaylist {
         name: String,
