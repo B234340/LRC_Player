@@ -14,6 +14,11 @@ data/**/state/
 LRC_Player/data/**/cache/
 LRC_Player/data/**/logs/
 LRC_Player/data/**/state/
+data/cache/
+data/index/
+data/**/index/
+LRC_Player/data/cache/
+LRC_Player/data/index/
 
 # IDE / editor
 .vscode/
