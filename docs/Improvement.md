@@ -129,6 +129,9 @@
 - `f76aa72` — feat(shared): add AppError/AppResult and thiserror dep
 	- 追加: `src/shared/error.rs`、`Cargo.toml` に `thiserror` を追加
 
+- `a79c47c` — feat(application): add minimal TaskManager for background tasks
+	- 追加: `src/application/task_manager.rs`、`src/application/mod.rs` を更新して `application::task_manager` を公開
+
 詳細は `docs/APPLIED_CHANGES.md` を参照してください。
 
 この文書は要旨に絞っているため、移行や実装の具体例が必要なら指示をください。

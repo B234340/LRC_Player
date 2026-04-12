@@ -17,6 +17,10 @@
   - 追加ファイル: `src/shared/error.rs`
   - 変更: `Cargo.toml` に `thiserror` を追加、`src/shared/mod.rs` を更新して `shared::error` を公開。
 
+- `a79c47c` — feat(application): add minimal TaskManager for background tasks
+  - 追加ファイル: `src/application/task_manager.rs`
+  - 変更: `src/application/mod.rs` を更新して `application::task_manager` を公開。
+
 備考:
 - これらは初期の非破壊的ステップです。ファイルの大規模移動やモジュールパスの全面的なリファクタは実行していません。
 - 次の推奨作業:
