@@ -26,11 +26,13 @@ use crate::core::scan::ScanCommand;
 ///
 /// - `application` は内部ロジックのエントリ（`Application`）で、UI はここにコマンドを渡す。
 /// - `last_highlighted_*` は UI のログ目的で、最後に選択された要素のトレースに使う。
+/// - `cached_visible_tracks`: トラック ID リストのキャッシュ。再描画時のクローンを避けるために使用。
 pub struct LrcPlayerEguiApp {
     application: Application,
     new_playlist_name: String,
     last_highlighted_album: Option<AlbumId>,
     last_highlighted_artist: Option<ArtistId>,
+    cached_visible_tracks: Option<(TrackListOrigin, Vec<crate::core::ids::TrackId>)>,
 }
 
 impl LrcPlayerEguiApp {
@@ -48,6 +50,7 @@ impl LrcPlayerEguiApp {
             new_playlist_name: String::new(),
             last_highlighted_album: None,
             last_highlighted_artist: None,
+            cached_visible_tracks: None,
         }
     }
 
@@ -72,51 +75,74 @@ impl LrcPlayerEguiApp {
     }
 
     /// 上部タブ（Queue/Play/Album/...）を描画して、選択時に `SelectTab` コマンドを送る。
-
+    
+    /// トラック行リストを描画するヘルパー。
+    /// - `rows` は UI 表示用のスナップショットで、フレーム内での行インデックスは安定していることを前提とする。
+    /// - クリック処理では `visible_tracks` のクローンと `clicked_index` を渡し、アプリ側がモデルの並行変更に影響されず動作できるようにする。
+    /// - `origin` はトラックリストの発生元（Album/Artist/Playlist/...）を示す。コマンドはこれに基づき振る舞いを変える。
+    /// - トラックIDリストのキャッシュを使用して、毎フレームのクローンを避ける。
     fn render_track_rows(
         &mut self,
         ui: &mut egui::Ui,
         rows: &[TrackRowVm],
         origin: TrackListOrigin,
     ) {
-        // 現在表示されているトラック ID のリストを作成（クリック時に visible_tracks を渡すため）
-            // Create a snapshot of visible track IDs. This snapshot is intentionally cloned
-            // and passed to command handlers so that UI event handlers operate on a stable list
-            // even if the app's model mutates during or after event handling.
-            let visible_tracks: Vec<_> = rows.iter().map(|row| row.track_id).collect();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for (index, row) in rows.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    // 再生中を示すマーカー
-                    let playing = if row.is_current { "▶" } else { " " };
-                    if ui
-                        .selectable_label(
-                            row.is_current,
-                            format!("{} {} - {} [{}]", playing, row.title, row.artist, row.album),
-                        )
-                        .clicked()
-                    {
-                        // トラッククリック -> visible_tracks + index を渡して再生等の動作をトリガー
+        // キャッシュを確認し、変更がなければ再利用する
+        let visible_tracks = if let Some((cached_origin, cached)) = &self.cached_visible_tracks {
+            if *cached_origin == origin && cached.len() == rows.len() {
+                cached.clone()
+            } else {
+                let new_cache: Vec<_> = rows.iter().map(|row| row.track_id).collect();
+                self.cached_visible_tracks = Some((origin, new_cache.clone()));
+                new_cache
+            }
+        } else {
+            let new_cache: Vec<_> = rows.iter().map(|row| row.track_id).collect();
+            self.cached_visible_tracks = Some((origin, new_cache.clone()));
+            new_cache
+        };
+
+        let row_height = ui.text_style_height(&egui::TextStyle::Body)
+            + ui.spacing().button_padding.y * 2.0;
+        egui::ScrollArea::vertical().show_rows(
+            ui,
+            row_height,
+            rows.len(),
+            |ui, range| {
+                for i in range {
+                    let row = &rows[i];
+                    ui.horizontal(|ui| {
+                        // 再生中を示すマーカー
+                        let playing = if row.is_current { "▶" } else { " " };
+                        if ui
+                            .selectable_label(
+                                row.is_current,
+                                format!("{} {} - {} [{}]", playing, row.title, row.artist, row.album),
+                            )
+                            .clicked()
+                        {
+                            // トラッククリック -> visible_tracks + index を渡して再生等の動作をトリガー
                             self.application.handle_command(AppCommand::ClickTrack {
                                 visible_tracks: visible_tracks.clone(),
-                                clicked_index: index,
+                                clicked_index: i,
                                 origin,
                             });
-                    }
+                        }
 
-                    // お気に入りトグル
-                    let favorite_label = match row.favorite_state {
-                        crate::app::view_models::FavoriteStateVm::Included => "★",
-                        crate::app::view_models::FavoriteStateVm::Excluded => "☆",
-                    };
-                    if ui.button(favorite_label).clicked() {
-                        self.application.handle_command(AppCommand::ToggleFavorite {
-                            track_id: row.track_id,
-                        });
-                    }
-                });
-            }
-        });
+                        // お気に入りトグル
+                        let favorite_label = match row.favorite_state {
+                            crate::app::view_models::FavoriteStateVm::Included => "★",
+                            crate::app::view_models::FavoriteStateVm::Excluded => "☆",
+                        };
+                        if ui.button(favorite_label).clicked() {
+                            self.application.handle_command(AppCommand::ToggleFavorite {
+                                track_id: row.track_id,
+                            });
+                        }
+                    });
+                }
+            },
+        );
     }
 
     fn render_queue_tab(&mut self, ui: &mut egui::Ui, view_model: &AppViewModel) {
@@ -140,7 +166,7 @@ impl LrcPlayerEguiApp {
     fn render_play_tab(&mut self, ui: &mut egui::Ui, view_model: &AppViewModel) {
         ui.heading("Now Playing");
         if let Some(track) = &view_model.play.current_track {
-            ui.label(&track.title);
+            ui.label(&*track.title);
             ui.label(format!("{} / {}", track.artist, track.album));
         } else {
             ui.label("No track selected");
@@ -168,11 +194,19 @@ impl LrcPlayerEguiApp {
 
     /// Now Playing タブの描画：現在トラック情報と基本的なシーク/再生操作を提供
 
+    /// アルバム一覧の1エントリを描画する。
+    /// - `expanded` が true のとき選択表示（右カラムにトラックを表示）。
+    /// - `ui.allocate_exact_size` で矩形領域を確保し、その領域全体でクリックを受け取る。
+    /// - クリックで `AppCommand::SelectAlbum` を発行してトグル選択を行う。
+    /// - `last_highlighted_album` はデバッグ/ログ表示のため最後にハイライトされた ID を保持する。
     fn render_album_entry(&mut self, ui: &mut egui::Ui, album: &AlbumEntryVm, expanded: bool) {
         let log_label = if album.is_provisional { " [log]" } else { "" };
         let text = format!(
             "{} - {} ({} tracks){}",
-            album.title, album.album_artist, album.track_count, log_label
+            &*album.title,
+            &*album.album_artist,
+            album.track_count,
+            log_label
         );
         // ラベルの高さを計測して、行全体の矩形を確保し、その矩形でクリックを受け取る
         let label_height = ui.text_style_height(&egui::TextStyle::Body);
@@ -181,18 +215,12 @@ impl LrcPlayerEguiApp {
         // 領域を確保して矩形を得る（この矩形全体がクリック可能になる）
         let (rect, reserve) = ui.allocate_exact_size(desired_size, egui::Sense::click());
         let response = ui.put(rect, egui::SelectableLabel::new(expanded, text));
-        // Log when an album becomes highlighted (expanded) so we can trace UI highlight display
+        // When an album becomes highlighted (expanded) update last_highlighted_album for tracing
         if expanded && self.last_highlighted_album != Some(album.album_id) {
-            log::info!("[egui_app] Album highlighted: id={:?}", album.album_id);
             self.last_highlighted_album = Some(album.album_id);
         }
         // クリックされたら選択状態のトグルを行い、AppCommand を発行する
         if response.clicked() || reserve.clicked() {
-            log::info!(
-                "[egui_app] Album clicked: id={:?}, expanded={}",
-                album.album_id,
-                expanded
-            );
             let next = if expanded { None } else { Some(album.album_id) };
             self.application
                 .handle_command(AppCommand::SelectAlbum(next));
@@ -200,6 +228,9 @@ impl LrcPlayerEguiApp {
         }
     }
 
+    /// アルバムタブ全体を描画する。
+    /// - 左カラム: アルバム一覧（`render_album_entry` を使用）。
+    /// - 右カラム: 選択アルバムのトラックと読み込み進捗表示（`render_track_rows` を使用）。
     fn render_album_tab(&mut self, ui: &mut egui::Ui, view_model: &AppViewModel) {
         ui.horizontal(|ui| {
             ui.label(format!(
@@ -212,15 +243,23 @@ impl LrcPlayerEguiApp {
         });
 
         ui.columns(2, |columns| {
-            egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
-                for album in &view_model.album.albums {
-                    self.render_album_entry(
-                        ui,
-                        album,
-                        view_model.album.expanded_album == Some(album.album_id),
-                    );
-                }
-            });
+            let row_height = columns[0].text_style_height(&egui::TextStyle::Body)
+                + columns[0].spacing().button_padding.y * 2.0;
+            egui::ScrollArea::vertical().show_rows(
+                &mut columns[0],
+                row_height,
+                view_model.album.albums.len(),
+                |ui, range| {
+                    for i in range {
+                        let album = &view_model.album.albums[i];
+                        self.render_album_entry(
+                            ui,
+                            album,
+                            view_model.album.expanded_album == Some(album.album_id),
+                        );
+                    }
+                },
+            );
             // Right column: show loading progress for tracks if background hydrate is in progress
             egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
                 if view_model.album.tracks_loading {
@@ -247,25 +286,24 @@ impl LrcPlayerEguiApp {
         });
     }
 
+    /// アーティスト一覧の1エントリを描画する。
+    /// - `selected` が true のとき選択表示（右カラムにトラックを表示）。
+    /// - `ui.allocate_exact_size` で矩形領域を確保し、その領域全体でクリックを受け取る。
+    /// - クリックで `AppCommand::SelectArtist` を発行してトグル選択を行う。
+    /// - `last_highlighted_artist` はデバッグ/ログ表示のため最後にハイライトされた ID を保持する。
     fn render_artist_entry(&mut self, ui: &mut egui::Ui, artist: &ArtistEntryVm, selected: bool) {
         let log_label = if artist.is_provisional { " [log]" } else { "" };
-        let text = format!("{} ({}){}", artist.name, artist.track_count, log_label);
+        let text = format!("{} ({}){}", &*artist.name, artist.track_count, log_label);
         let label_height = ui.text_style_height(&egui::TextStyle::Body);
         let desired_height = label_height + ui.spacing().button_padding.y * 2.0;
         let desired_size = egui::Vec2::new(ui.available_width(), desired_height);
         let (rect, reserve) = ui.allocate_exact_size(desired_size, egui::Sense::click());
         let response = ui.put(rect, egui::SelectableLabel::new(selected, text));
-        // Log when an artist becomes highlighted (selected)
+        // When an artist becomes highlighted (selected)
         if selected && self.last_highlighted_artist != Some(artist.artist_id) {
-            log::info!("[egui_app] Artist highlighted: id={:?}", artist.artist_id);
             self.last_highlighted_artist = Some(artist.artist_id);
         }
         if response.clicked() || reserve.clicked() {
-            log::info!(
-                "[egui_app] Artist clicked: id={:?}, selected={}",
-                artist.artist_id,
-                selected
-            );
             let next = if selected {
                 None
             } else {
@@ -277,6 +315,9 @@ impl LrcPlayerEguiApp {
         }
     }
 
+    /// アーティストタブ全体を描画する。
+    /// - 上部で `ArtistKind` を切り替え、左カラムにアーティスト一覧、右カラムに選択アーティストのトラックを表示する。
+    /// - トラック読み込み中は進捗表示を行い、`render_track_rows` で行を描画する。
     fn render_artist_tab(&mut self, ui: &mut egui::Ui, view_model: &AppViewModel) {
         ui.horizontal(|ui| {
             for (kind, label) in [
@@ -305,15 +346,23 @@ impl LrcPlayerEguiApp {
         });
 
         ui.columns(2, |columns| {
-            egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
-                for artist in &view_model.artist.artists {
-                    self.render_artist_entry(
-                        ui,
-                        artist,
-                        view_model.artist.selected_artist == Some(artist.artist_id),
-                    );
-                }
-            });
+            let row_height = columns[0].text_style_height(&egui::TextStyle::Body)
+                + columns[0].spacing().button_padding.y * 2.0;
+            egui::ScrollArea::vertical().show_rows(
+                &mut columns[0],
+                row_height,
+                view_model.artist.artists.len(),
+                |ui, range| {
+                    for i in range {
+                        let artist = &view_model.artist.artists[i];
+                        self.render_artist_entry(
+                            ui,
+                            artist,
+                            view_model.artist.selected_artist == Some(artist.artist_id),
+                        );
+                    }
+                },
+            );
             egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
                 if view_model.artist.tracks_loading {
                     if view_model.artist.tracks_total > 0 {
@@ -346,9 +395,9 @@ impl LrcPlayerEguiApp {
         selected: bool,
     ) {
         let label = if playlist.is_system {
-            format!("{} ({}) [system]", playlist.name, playlist.track_count)
+            format!("{} ({}) [system]", &*playlist.name, playlist.track_count)
         } else {
-            format!("{} ({})", playlist.name, playlist.track_count)
+            format!("{} ({})", &*playlist.name, playlist.track_count)
         };
         if ui.selectable_label(selected, label).clicked() {
             self.application
@@ -389,7 +438,7 @@ impl LrcPlayerEguiApp {
         if ui
             .selectable_label(
                 selected,
-                format!("{} ({}/{} )", node.name, node.child_count, node.track_count),
+                format!("{} ({}/{} )", &*node.name, node.child_count, node.track_count),
             )
             .clicked()
         {
@@ -630,7 +679,6 @@ fn candidate_cjk_font_paths() -> Vec<PathBuf> {
         "C:/Windows/Fonts/YuGothR.ttc",
         "C:/Windows/Fonts/meiryo.ttc",
         "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simsun.ttc",
         "C:/Windows/Fonts/msjh.ttc",
     ] {
@@ -650,7 +698,9 @@ fn push_if_exists(paths: &mut Vec<PathBuf>, candidate: impl AsRef<Path>) {
 impl eframe::App for LrcPlayerEguiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.application.poll_background_tasks();
-        let view_model = self.application.view_model();
+        
+        // ViewModel はキャッシュから取得（内部で dirty フラグに基づき必要時のみ再構築）
+        let view_model = self.application.view_model().clone();
 
         if view_model.scan.cancel_visible
             || view_model.album.loading.is_loading
@@ -679,8 +729,6 @@ impl eframe::App for LrcPlayerEguiApp {
             TabId::Scan => self.render_scan_tab(ui, &view_model),
             TabId::Settings => self.render_settings_tab(ui, &view_model),
         });
-
-        // frame timing and periodic logging removed
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

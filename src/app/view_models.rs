@@ -2,6 +2,7 @@
 //!
 //! これらの型は UI 描画用に軽量化された DTO で、`AppFacade::view_model()` が組み立てて UI に渡します。
 use crate::core::artwork::ArtworkHandle;
+use std::sync::Arc;
 use crate::core::ids::{AlbumId, ArtistId, PlaylistId, TrackId};
 use crate::core::library::{ArtistKind, DirectoryNodeId};
 use crate::core::persistence::TabId;
@@ -16,11 +17,20 @@ pub enum FavoriteStateVm {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackRowStaticVm {
+    pub track_id: TrackId,
+    pub title: Arc<str>,
+    pub artist: Arc<str>,
+    pub album: Arc<str>,
+    pub artwork: Option<ArtworkHandle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackRowVm {
     pub track_id: TrackId,
-    pub title: String,
-    pub artist: String,
-    pub album: String,
+    pub title: Arc<str>,
+    pub artist: Arc<str>,
+    pub album: Arc<str>,
     pub artwork: Option<ArtworkHandle>,
     pub favorite_state: FavoriteStateVm,
     pub is_current: bool,
@@ -51,8 +61,8 @@ pub struct ScanTabVm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumEntryVm {
     pub album_id: AlbumId,
-    pub title: String,
-    pub album_artist: String,
+    pub title: Arc<str>,
+    pub album_artist: Arc<str>,
     pub track_count: usize,
     pub is_provisional: bool,
 }
@@ -78,7 +88,7 @@ pub struct AlbumTabVm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtistEntryVm {
     pub artist_id: ArtistId,
-    pub name: String,
+    pub name: Arc<str>,
     pub track_count: usize,
     pub is_provisional: bool,
 }
@@ -98,7 +108,7 @@ pub struct ArtistTabVm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaylistEntryVm {
     pub playlist_id: PlaylistId,
-    pub name: String,
+    pub name: Arc<str>,
     pub track_count: usize,
     pub is_system: bool,
 }
@@ -113,7 +123,7 @@ pub struct PlaylistTabVm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryEntryVm {
     pub node_id: DirectoryNodeId,
-    pub name: String,
+    pub name: Arc<str>,
     pub child_count: usize,
     pub track_count: usize,
 }

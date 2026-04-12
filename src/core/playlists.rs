@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::ids::{PlaylistId, StrId, TrackId};
+use std::collections::HashSet;
 
 /// プレイリストの種別
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +39,8 @@ pub struct PlaylistStore {
     pub selected: Option<PlaylistId>,
     /// お気に入りプレイリストの ID（常に存在することを想定）
     pub favorite_playlist: PlaylistId,
+    /// お気に入りトラックの集合キャッシュ（contains を O(1) にするため）
+    pub favorite_set: HashSet<TrackId>,
     /// 次に割り当てるユーザープレイリスト用の単純なインクリメント ID
     next_playlist_id: u32,
 }
@@ -54,6 +57,7 @@ impl PlaylistStore {
             }],
             selected: Some(PlaylistId(0)),
             favorite_playlist: PlaylistId(0),
+            favorite_set: HashSet::new(),
             next_playlist_id: 1,
         }
     }
@@ -87,6 +91,9 @@ impl PlaylistStore {
             .find(|playlist| playlist.id == playlist_id)
         {
             playlist.tracks.push(track_id);
+            if playlist.id == self.favorite_playlist {
+                self.favorite_set.insert(track_id);
+            }
         }
     }
 
@@ -100,26 +107,20 @@ impl PlaylistStore {
             .find(|playlist| playlist.id == self.favorite_playlist)
         {
             // 既に存在すれば削除
-            if let Some(index) = playlist
-                .tracks
-                .iter()
-                .position(|existing| *existing == track_id)
-            {
+            if let Some(index) = playlist.tracks.iter().position(|existing| *existing == track_id) {
                 playlist.tracks.remove(index);
+                self.favorite_set.remove(&track_id);
             } else {
                 // 存在しなければ末尾に追加
                 playlist.tracks.push(track_id);
+                self.favorite_set.insert(track_id);
             }
         }
     }
 
     /// 指定トラックがお気に入りに含まれているか判定する
     pub fn contains_in_favorite(&self, track_id: TrackId) -> bool {
-        self.playlists
-            .iter()
-            .find(|playlist| playlist.id == self.favorite_playlist)
-            .map(|playlist| playlist.tracks.contains(&track_id))
-            .unwrap_or(false)
+        self.favorite_set.contains(&track_id)
     }
 
     /// 全体を置換する（ロード時に使用）
@@ -144,5 +145,12 @@ impl PlaylistStore {
         self.selected = selected;
         self.favorite_playlist = favorite_playlist;
         self.next_playlist_id = next_playlist_id;
+        // favorite_set を再構築
+        self.favorite_set = self
+            .playlists
+            .iter()
+            .find(|p| p.id == self.favorite_playlist)
+            .map(|p| p.tracks.iter().cloned().collect())
+            .unwrap_or_default();
     }
 }

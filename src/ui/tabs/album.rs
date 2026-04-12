@@ -8,9 +8,9 @@ use crate::app::view_models::TrackRowVm;
 pub struct AlbumTab {
     /// アルバム総数
     pub album_count: usize,
-    /// 選択中アルバムの表示用トラック行
-    /// Invariant: `visible_tracks` is ordered as they should appear in the UI and
-    /// corresponds to the track list for the currently selected album. Indices into
-    /// this vector are stable for the duration of a single UI frame.
+    /// 選択中アルバムの表示用トラック行（UI 用スナップショット）
+    /// - このベクタは UI 表示専用で、内部モデルとは独立している。
+    /// - 不変条件: `visible_tracks` は UI に表示される順序で整列されており、
+    ///   単一フレーム中はインデックスが安定している（クリックハンドラはこれを前提にする）。
     pub visible_tracks: Vec<TrackRowVm>,
 }

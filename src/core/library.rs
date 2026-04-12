@@ -239,14 +239,7 @@ impl Library {
         let dir_us = dir_dur.as_micros();
         let total_us = total_dur.as_micros();
 
-        // Log microsecond measurements; print to stdout for test runs without a logger.
-        log::info!(
-            "library::upsert_track: track_id={} idx_us={} dir_us={} total_us={}",
-            track_id.0,
-            idx_us,
-            dir_us,
-            total_us
-        );
+        // Print microsecond measurements to stderr for test runs.
         eprintln!(
             "library::upsert_track: track_id={} idx_us={} dir_us={} total_us={}",
             track_id.0,
@@ -342,16 +335,7 @@ impl Library {
         self.revision = self.revision.saturating_add(ids.len() as u64);
 
         let total_dur = start.elapsed();
-        log::info!(
-            "library::upsert_tracks_batch: count={} new={} idx_ms={} dir_ms={} total_ms={}",
-            ids.len(),
-            new_count,
-            idx_dur.as_millis(),
-            dir_dur.as_millis(),
-            total_dur.as_millis()
-        );
-
-        // Also print to stderr for test runs to make measurements visible.
+        // Print to stderr for test runs to make measurements visible.
         eprintln!(
             "library::upsert_tracks_batch: count={} new={} idx_ms={} dir_ms={} total_ms={}",
             ids.len(),

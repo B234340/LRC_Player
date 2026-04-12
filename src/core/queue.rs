@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::ids::{QueueEntryId, TrackId};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashSet;
 
 /// リピート／シャッフルモード
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -45,8 +46,8 @@ pub struct Queue {
     pub entries: Vec<QueueEntry>,
     /// 現在の再生インデックス（None の場合は空）
     pub current_index: Option<u32>,
-    /// UI で選択されたエントリ ID の集合
-    pub selected: Vec<QueueEntryId>,
+    /// UI で選択されたトラック ID の集合（高速な包含チェックのため HashSet）
+    pub selected: HashSet<TrackId>,
     /// リピート／シャッフルモード
     pub repeat_mode: RepeatMode,
     /// シャッフル時の内部状態（存在するのは ShuffleQueue モード時）
@@ -116,7 +117,8 @@ impl Queue {
     pub fn remove_entry(&mut self, entry_id: QueueEntryId) -> Option<TrackId> {
         let remove_index = self.entries.iter().position(|entry| entry.id == entry_id)?;
         let removed = self.entries.remove(remove_index);
-        self.selected.retain(|selected| *selected != entry_id);
+        // 選択は TrackId 単位になっているので、削除したエントリのトラックを選択集合から除去する
+        self.selected.remove(&removed.track_id);
 
         match self.current_index.map(|index| index as usize) {
             Some(_) if self.entries.is_empty() => self.current_index = None,
@@ -194,13 +196,23 @@ impl Queue {
     }
 
     pub fn remove_selected(&mut self) {
-        let mut selected = self.selected.clone();
-        selected.sort_by_key(|entry_id| entry_id.0);
-        selected.reverse();
+        // 選択は TrackId 単位なので、現在のエントリから選択済みのトラックに該当するエントリ ID を集めて
+        // インデックスが大きい順に削除する（複数出現するトラックをすべて削除するため）
+        let mut selected_entry_ids: Vec<QueueEntryId> = self
+            .entries
+            .iter()
+            .filter(|entry| self.selected.contains(&entry.track_id))
+            .map(|e| e.id)
+            .collect();
 
-        for entry_id in selected {
+        selected_entry_ids.sort_by_key(|entry_id| entry_id.0);
+        selected_entry_ids.reverse();
+
+        for entry_id in selected_entry_ids {
             let _ = self.remove_entry(entry_id);
         }
+
+        self.selected.clear();
     }
 
     pub fn advance(&mut self) {

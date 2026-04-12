@@ -10,6 +10,7 @@
 use std::io;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::cell::RefCell;
 use std::thread;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -19,8 +20,18 @@ use crate::app::events::{AppEvent, PlaybackEvent};
 use crate::app::view_models::{
     AlbumEntryVm, AlbumTabVm, AppViewModel, ArtistEntryVm, ArtistTabVm, DeferredListStateVm,
     DirectoryEntryVm, FavoriteStateVm, LibraryTabVm, PlayTabVm, PlaylistEntryVm, PlaylistTabVm,
-    QueueTabVm, ScanTabVm, SettingItemVm, SettingsTabVm, TrackRowVm,
+    QueueTabVm, ScanTabVm, SettingItemVm, SettingsTabVm, TrackRowVm, TrackRowStaticVm,
 };
+use crate::app::vm_cache::VmCache;
+mod view_model_assembler;
+mod album_vm_builder;
+mod artist_vm_builder;
+mod playlist_vm_builder;
+mod library_vm_builder;
+mod queue_vm_builder;
+mod play_vm_builder;
+mod scan_vm_builder;
+mod settings_vm_builder;
 use crate::audio::device_watcher::DeviceWatcherHandle;
 use crate::audio::output::{AudioDeviceOutput, AudioOutputConfig, BufferedAudioOutput};
 use crate::core::ids::{AlbumId, ArtistId, StrId, TrackId};
@@ -83,7 +94,7 @@ struct DeferredArtistListState {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct BrowseCacheState {
+pub struct BrowseCacheState {
     library_revision: u64,
     albums: DeferredAlbumListState,
     track_artists: DeferredArtistListState,
@@ -91,18 +102,21 @@ pub(crate) struct BrowseCacheState {
     composers: DeferredArtistListState,
 }
 
+// Cached VMs were previously stored in `CachedVm`. That responsibility has
+// moved into `VmCache` to centralize presentation caches.
+
 // 背景ローダからのメッセージ（単一トラック、バッチ、完了マーカー）
 #[derive(Debug)]
-pub(crate) enum BrowseLoaderMessage {
+pub enum BrowseLoaderMessage {
     Track(crate::core::library::TrackInput),
     TrackBatch(Vec<crate::core::library::TrackInput>),
     Finished { missing_paths: Vec<String> },
 }
 
 // ブラウズ用のバックグラウンドローダハンドル
-pub(crate) struct BrowseLoaderHandle {
-    cancel_requested: Arc<AtomicBool>,
-    receiver: Receiver<BrowseLoaderMessage>,
+pub struct BrowseLoaderHandle {
+    pub cancel_requested: Arc<AtomicBool>,
+    pub receiver: Receiver<BrowseLoaderMessage>,
 }
 
 impl BrowseLoaderHandle {
@@ -151,6 +165,12 @@ impl BrowseLoaderHandle {
         }
     }
 
+    /// Test helper: construct a `BrowseLoaderHandle` from an existing receiver so
+    /// integration tests can inject fake loader messages deterministically.
+    pub fn from_receiver_for_test(receiver: Receiver<BrowseLoaderMessage>) -> Self {
+        Self { cancel_requested: Arc::new(AtomicBool::new(false)), receiver }
+    }
+
     pub fn cancel(&self) {
         self.cancel_requested.store(true, Ordering::Relaxed);
     }
@@ -171,7 +191,7 @@ impl BrowseLoaderHandle {
 // Background builder for the full browse cache. Builds a BrowseCacheState
 // from cloned `Library` + `StringInterner` on a worker thread and sends
 // the completed cache back to the main thread for an atomic swap.
-pub(crate) struct BrowseCacheBuilderHandle {
+pub struct BrowseCacheBuilderHandle {
     cancel_requested: Arc<AtomicBool>,
     receiver: Receiver<BrowseCacheState>,
     target_revision: u64,
@@ -314,8 +334,8 @@ impl DeferredAlbumListState {
                     .iter()
                     .map(|entry| AlbumEntryVm {
                         album_id: entry.album_id,
-                        title: entry.title.clone(),
-                        album_artist: entry.album_artist.clone(),
+                        title: Arc::from(entry.title.clone().into_boxed_str()),
+                        album_artist: Arc::from(entry.album_artist.clone().into_boxed_str()),
                         track_count: entry.track_count,
                         is_provisional: false,
                     }),
@@ -329,8 +349,8 @@ impl DeferredAlbumListState {
                 .iter()
                 .map(|entry| AlbumEntryVm {
                     album_id: entry.album_id,
-                    title: entry.title.clone(),
-                    album_artist: entry.album_artist.clone(),
+                    title: Arc::from(entry.title.clone().into_boxed_str()),
+                    album_artist: Arc::from(entry.album_artist.clone().into_boxed_str()),
                     track_count: entry.track_count,
                     is_provisional: true,
                 }),
@@ -366,7 +386,7 @@ impl DeferredArtistListState {
                     .iter()
                     .map(|entry| ArtistEntryVm {
                         artist_id: entry.artist_id,
-                        name: entry.name.clone(),
+                        name: Arc::from(entry.name.clone().into_boxed_str()),
                         track_count: entry.track_count,
                         is_provisional: false,
                     }),
@@ -380,7 +400,7 @@ impl DeferredArtistListState {
                 .iter()
                 .map(|entry| ArtistEntryVm {
                     artist_id: entry.artist_id,
-                    name: entry.name.clone(),
+                    name: Arc::from(entry.name.clone().into_boxed_str()),
                     track_count: entry.track_count,
                     is_provisional: true,
                 }),
@@ -423,6 +443,7 @@ pub struct AppFacade {
     #[cfg(test)]
     test_audio_device_present: bool,
     pub artwork_cache: ArtworkCache,
+    pub cache: VmCache,
     decoder: Decoder,
     decode_worker: Option<DecodeWorkerHandle>,
     decode_completion_pending: Option<TrackId>,
@@ -433,6 +454,16 @@ pub struct AppFacade {
     selected_artist: Option<ArtistId>,
     selected_directory: Option<DirectoryNodeId>,
     browse_cache: BrowseCacheState,
+    app_view_model: Option<crate::app::view_models::AppViewModel>,
+    // coarse-grained flag retained for compatibility; fine-grained flags below drive rebuilds
+    view_model_dirty: bool,
+    // fine-grained dirty flags per tab to avoid full rebuilds
+    dirty_queue: bool,
+    dirty_play: bool,
+    dirty_playlist: bool,
+    dirty_library: bool,
+    dirty_scan: bool,
+    dirty_settings: bool,
     // persisted indices loaded at startup (may be empty)
     album_index: Vec<crate::core::persistence::AlbumIndexEntry>,
     artist_index: crate::core::persistence::ArtistIndexFile,
@@ -481,7 +512,7 @@ impl Default for AppFacade {
             Some(DeviceWatcherHandle::spawn(500))
         };
 
-        Self {
+        let mut facade = Self {
             strings,
             library: Library::default(),
             queue: Queue::default(),
@@ -497,6 +528,7 @@ impl Default for AppFacade {
             #[cfg(test)]
             test_audio_device_present: false,
             artwork_cache: ArtworkCache::new(64),
+            cache: VmCache::new(),
             decoder: Decoder::default(),
             decode_worker: None,
             decode_completion_pending: None,
@@ -507,12 +539,41 @@ impl Default for AppFacade {
             selected_artist: None,
             selected_directory: None,
             browse_cache: BrowseCacheState::default(),
+            app_view_model: None,
+            view_model_dirty: true,
+            dirty_queue: false,
+            dirty_play: false,
+            dirty_playlist: false,
+            dirty_library: false,
+            dirty_scan: false,
+            dirty_settings: false,
             album_index: Vec::new(),
             artist_index: crate::core::persistence::ArtistIndexFile::default(),
             artist_name_to_id: std::collections::HashMap::new(),
             browse_loader: None,
             browse_cache_builder: None,
-        }
+        };
+
+        // Initialize VmCache entries from current state so first `view_model()` can clone cheaply.
+        facade.cache.album_vm = Some(facade.album_tab_vm());
+        facade.cache.artist_vm = Some(facade.artist_tab_vm());
+
+        // build initial AppViewModel snapshot so `view_model()` can return a reference
+        let initial_vm = crate::app::view_models::AppViewModel {
+            current_tab: facade.current_tab,
+            queue: facade.queue_tab_vm(),
+            play: facade.play_tab_vm(),
+            album: facade.cache.album_vm.clone().unwrap(),
+            artist: facade.cache.artist_vm.clone().unwrap(),
+            playlist: facade.playlist_tab_vm(),
+            library: facade.library_tab_vm(),
+            scan: facade.scan_tab_vm(),
+            settings: facade.settings_tab_vm(),
+        };
+        facade.app_view_model = Some(initial_vm);
+        facade.view_model_dirty = false;
+
+        facade
     }
 }
 
@@ -706,6 +767,9 @@ impl AppFacade {
         if !self.scan.config.include_dirs.is_empty() {
             let (library, _) = self.scan.run_full_scan(&mut self.strings);
             self.library = library;
+            // Full scan replaced library during bootstrap — invalidate cached VMs
+            self.cache.invalidate_album();
+            self.cache.invalidate_artist();
         }
 
         self.restore_loaded_state(store)
@@ -892,7 +956,6 @@ impl AppFacade {
         //   consistent state snapshot.
         // - The returned `Vec<AppEvent>` should reflect causal ordering of side effects and be
         //   safe to consume immediately by the UI layer.
-        log::info!("handle_command start: {:?}", command);
         let events = match command {
             AppCommand::ClickTrack {
                 visible_tracks,
@@ -1024,24 +1087,28 @@ impl AppFacade {
             AppCommand::SelectAlbum(album_id) => {
                 let prev = self.selected_album;
                 self.selected_album = album_id;
-                log::info!("[facade] SelectAlbum: prev={:?} new={:?}", prev, album_id);
                 if let Some(aid) = album_id {
                     self.lazy_load_album_tracks(aid);
                 }
+                // selection changed -> album VM may need update
+                self.cache.invalidate_album();
                 vec![AppEvent::TabChanged(self.current_tab)]
             }
             AppCommand::SelectArtistKind(kind) => {
                 self.selected_artist_kind = kind;
                 self.selected_artist = None;
+                // switching artist kind changes artist list
+                self.cache.invalidate_artist();
                 vec![AppEvent::TabChanged(self.current_tab)]
             }
             AppCommand::SelectArtist(artist_id) => {
                 let prev = self.selected_artist;
                 self.selected_artist = artist_id;
-                log::info!("[facade] SelectArtist: prev={:?} new={:?}", prev, artist_id);
                 if let Some(aid) = artist_id {
                     self.lazy_load_artist_tracks(aid, self.selected_artist_kind);
                 }
+                // selection changed -> artist VM may need update
+                self.cache.invalidate_artist();
                 vec![AppEvent::TabChanged(self.current_tab)]
             }
             AppCommand::SelectPlaylist(playlist_id) => {
@@ -1135,20 +1202,12 @@ impl AppFacade {
             }
             AppCommand::SetDebugMode { enabled } => {
                 self.settings.debug_mode = enabled;
-                if enabled {
-                    log::set_max_level(log::LevelFilter::Debug);
-                    log::info!("[facade] debug mode enabled");
-                } else {
-                    log::set_max_level(log::LevelFilter::Info);
-                    log::info!("[facade] debug mode disabled");
-                }
                 vec![AppEvent::SettingsChanged]
             }
             AppCommand::SetLogFilters { filters } => {
                 self.settings.log_filters = filters.clone();
                 // update runtime logger filters
                 crate::logging::set_log_filters(filters.clone());
-                log::info!("[facade] log filters set: {:?}", self.settings.log_filters);
                 vec![AppEvent::SettingsChanged]
             }
             AppCommand::Scan(scan_command) => self.handle_scan_command(scan_command),
@@ -1158,8 +1217,9 @@ impl AppFacade {
                 vec![AppEvent::PlaylistChanged]
             }
         };
-        log::info!("handle_command end: produced {} events", events.len());
         // Preserve causal ordering: model mutations applied above, events reflect those changes.
+        // Mark fine-grained dirty flags according to produced events so UI rebuilds only affected tabs.
+        self.mark_dirty_from_events(&events);
         events
     }
 
@@ -1168,42 +1228,8 @@ impl AppFacade {
     /// - 軽量な DTO を返すために必要なデータのみを抽出する。
     /// - 呼び出し中に `ensure_browse_cache_current()` をトリガして、ブラウズキャッシュのバックグラウンド構築を開始する。
     /// - UI フレーム中に頻繁に呼ばれることを想定しているため、コストを抑えた実装である。
-    pub fn view_model(&mut self) -> AppViewModel {
-        // assemble and return a lightweight view model for the UI
-        // Capture selection snapshot to detect unexpected overwrites
-        let prev_selected_album = self.selected_album;
-        let prev_selected_artist = self.selected_artist;
-
-        self.ensure_browse_cache_current();
-
-        if prev_selected_album != self.selected_album || prev_selected_artist != self.selected_artist {
-            log::warn!(
-                "[facade] selection_overwrite: prev_album={:?} prev_artist={:?} new_album={:?} new_artist={:?}",
-                prev_selected_album,
-                prev_selected_artist,
-                self.selected_album,
-                self.selected_artist
-            );
-            eprintln!(
-                "selection_overwrite: prev_album={:?} prev_artist={:?} new_album={:?} new_artist={:?}",
-                prev_selected_album,
-                prev_selected_artist,
-                self.selected_album,
-                self.selected_artist
-            );
-        }
-
-        AppViewModel {
-            current_tab: self.current_tab,
-            queue: self.queue_tab_vm(),
-            play: self.play_tab_vm(),
-            album: self.album_tab_vm(),
-            artist: self.artist_tab_vm(),
-            playlist: self.playlist_tab_vm(),
-            library: self.library_tab_vm(),
-            scan: self.scan_tab_vm(),
-            settings: self.settings_tab_vm(),
-        }
+    pub fn view_model(&mut self) -> &crate::app::view_models::AppViewModel {
+        view_model_assembler::view_model(self)
     }
 
     fn audio_device_present(&self) -> bool {
@@ -1214,6 +1240,33 @@ impl AppFacade {
         #[cfg(not(test))]
         {
             self._audio_device.is_some()
+        }
+    }
+
+    fn mark_dirty_from_events(&mut self, events: &[AppEvent]) {
+        for event in events {
+            match event {
+                AppEvent::Playback(_) => self.dirty_play = true,
+                AppEvent::QueueChanged => self.dirty_queue = true,
+                AppEvent::PlaylistChanged => self.dirty_playlist = true,
+                AppEvent::SettingsChanged => self.dirty_settings = true,
+                AppEvent::ScanStateChanged(_) => self.dirty_scan = true,
+                AppEvent::TabChanged(tab) => match tab {
+                    crate::core::persistence::TabId::Queue => self.dirty_queue = true,
+                    crate::core::persistence::TabId::Play => self.dirty_play = true,
+                    crate::core::persistence::TabId::Album => self.cache.invalidate_album(),
+                    crate::core::persistence::TabId::Artist => self.cache.invalidate_artist(),
+                    crate::core::persistence::TabId::Playlist => self.dirty_playlist = true,
+                    crate::core::persistence::TabId::Library => self.dirty_library = true,
+                    crate::core::persistence::TabId::Scan => self.dirty_scan = true,
+                    crate::core::persistence::TabId::Settings => self.dirty_settings = true,
+                },
+                AppEvent::TrackDetailsRequested(_) => {}
+            }
+        }
+
+        if !events.is_empty() {
+            self.view_model_dirty = true;
         }
     }
 
@@ -1527,15 +1580,11 @@ impl AppFacade {
                 let upsert_dur = upsert_start.elapsed();
                 total_upserts = upserts_done;
                 library_changed = true;
-                log::info!(
-                    "poll_background_upsert: drained_msgs={} collected_inputs={} upserts={} upsert_ms={}",
-                    drained_count,
-                    batch_len,
-                    upserts_done,
-                    upsert_dur.as_millis()
-                );
+                // library mutated by background loader — invalidate album/artist cache
+                self.cache.invalidate_album();
+                self.cache.invalidate_artist();
+                
             } else {
-                log::info!("poll_background: drained_msgs={} no_upserts", drained_count);
             }
         }
 
@@ -1552,11 +1601,6 @@ impl AppFacade {
 
 
         let poll_dur = poll_start.elapsed();
-        log::info!(
-            "poll_background_tasks: duration_ms={} upserts={}",
-            poll_dur.as_millis(),
-            total_upserts
-        );
             // If there were missing paths, attempt a targeted re-scan of likely roots
             if !browse_missing_paths.is_empty() {
                 // compute candidate roots: prefer configured include dirs that contain the missing path,
@@ -1607,6 +1651,8 @@ impl AppFacade {
 
         self.hydrate_browse_lists();
 
+        // If any background events were produced, mark fine-grained dirty flags.
+        self.mark_dirty_from_events(&events);
         events
     }
 
@@ -1792,6 +1838,9 @@ impl AppFacade {
             // Batch upserts for targeted scans to amortize rebuilds.
             let inputs = outcome.tracks;
             let _ids = self.library.upsert_tracks_batch(&mut self.strings, inputs.into_iter());
+            // Targeted scan mutated the library — invalidate cached VMs
+            self.cache.invalidate_album();
+            self.cache.invalidate_artist();
         } else {
             // Preserve current selection names so we can re-resolve after rebuilding
             let preserved_album = self
@@ -1829,15 +1878,11 @@ impl AppFacade {
             }
 
             self.library = new_library;
-            log::info!(
-                "[facade] restore bootstrap selected_album: prev={:?} new={:?}, selected_artist: prev={:?} new={:?}",
-                self.selected_album,
-                new_selected_album,
-                self.selected_artist,
-                new_selected_artist
-            );
             self.selected_album = new_selected_album;
             self.selected_artist = new_selected_artist;
+            // Library replaced by scan result — invalidate album/artist cached VMs
+            self.cache.invalidate_album();
+            self.cache.invalidate_artist();
         }
         self.ensure_browse_cache_current();
     }
@@ -1857,10 +1902,9 @@ impl AppFacade {
                 for state in msgs {
                     if state.library_revision == self.library.revision {
                         self.browse_cache = state;
-                        log::info!(
-                            "ensure_browse_cache_current: swapped browse cache rev={}",
-                            self.browse_cache.library_revision
-                        );
+                        // New browse cache changes album/artist lists; invalidate cached VMs
+                        self.cache.invalidate_album();
+                        self.cache.invalidate_artist();
                         break;
                     }
                 }
@@ -1884,10 +1928,6 @@ impl AppFacade {
         let lib_clone = self.library.clone();
         let strings_clone = self.strings.clone();
         self.browse_cache_builder = Some(BrowseCacheBuilderHandle::spawn(lib_clone, strings_clone));
-        log::info!(
-            "ensure_browse_cache_current: spawned background builder for rev={}",
-            self.library.revision
-        );
     }
 
     fn hydrate_browse_lists(&mut self) {
@@ -1980,290 +2020,35 @@ impl AppFacade {
     }
 
     fn queue_tab_vm(&self) -> QueueTabVm {
-        QueueTabVm {
-            rows: self
-                .queue
-                .entries
-                .iter()
-                .enumerate()
-                .map(|(index, entry)| self.track_row_vm(entry.track_id, Some(index)))
-                .collect(),
-            repeat_mode: self.queue.repeat_mode,
-        }
+        queue_vm_builder::build_queue_tab(self)
     }
 
     fn play_tab_vm(&self) -> PlayTabVm {
-        PlayTabVm {
-            current_track: self
-                .playback
-                .current_track
-                .map(|track_id| self.track_row_vm(track_id, None)),
-            playback_state: self.playback.state,
-            position_ms: self.playback.position_ms,
-        }
+        play_vm_builder::build_play_tab(self)
     }
 
     fn album_tab_vm(&self) -> AlbumTabVm {
-        let visible_tracks = self
-            .selected_album
-            .map(|album_id| {
-                self.track_rows_for_tracks(self.library.visible_tracks_for_album(album_id))
-            })
-            .unwrap_or_default();
-
-        // Compute per-album track hydration progress
-        let (tracks_loading, tracks_loaded, tracks_total) = if let Some(album_id) = self.selected_album {
-            let idx = album_id.0 as usize;
-            let total = self
-                .album_index
-                .get(idx)
-                .map(|a| a.tracks.len())
-                .or_else(|| self.library.indexes.tracks_by_album.get(idx).map(|v| v.len()))
-                .unwrap_or(0);
-            let loaded = self
-                .library
-                .indexes
-                .tracks_by_album
-                .get(idx)
-                .map(|v| v.len())
-                .unwrap_or(0);
-            (self.browse_loader.is_some() && loaded < total, loaded, total)
-        } else {
-            (false, 0, 0)
-        };
-
-        AlbumTabVm {
-            albums: self.browse_cache.albums.visible_entries(),
-            expanded_album: self.selected_album,
-            visible_tracks,
-            loading: self.browse_cache.albums.loading_state(),
-            tracks_loading,
-            tracks_loaded,
-            tracks_total,
-        }
+        album_vm_builder::build_album_tab(self)
     }
 
     fn artist_tab_vm(&self) -> ArtistTabVm {
-        let visible_tracks = self
-            .selected_artist
-            .map(|artist_id| {
-                self.track_rows_for_tracks(
-                    self.library
-                        .visible_tracks_for_artist(self.selected_artist_kind, artist_id),
-                )
-            })
-            .unwrap_or_default();
-
-        let (artists, loading) = match self.selected_artist_kind {
-            ArtistKind::TrackArtist => (
-                self.browse_cache.track_artists.visible_entries(),
-                self.browse_cache.track_artists.loading_state(),
-            ),
-            ArtistKind::AlbumArtist => (
-                self.browse_cache.album_artists.visible_entries(),
-                self.browse_cache.album_artists.loading_state(),
-            ),
-            ArtistKind::Composer => (
-                self.browse_cache.composers.visible_entries(),
-                self.browse_cache.composers.loading_state(),
-            ),
-        };
-
-        // Compute per-artist track hydration progress
-        let (tracks_loading, tracks_loaded, tracks_total) = if let Some(artist_id) = self.selected_artist {
-            let idx = artist_id.0 as usize;
-            let loaded = self
-                .library
-                .indexes
-                .tracks_by_artist
-                .get(idx)
-                .map(|v| v.len())
-                .unwrap_or(0);
-            // try to resolve total from persisted index entries; fallback to library index
-            let total = match self.selected_artist_kind {
-                ArtistKind::TrackArtist => self
-                    .artist_index
-                    .track_artists
-                    .iter()
-                    .find(|e| self.library.artist_name(artist_id, &self.strings) == Some(e.name.clone()))
-                    .map(|e| e.tracks.len())
-                    .or_else(|| self.library.indexes.tracks_by_artist.get(idx).map(|v| v.len()))
-                    .unwrap_or(0),
-                ArtistKind::AlbumArtist => self
-                    .artist_index
-                    .album_artists
-                    .iter()
-                    .find(|e| self.library.artist_name(artist_id, &self.strings) == Some(e.name.clone()))
-                    .map(|e| e.tracks.len())
-                    .or_else(|| self.library.indexes.tracks_by_album_artist.get(idx).map(|v| v.len()))
-                    .unwrap_or(0),
-                ArtistKind::Composer => self
-                    .artist_index
-                    .composers
-                    .iter()
-                    .find(|e| self.library.artist_name(artist_id, &self.strings) == Some(e.name.clone()))
-                    .map(|e| e.tracks.len())
-                    .or_else(|| self.library.indexes.tracks_by_composer.get(idx).map(|v| v.len()))
-                    .unwrap_or(0),
-            };
-
-            (self.browse_loader.is_some() && loaded < total, loaded, total)
-        } else {
-            (false, 0, 0)
-        };
-
-        ArtistTabVm {
-            kind: self.selected_artist_kind,
-            artists,
-            selected_artist: self.selected_artist,
-            visible_tracks,
-            loading,
-            tracks_loading,
-            tracks_loaded,
-            tracks_total,
-        }
+        artist_vm_builder::build_artist_tab(self)
     }
 
     fn playlist_tab_vm(&self) -> PlaylistTabVm {
-        let playlists = self
-            .playlists
-            .playlists
-            .iter()
-            .map(|playlist| PlaylistEntryVm {
-                playlist_id: playlist.id,
-                name: self
-                    .strings
-                    .resolve(playlist.name)
-                    .unwrap_or_else(|| format!("playlist-{}", playlist.id.0)),
-                track_count: playlist.tracks.len(),
-                is_system: playlist.kind == PlaylistKind::SystemFavorite,
-            })
-            .collect();
-
-        let visible_tracks = self
-            .playlists
-            .selected
-            .and_then(|selected| {
-                self.playlists
-                    .playlists
-                    .iter()
-                    .find(|playlist| playlist.id == selected)
-                    .map(|playlist| self.track_rows_for_tracks(&playlist.tracks))
-            })
-            .unwrap_or_default();
-
-        PlaylistTabVm {
-            playlists,
-            selected_playlist: self.playlists.selected,
-            visible_tracks,
-        }
+        playlist_vm_builder::build_playlist_tab(self)
     }
 
     fn library_tab_vm(&self) -> LibraryTabVm {
-        let nodes = self
-            .library
-            .directories
-            .nodes
-            .get(self.library.directories.root.0 as usize)
-            .map(|root| {
-                root.children
-                    .iter()
-                    .filter_map(|node_id| {
-                        self.library
-                            .directories
-                            .nodes
-                            .get(node_id.0 as usize)
-                            .map(|node| DirectoryEntryVm {
-                                node_id: *node_id,
-                                name: self
-                                    .strings
-                                    .resolve(node.name)
-                                    .unwrap_or_else(|| "Unknown".to_string()),
-                                child_count: node.children.len(),
-                                track_count: node.tracks.len(),
-                            })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let visible_tracks = self
-            .selected_directory
-            .and_then(|node_id| self.library.directories.nodes.get(node_id.0 as usize))
-            .map(|node| self.track_rows_for_tracks(&node.tracks))
-            .unwrap_or_default();
-
-        LibraryTabVm {
-            nodes,
-            selected_directory: self.selected_directory,
-            visible_tracks,
-        }
+        library_vm_builder::build_library_tab(self)
     }
 
     fn scan_tab_vm(&self) -> ScanTabVm {
-        ScanTabVm {
-            include_dirs: self
-                .scan
-                .config
-                .include_dirs
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect(),
-            exclude_dirs: self
-                .scan
-                .config
-                .exclude_dirs
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect(),
-            visible_status: self.scan.visible_status(),
-            cancel_visible: matches!(self.scan.state, ScanState::Scanning | ScanState::Cancelling),
-        }
+        scan_vm_builder::build_scan_tab(self)
     }
 
     fn settings_tab_vm(&self) -> SettingsTabVm {
-        SettingsTabVm {
-            items: vec![
-                SettingItemVm {
-                    key: "accent_color".to_string(),
-                    value: self.settings.accent_color.clone(),
-                },
-                SettingItemVm {
-                    key: "theme".to_string(),
-                    value: self.settings.theme.clone(),
-                },
-                SettingItemVm {
-                    key: "seek_step_ms".to_string(),
-                    value: self.settings.seek_step_ms.to_string(),
-                },
-                SettingItemVm {
-                    key: "restore_position_policy".to_string(),
-                    value: self.settings.restore_position_policy.clone(),
-                },
-                SettingItemVm {
-                    key: "full_auto_scan".to_string(),
-                    value: self.settings.full_auto_scan.to_string(),
-                },
-                SettingItemVm {
-                    key: "fallback_artwork_path".to_string(),
-                    value: self
-                        .settings
-                        .fallback_artwork_path
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "none".to_string()),
-                },
-                SettingItemVm {
-                    key: "play_empty_state".to_string(),
-                    value: self.settings.play_empty_state.clone(),
-                },
-            ],
-            available_output_devices: AudioDeviceOutput::list_output_devices(),
-            preferred_output_device: self.settings.preferred_output_device.clone(),
-            debug_mode: self.settings.debug_mode,
-            available_log_categories: crate::logging::available_log_categories(),
-            selected_log_filters: self.settings.log_filters.clone(),
-        }
+        settings_vm_builder::build_settings_tab(self)
     }
 
     fn track_rows_for_tracks(&self, tracks: &[TrackId]) -> Vec<TrackRowVm> {
@@ -2275,50 +2060,15 @@ impl AppFacade {
     }
 
     fn track_row_vm(&self, track_id: TrackId, queue_index: Option<usize>) -> TrackRowVm {
-        let track_index = track_id.0 as usize;
-        let title = self
-            .library
-            .tracks
-            .titles
-            .get(track_index)
-            .and_then(|id| self.strings.resolve(*id))
-            .unwrap_or_else(|| format!("Track {}", track_id.0));
-        let artist = self
-            .library
-            .tracks
-            .artist_ids
-            .get(track_index)
-            .and_then(|artist_id| {
-                artist_id.and_then(|id| self.library.artist_name(id, &self.strings))
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
-        let album = self
-            .library
-            .tracks
-            .album_ids
-            .get(track_index)
-            .and_then(|album_id| {
-                album_id.and_then(|id| self.library.album_title(id, &self.strings))
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
+        let factory = crate::app::track_row_factory::TrackRowFactory::new(
+            &self.library,
+            &self.playlists,
+            &self.playback,
+            &self.strings,
+            &self.cache.track_rows,
+        );
 
-        TrackRowVm {
-            track_id,
-            title,
-            artist,
-            album,
-            artwork: None,
-            favorite_state: if self.playlists.contains_in_favorite(track_id) {
-                FavoriteStateVm::Included
-            } else {
-                FavoriteStateVm::Excluded
-            },
-            is_current: self.playback.current_track == Some(track_id),
-            is_selected: queue_index
-                .and_then(|index| self.queue.entries.get(index))
-                .map(|entry| self.queue.selected.contains(&entry.id))
-                .unwrap_or(false),
-        }
+        factory.build(track_id, &self.queue, queue_index)
     }
 }
 
@@ -2328,1002 +2078,3 @@ impl From<StrId> for String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use hound::{SampleFormat, WavSpec, WavWriter};
-    use tempfile::TempDir;
-
-    use super::AppFacade;
-    use crate::app::commands::{AppCommand, TrackListOrigin};
-    use crate::app::events::{AppEvent, PlaybackEvent};
-    use crate::core::ids::TrackId;
-    use crate::core::library::TrackInput;
-    use crate::core::persistence::{JsonStore, PersistencePaths, TabId};
-    use crate::core::playback::PlaybackState;
-    use crate::core::scan::{ScanCommand, ScanState};
-
-    fn temp_paths() -> PersistencePaths {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should be valid")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("lrc-player-facade-{unique}"));
-        PersistencePaths {
-            config_json: root.join("config.json"),
-            state_json: root.join("state.json"),
-            playlists_json: root.join("playlists.json"),
-        }
-    }
-
-    fn poll_scan_until_finished(facade: &mut AppFacade) {
-        for _ in 0..10_000 {
-            facade.poll_background_tasks();
-            if !matches!(
-                facade.scan.state,
-                ScanState::Scanning | ScanState::Cancelling
-            ) {
-                return;
-            }
-            thread::yield_now();
-        }
-
-        panic!("scan worker did not finish in time");
-    }
-
-    fn write_wav(path: &std::path::Path, frames: u32) {
-        let spec = WavSpec {
-            channels: 2,
-            sample_rate: 48_000,
-            bits_per_sample: 16,
-            sample_format: SampleFormat::Int,
-        };
-        let mut writer = WavWriter::create(path, spec).expect("wav file should be created");
-        for index in 0..frames {
-            let phase = (index % 256) as i16;
-            let sample = (phase * 128) - 16_384;
-            writer
-                .write_sample(sample)
-                .expect("left sample should be written");
-            writer
-                .write_sample(sample)
-                .expect("right sample should be written");
-        }
-        writer.finalize().expect("wav file should finalize");
-    }
-
-    #[test]
-    fn save_and_restore_round_trip() {
-        let paths = temp_paths();
-        let store = JsonStore::new(paths.clone());
-
-        let mut facade = AppFacade::default();
-        facade.library.upsert_track(
-            &mut facade.strings,
-            TrackInput {
-                title: "Track One".to_string(),
-                album: Some("Album".to_string()),
-                artist: Some("Artist".to_string()),
-                album_artist: Some("Artist".to_string()),
-                composer: None,
-                normalized_path: "/music/album/01-track-one.flac".to_string(),
-                file_size: 1,
-                modified_unix_secs: 10,
-                file_name: "01-track-one.flac".to_string(),
-                track_number: None,
-                duration_ms: 1_000,
-                artwork_key: None,
-            },
-        );
-        facade.library.upsert_track(
-            &mut facade.strings,
-            TrackInput {
-                title: "Track Two".to_string(),
-                album: Some("Album".to_string()),
-                artist: Some("Artist".to_string()),
-                album_artist: Some("Artist".to_string()),
-                composer: None,
-                normalized_path: "/music/album/02-track-two.flac".to_string(),
-                file_size: 2,
-                modified_unix_secs: 10,
-                file_name: "02-track-two.flac".to_string(),
-                track_number: None,
-                duration_ms: 2_000,
-                artwork_key: None,
-            },
-        );
-
-        facade.queue.replace_with_tracks(&[TrackId(0), TrackId(1)]);
-        facade.queue.set_current_index(1);
-        facade.playback.restore_track(TrackId(1), 3_210);
-        facade.current_tab = TabId::Play;
-        let _ = facade.handle_command(AppCommand::Scan(ScanCommand::AddIncludeDir(
-            "/music".into(),
-        )));
-        let _ = facade.handle_command(AppCommand::CreatePlaylist {
-            name: "Roadtrip".to_string(),
-        });
-        if let Some(playlist_id) = facade.playlists.selected {
-            let _ = facade.handle_command(AppCommand::AddToPlaylist {
-                playlist_id,
-                track_id: TrackId(1),
-            });
-        }
-        let _ = facade.handle_command(AppCommand::ToggleFavorite {
-            track_id: TrackId(0),
-        });
-
-        facade.save_to_store(&store).expect("save should succeed");
-
-        let mut restored = AppFacade::default();
-        restored.library = facade.library.clone();
-        restored.strings = facade.strings.clone();
-        restored
-            .restore_from_store(&store)
-            .expect("restore should succeed");
-
-        assert_eq!(restored.current_tab, TabId::Play);
-        assert_eq!(restored.queue.current_track(), Some(TrackId(1)));
-        assert_eq!(restored.playback.position_ms, 3_210);
-        assert_eq!(
-            restored.scan.config.include_dirs,
-            vec![std::path::PathBuf::from("/music")]
-        );
-        assert!(restored.playlists.contains_in_favorite(TrackId(0)));
-
-        let root = paths
-            .config_json
-            .parent()
-            .expect("config parent should exist")
-            .to_path_buf();
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn bootstrap_from_store_rescans_and_restores_queue() {
-        let temp_dir = TempDir::new().expect("temp dir should be created");
-        let include_root = temp_dir.path().join("library_root");
-        let music_dir = include_root.join("Artist").join("Album");
-        fs::create_dir_all(&music_dir).expect("music dir should be created");
-        fs::write(music_dir.join("01-track-one.flac"), b"fLaCdemo")
-            .expect("track one should be created");
-        fs::write(music_dir.join("02-track-two.flac"), b"fLaCdemo")
-            .expect("track two should be created");
-
-        let paths = temp_paths();
-        let store = JsonStore::new(paths.clone());
-
-        let mut facade = AppFacade::default();
-        let _ = facade.handle_command(AppCommand::Scan(ScanCommand::AddIncludeDir(include_root)));
-        let _ = facade.handle_command(AppCommand::Scan(ScanCommand::StartFullScan));
-        poll_scan_until_finished(&mut facade);
-        facade.queue.replace_with_tracks(&[TrackId(0), TrackId(1)]);
-        facade.queue.set_current_index(1);
-        facade.playback.restore_track(TrackId(1), 999);
-        facade.save_to_store(&store).expect("save should succeed");
-
-        let mut restored = AppFacade::default();
-        restored
-            .bootstrap_from_store(&store)
-            .expect("bootstrap should succeed");
-
-        assert_eq!(restored.library.tracks.titles.len(), 2);
-        assert_eq!(restored.queue.current_track(), Some(TrackId(1)));
-        assert_eq!(restored.playback.position_ms, 999);
-
-        let root = paths
-            .config_json
-            .parent()
-            .expect("config parent should exist")
-            .to_path_buf();
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn view_model_exposes_album_artist_playlist_library_and_settings_tabs() {
-        let mut facade = AppFacade::default();
-        facade.library.upsert_track(
-            &mut facade.strings,
-            TrackInput {
-                title: "01-track-one".to_string(),
-                album: Some("Album".to_string()),
-                artist: Some("Artist".to_string()),
-                album_artist: Some("Artist".to_string()),
-                composer: None,
-                normalized_path: "/music/Artist/Album/01-track-one.flac".to_string(),
-                file_size: 1,
-                modified_unix_secs: 10,
-                file_name: "01-track-one.flac".to_string(),
-                track_number: None,
-                duration_ms: 1_000,
-                artwork_key: None,
-            },
-        );
-        let playlist_id = facade
-            .playlists
-            .create_user_playlist(facade.strings.intern("Roadtrip"))
-            .expect("playlist should be created");
-        facade.playlists.add_track(playlist_id, TrackId(0));
-        facade.playlists.selected = Some(playlist_id);
-        facade.selected_album = Some(crate::core::ids::AlbumId(0));
-        facade.selected_artist = Some(crate::core::ids::ArtistId(0));
-        facade.selected_directory = facade.library.directories.nodes[0]
-            .children
-            .first()
-            .copied();
-
-        let view_model = facade.view_model();
-
-        assert_eq!(view_model.album.albums.len(), 1);
-        assert_eq!(view_model.album.visible_tracks.len(), 1);
-        assert_eq!(view_model.artist.artists.len(), 1);
-        assert_eq!(view_model.artist.visible_tracks.len(), 1);
-        assert_eq!(view_model.playlist.playlists.len(), 2);
-        assert_eq!(view_model.playlist.visible_tracks.len(), 1);
-        assert_eq!(view_model.library.nodes.len(), 1);
-        assert!(!view_model.settings.items.is_empty());
-    }
-
-    #[test]
-    fn select_album_command_updates_visible_tracks() {
-        let mut facade = AppFacade::default();
-        facade.library.upsert_track(
-            &mut facade.strings,
-            TrackInput {
-                title: "track-a".to_string(),
-                album: Some("Album A".to_string()),
-                artist: Some("Artist A".to_string()),
-                album_artist: Some("Artist A".to_string()),
-                composer: None,
-                normalized_path: "/music/a/01.flac".to_string(),
-                file_size: 1,
-                modified_unix_secs: 10,
-                file_name: "01.flac".to_string(),
-                track_number: None,
-                duration_ms: 1_000,
-                artwork_key: None,
-            },
-        );
-        facade.library.upsert_track(
-            &mut facade.strings,
-            TrackInput {
-                title: "track-b".to_string(),
-                album: Some("Album B".to_string()),
-                artist: Some("Artist B".to_string()),
-                album_artist: Some("Artist B".to_string()),
-                composer: None,
-                normalized_path: "/music/b/01.flac".to_string(),
-                file_size: 2,
-                modified_unix_secs: 10,
-                file_name: "01.flac".to_string(),
-                track_number: None,
-                duration_ms: 1_000,
-                artwork_key: None,
-            },
-        );
-
-        let _ = facade.view_model();
-        let _ = facade.handle_command(AppCommand::SelectAlbum(Some(crate::core::ids::AlbumId(1))));
-        let view_model = facade.view_model();
-
-        assert_eq!(
-            view_model.album.expanded_album,
-            Some(crate::core::ids::AlbumId(1))
-        );
-        assert_eq!(view_model.album.visible_tracks.len(), 1);
-        assert_eq!(view_model.album.visible_tracks[0].title, "track-b");
-    }
-
-    #[test]
-    fn select_artist_command_updates_visible_tracks() {
-        let mut facade = AppFacade::default();
-        facade.library.upsert_track(
-            &mut facade.strings,
-            TrackInput {
-                title: "track-a".to_string(),
-                album: Some("Album A".to_string()),
-                artist: Some("Artist A".to_string()),
-                album_artist: Some("Artist A".to_string()),
-                composer: None,
-                normalized_path: "/music/a/01.flac".to_string(),
-                file_size: 1,
-                modified_unix_secs: 10,
-                file_name: "01.flac".to_string(),
-                track_number: None,
-                duration_ms: 1_000,
-                artwork_key: None,
-            },
-        );
-        facade.library.upsert_track(
-            &mut facade.strings,
-            TrackInput {
-                title: "track-b".to_string(),
-                album: Some("Album B".to_string()),
-                artist: Some("Artist B".to_string()),
-                album_artist: Some("Artist B".to_string()),
-                composer: None,
-                normalized_path: "/music/b/01.flac".to_string(),
-                file_size: 2,
-                modified_unix_secs: 10,
-                file_name: "01.flac".to_string(),
-                track_number: None,
-                duration_ms: 1_000,
-                artwork_key: None,
-            },
-        );
-
-        let _ = facade.view_model();
-        let _ = facade.handle_command(AppCommand::SelectArtist(Some(crate::core::ids::ArtistId(
-            1,
-        ))));
-        let view_model = facade.view_model();
-
-        assert_eq!(
-            view_model.artist.selected_artist,
-            Some(crate::core::ids::ArtistId(1))
-        );
-        assert_eq!(view_model.artist.visible_tracks.len(), 1);
-        assert_eq!(view_model.artist.visible_tracks[0].title, "track-b");
-    }
-
-    #[test]
-    fn album_and_artist_lists_start_from_log_snapshot_then_hydrate_in_background() {
-        let mut facade = AppFacade::default();
-        for index in 0..80u32 {
-            facade.library.upsert_track(
-                &mut facade.strings,
-                TrackInput {
-                    title: format!("Track {index}"),
-                    album: Some(format!("Album {index}")),
-                    artist: Some(format!("Artist {index}")),
-                    album_artist: Some(format!("Artist {index}")),
-                    composer: None,
-                    normalized_path: format!("/music/Artist{index}/Album{index}/{index:02}.flac"),
-                    file_size: u64::from(index) + 1,
-                    modified_unix_secs: 10,
-                    file_name: format!("{index:02}.flac"),
-                    track_number: None,
-                    duration_ms: 1_000,
-                    artwork_key: None,
-                },
-            );
-        }
-
-        let initial = facade.view_model();
-
-        assert_eq!(initial.album.loading.hydrated_entries, 0);
-        assert!(initial.album.loading.is_loading);
-        assert!(
-            initial
-                .album
-                .albums
-                .iter()
-                .all(|entry| entry.is_provisional)
-        );
-        assert_eq!(initial.artist.loading.hydrated_entries, 0);
-        assert!(initial.artist.loading.is_loading);
-        assert!(
-            initial
-                .artist
-                .artists
-                .iter()
-                .all(|entry| entry.is_provisional)
-        );
-
-        facade.poll_background_tasks();
-        let hydrated = facade.view_model();
-
-        assert!(hydrated.album.loading.hydrated_entries > 0);
-        assert!(hydrated.album.loading.hydrated_entries < hydrated.album.loading.total_entries);
-        assert!(
-            hydrated
-                .album
-                .albums
-                .iter()
-                .take(hydrated.album.loading.hydrated_entries)
-                .all(|entry| !entry.is_provisional)
-        );
-        assert!(hydrated.artist.loading.hydrated_entries > 0);
-        assert!(hydrated.artist.loading.hydrated_entries < hydrated.artist.loading.total_entries);
-        assert!(
-            hydrated
-                .artist
-                .artists
-                .iter()
-                .take(hydrated.artist.loading.hydrated_entries)
-                .all(|entry| !entry.is_provisional)
-        );
-    }
-
-    #[test]
-    fn playback_prefills_audio_buffer_for_existing_file() {
-        let temp_dir = TempDir::new().expect("temp dir should be created");
-        let file_path = temp_dir.path().join("sample.wav");
-        let spec = WavSpec {
-            channels: 2,
-            sample_rate: 48_000,
-            bits_per_sample: 16,
-            sample_format: SampleFormat::Int,
-        };
-        let mut writer = WavWriter::create(&file_path, spec).expect("wav file should be created");
-        for index in 0..16i16 {
-            let sample = (index * 256) - 2048;
-            writer
-                .write_sample(sample)
-                .expect("left sample should be written");
-            writer
-                .write_sample(sample)
-                .expect("right sample should be written");
-        }
-        writer.finalize().expect("wav file should finalize");
-
-        let mut facade = AppFacade::default();
-        facade.library.upsert_track(
-            &mut facade.strings,
-            TrackInput {
-                title: "sample".to_string(),
-                album: Some("Album".to_string()),
-                artist: Some("Artist".to_string()),
-                album_artist: Some("Artist".to_string()),
-                composer: None,
-                normalized_path: file_path.to_string_lossy().to_string(),
-                file_size: fs::metadata(&file_path)
-                    .expect("metadata should exist")
-                    .len(),
-                modified_unix_secs: 10,
-                file_name: "sample.wav".to_string(),
-                track_number: None,
-                duration_ms: 0,
-                artwork_key: None,
-            },
-        );
-        facade.queue.replace_with_tracks(&[TrackId(0)]);
-
-        let events = facade.handle_command(AppCommand::NextTrack);
-
-        assert!(!events.is_empty());
-        assert!(facade.audio_output.buffered_blocks() > 0);
-        assert!(facade.playback.buffered_ms > 0);
-    }
-
-    #[test]
-    fn start_scan_runs_in_background_until_polled() {
-        let temp_dir = TempDir::new().expect("temp dir should be created");
-        let include_root = temp_dir.path().join("library_root");
-        let music_dir = include_root.join("Artist").join("Album");
-        fs::create_dir_all(&music_dir).expect("music dir should be created");
-        fs::write(music_dir.join("01-track-one.flac"), b"fLaCdemo").expect("track should exist");
-
-        let mut facade = AppFacade::default();
-        let _ = facade.handle_command(AppCommand::Scan(ScanCommand::AddIncludeDir(include_root)));
-
-        let events = facade.handle_command(AppCommand::Scan(ScanCommand::StartFullScan));
-
-        assert_eq!(
-            events,
-            vec![AppEvent::ScanStateChanged(ScanState::Scanning)]
-        );
-        assert_eq!(facade.library.tracks.titles.len(), 0);
-
-        poll_scan_until_finished(&mut facade);
-
-        assert_eq!(facade.library.tracks.titles.len(), 1);
-        assert_eq!(facade.scan.visible_status(), ScanState::Completed);
-    }
-
-    #[test]
-    fn exhausted_track_advances_to_next_track_after_buffer_drains() {
-        let temp_dir = TempDir::new().expect("temp dir should be created");
-        let first = temp_dir.path().join("first.wav");
-        let second = temp_dir.path().join("second.wav");
-        write_wav(&first, 2_048);
-        write_wav(&second, 2_048);
-
-        let mut facade = AppFacade::default();
-        for (index, path, name) in [(0, &first, "first.wav"), (1, &second, "second.wav")] {
-            facade.library.upsert_track(
-                &mut facade.strings,
-                TrackInput {
-                    title: format!("track-{index}"),
-                    album: Some("Album".to_string()),
-                    artist: Some("Artist".to_string()),
-                    album_artist: Some("Artist".to_string()),
-                    composer: None,
-                    normalized_path: path.to_string_lossy().to_string(),
-                    file_size: fs::metadata(path).expect("metadata should exist").len(),
-                    modified_unix_secs: 10,
-                    file_name: name.to_string(),
-                    track_number: None,
-                    duration_ms: 0,
-                    artwork_key: None,
-                },
-            );
-        }
-        facade.queue.replace_with_tracks(&[TrackId(0), TrackId(1)]);
-
-        let _ = facade.handle_command(AppCommand::ClickTrack {
-            visible_tracks: vec![TrackId(0), TrackId(1)],
-            clicked_index: 0,
-            origin: TrackListOrigin::Queue,
-        });
-
-        for _ in 0..10_000 {
-            while facade.audio_output.buffered_blocks() > 0 {
-                let _ = facade.audio_output.pop_or_silence();
-            }
-            facade.poll_background_tasks();
-            if facade.queue.current_track() == Some(TrackId(1)) {
-                break;
-            }
-            thread::yield_now();
-        }
-
-        assert_eq!(facade.queue.current_track(), Some(TrackId(1)));
-        assert_eq!(facade.playback.current_track, Some(TrackId(1)));
-        assert_eq!(facade.playback.state, PlaybackState::Playing);
-    }
-
-    #[test]
-    fn undecodable_track_skips_to_next_track() {
-        let temp_dir = TempDir::new().expect("temp dir should be created");
-        let broken = temp_dir.path().join("broken.mp3");
-        let valid = temp_dir.path().join("valid.wav");
-        fs::write(&broken, b"not-audio").expect("broken file should be written");
-
-        let spec = hound::WavSpec {
-            channels: 2,
-            sample_rate: 48_000,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut writer =
-            hound::WavWriter::create(&valid, spec).expect("wav file should be created");
-        for _ in 0..16 {
-            writer
-                .write_sample(0i16)
-                .expect("left sample should be written");
-            writer
-                .write_sample(0i16)
-                .expect("right sample should be written");
-        }
-        writer.finalize().expect("wav file should finalize");
-
-        let mut facade = AppFacade::default();
-        facade.library.upsert_track(
-            &mut facade.strings,
-            TrackInput {
-                title: "broken".to_string(),
-                album: Some("Album".to_string()),
-                artist: Some("Artist".to_string()),
-                album_artist: Some("Artist".to_string()),
-                composer: None,
-                normalized_path: broken.to_string_lossy().to_string(),
-                file_size: 9,
-                modified_unix_secs: 10,
-                file_name: "broken.mp3".to_string(),
-                track_number: None,
-                duration_ms: 0,
-                artwork_key: None,
-            },
-        );
-        facade.library.upsert_track(
-            &mut facade.strings,
-            TrackInput {
-                title: "valid".to_string(),
-                album: Some("Album".to_string()),
-                artist: Some("Artist".to_string()),
-                album_artist: Some("Artist".to_string()),
-                composer: None,
-                normalized_path: valid.to_string_lossy().to_string(),
-                file_size: 64,
-                modified_unix_secs: 10,
-                file_name: "valid.wav".to_string(),
-                track_number: None,
-                duration_ms: 0,
-                artwork_key: None,
-            },
-        );
-        facade.queue.replace_with_tracks(&[TrackId(0), TrackId(1)]);
-        facade.queue.set_current_index(0);
-
-        let events = facade.handle_command(AppCommand::ClickTrack {
-            visible_tracks: vec![TrackId(0), TrackId(1)],
-            clicked_index: 0,
-            origin: TrackListOrigin::Queue,
-        });
-
-        assert!(!events.is_empty());
-        assert_eq!(facade.queue.current_track(), Some(TrackId(1)));
-        assert!(facade.audio_output.buffered_blocks() > 0);
-    }
-
-    #[test]
-    fn device_watcher_preferred_device_disappears_emits_underrun() {
-        use std::sync::mpsc;
-        use crate::audio::device_watcher::DeviceWatcherMessage;
-
-        let (sender, receiver) = mpsc::channel();
-
-        let mut facade = AppFacade::default();
-        facade.settings.preferred_output_device = Some("test-dev".to_string());
-
-        // simulate that a device is currently present (test-only flag)
-        facade.set_test_audio_device_present(true, Some("test-dev".to_string()));
-
-        // install a test watcher that uses our receiver
-        let handle = crate::audio::device_watcher::DeviceWatcherHandle::from_receiver_for_test(receiver);
-        facade.device_watcher = Some(handle);
-
-        // send a DevicesChanged message with no devices -> preferred device disappeared
-        let _ = sender.send(DeviceWatcherMessage::DevicesChanged {
-            devices: vec![],
-            default: None,
-        });
-
-        let events = facade.poll_background_tasks();
-
-        assert!(events.iter().any(|e| matches!(e, AppEvent::Playback(PlaybackEvent::DeviceUnderrun))));
-        assert!(facade.audio_disconnected);
-        assert!(!facade.audio_device_present());
-    }
-
-    #[test]
-    fn background_lazy_loader_loads_album_tracks_from_persisted_index() {
-        let temp_dir = TempDir::new().expect("temp dir should be created");
-        let music_dir = temp_dir.path().join("Artist").join("Album");
-        fs::create_dir_all(&music_dir).expect("music dir should be created");
-
-        let file1 = music_dir.join("01.wav");
-        let file2 = music_dir.join("02.wav");
-        write_wav(&file1, 16);
-        write_wav(&file2, 16);
-
-        // create a JsonStore that uses a `data/` subdirectory inside our temp dir
-        let base = temp_dir.path().to_path_buf();
-        let store_paths = PersistencePaths {
-            config_json: base.join("data").join("config").join("config.json"),
-            state_json: base.join("data").join("state").join("state.json"),
-            playlists_json: base.join("data").join("playlists").join("playlists.json"),
-        };
-        let store = JsonStore::new(store_paths.clone());
-
-        let album_entry = crate::core::persistence::AlbumIndexEntry {
-            title: "Album".to_string(),
-            album_artist: "Artist".to_string(),
-            track_count: 2,
-            tracks: vec![file1.to_string_lossy().to_string(), file2.to_string_lossy().to_string()],
-        };
-
-        let artist_entry = crate::core::persistence::ArtistIndexEntry {
-            name: "Artist".to_string(),
-            track_count: 2,
-            tracks: vec![file1.to_string_lossy().to_string(), file2.to_string_lossy().to_string()],
-        };
-
-        let artist_file = crate::core::persistence::ArtistIndexFile {
-            track_artists: vec![artist_entry],
-            album_artists: Vec::new(),
-            composers: Vec::new(),
-        };
-
-        store
-            .save_album_index(&vec![album_entry])
-            .expect("save album index should succeed");
-        store
-            .save_artist_index(&artist_file)
-            .expect("save artist index should succeed");
-
-        let mut facade = AppFacade::default();
-        facade
-            .restore_from_store(&store)
-            .expect("restore should succeed");
-
-        let _ = facade.handle_command(AppCommand::SelectAlbum(Some(crate::core::ids::AlbumId(0))));
-
-        for _ in 0..10_000 {
-            facade.poll_background_tasks();
-            if facade
-                .library
-                .indexes
-                .tracks_by_album
-                .get(0)
-                .map(|v| v.len())
-                .unwrap_or(0)
-                == 2
-            {
-                break;
-            }
-            thread::yield_now();
-        }
-
-        assert_eq!(
-            facade
-                .library
-                .indexes
-                .tracks_by_album
-                .get(0)
-                .map(|v| v.len())
-                .unwrap_or(0),
-            2
-        );
-
-        let root = store_paths
-            .config_json
-            .parent()
-            .expect("config parent should exist")
-            .to_path_buf();
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn measure_poll_and_browse_cache_timings() {
-        use std::sync::{mpsc, Arc, atomic::{AtomicBool, Ordering}};
-        use std::time::Instant;
-
-        let mut facade = AppFacade::default();
-
-        // Prepare a batch of synthetic TrackInput entries and send them via a
-        // fake BrowseLoaderHandle so `poll_background_tasks()` will process
-        // them and call `upsert_tracks_batch`.
-        let n = 200usize;
-        let mut inputs: Vec<crate::core::library::TrackInput> = Vec::with_capacity(n);
-        for i in 0..n {
-            inputs.push(crate::core::library::TrackInput {
-                title: format!("Track {i}"),
-                album: Some(format!("Album {}", i % 10)),
-                artist: Some(format!("Artist {}", i % 20)),
-                album_artist: Some(format!("Artist {}", i % 20)),
-                composer: None,
-                normalized_path: format!("/music/Artist{}/Album{}/{:02}.flac", i, i, i),
-                file_size: i as u64 + 1,
-                modified_unix_secs: 10,
-                file_name: format!("{:02}.flac", i),
-                track_number: None,
-                duration_ms: 1_000,
-                artwork_key: None,
-            });
-        }
-
-        let (sender, receiver) = mpsc::channel::<super::BrowseLoaderMessage>();
-        let cancel = Arc::new(AtomicBool::new(false));
-
-        // send a single TrackBatch message containing all inputs
-        let _ = sender.send(super::BrowseLoaderMessage::TrackBatch(inputs));
-
-        let loader = super::BrowseLoaderHandle { cancel_requested: Arc::clone(&cancel), receiver };
-        facade.browse_loader = Some(loader);
-
-        // Measure poll duration (will process up to MAX_UPSERTS_PER_POLL)
-        let start = Instant::now();
-        let events = facade.poll_background_tasks();
-        let poll_dur = start.elapsed();
-        eprintln!(
-            "measure: poll_background_tasks duration_ms={} events={} tracks_after_poll={}",
-            poll_dur.as_millis(),
-            events.len(),
-            facade.library.tracks.titles.len()
-        );
-
-        // Measure view_model() which triggers ensure_browse_cache_current() when
-        // the library revision changed as a result of the poll upserts.
-        let start2 = Instant::now();
-        let _vm = facade.view_model();
-        let view_dur = start2.elapsed();
-        eprintln!(
-            "measure: view_model (ensure_browse_cache_current) duration_ms={} albums={} artists={}",
-            view_dur.as_millis(),
-            facade.library.albums.titles.len(),
-            facade.library.artists.names.len()
-        );
-
-        assert!(facade.library.tracks.titles.len() > 0);
-    }
-
-    #[test]
-    fn measure_poll_with_many_tracks() {
-        use std::sync::{mpsc, Arc, atomic::{AtomicBool, Ordering}};
-        use std::time::Instant;
-
-        let mut facade = AppFacade::default();
-
-        // Large synthetic workload (reduced to 1k for timely measurement)
-        let total = 1_024usize;
-        let chunk_size = 64usize;
-
-        // Build batches and send as separate TrackBatch messages so loader
-        // simulates streaming many small batches like a real background loader.
-        let (sender, receiver) = mpsc::channel::<super::BrowseLoaderMessage>();
-        let cancel = Arc::new(AtomicBool::new(false));
-
-        let mut i = 0usize;
-        while i < total {
-            let mut batch: Vec<crate::core::library::TrackInput> = Vec::new();
-            for j in i..(i + chunk_size).min(total) {
-                batch.push(crate::core::library::TrackInput {
-                    title: format!("Track {j}"),
-                    album: Some(format!("Album {}", j % 100)),
-                    artist: Some(format!("Artist {}", j % 200)),
-                    album_artist: Some(format!("Artist {}", j % 200)),
-                    composer: None,
-                    normalized_path: format!("/music/Artist{}/Album{}/{:05}.flac", j % 200, j % 100, j),
-                    file_size: j as u64 + 1,
-                    modified_unix_secs: 10,
-                    file_name: format!("{:05}.flac", j),
-                    track_number: None,
-                    duration_ms: 1_000,
-                    artwork_key: None,
-                });
-            }
-            let _ = sender.send(super::BrowseLoaderMessage::TrackBatch(batch));
-            i += chunk_size;
-        }
-
-        // send finished marker
-        let _ = sender.send(super::BrowseLoaderMessage::Finished { missing_paths: Vec::new() });
-
-        let loader = super::BrowseLoaderHandle { cancel_requested: Arc::clone(&cancel), receiver };
-        facade.browse_loader = Some(loader);
-
-        // Poll until loader completes; measure total poll time and number of polls.
-        let start = Instant::now();
-        let mut polls = 0usize;
-        while facade.browse_loader.is_some() {
-            let _ = facade.poll_background_tasks();
-            polls += 1;
-        }
-        let total_dur = start.elapsed();
-        eprintln!(
-            "measure_large: total_polls={} total_duration_ms={} tracks_after={} albums={} artists={}",
-            polls,
-            total_dur.as_millis(),
-            facade.library.tracks.titles.len(),
-            facade.library.albums.titles.len(),
-            facade.library.artists.names.len()
-        );
-
-        // Measure browse-cache rebuild via view_model()
-        let start2 = Instant::now();
-        let _vm = facade.view_model();
-        let vm_dur = start2.elapsed();
-        eprintln!(
-            "measure_large: ensure_browse_cache_current_ms={} albums={} artists={}",
-            vm_dur.as_millis(),
-            facade.library.albums.titles.len(),
-            facade.library.artists.names.len()
-        );
-
-        assert_eq!(facade.library.tracks.titles.len(), total);
-    }
-
-    #[test]
-    fn measure_upsert_batch_and_browse_cache() {
-        use std::time::Instant;
-
-        // Measure a single batched upsert and the subsequent browse-cache rebuild.
-        let total = 1_024usize;
-        let mut inputs: Vec<crate::core::library::TrackInput> = Vec::with_capacity(total);
-        for i in 0..total {
-            inputs.push(crate::core::library::TrackInput {
-                title: format!("Track {i}"),
-                album: Some(format!("Album {}", i % 100)),
-                artist: Some(format!("Artist {}", i % 200)),
-                album_artist: Some(format!("Artist {}", i % 200)),
-                composer: None,
-                normalized_path: format!("/music/Artist{}/Album{}/{:05}.flac", i % 200, i % 100, i),
-                file_size: i as u64 + 1,
-                modified_unix_secs: 10,
-                file_name: format!("{:05}.flac", i),
-                track_number: None,
-                duration_ms: 1_000,
-                artwork_key: None,
-            });
-        }
-
-        let mut lib = crate::core::library::Library::default();
-        let mut strings = crate::core::strings::StringInterner::default();
-
-        let start = Instant::now();
-        let ids = lib.upsert_tracks_batch(&mut strings, inputs.into_iter());
-        let upsert_dur = start.elapsed();
-        eprintln!(
-            "measure_upsert: total={} upsert_ms={} ids={}",
-            total,
-            upsert_dur.as_millis(),
-            ids.len()
-        );
-
-        // Move into facade and measure browse-cache rebuild via view_model()
-        let mut facade = AppFacade::default();
-        facade.library = lib;
-        facade.strings = strings;
-
-        let start2 = Instant::now();
-        let _vm = facade.view_model();
-        let vm_dur = start2.elapsed();
-        eprintln!(
-            "measure_upsert: ensure_browse_cache_current_ms={} albums={} artists={}",
-            vm_dur.as_millis(),
-            facade.library.albums.titles.len(),
-            facade.library.artists.names.len()
-        );
-
-        assert_eq!(facade.library.tracks.titles.len(), total);
-    }
-
-    #[test]
-    fn burst_upserts_repro() {
-        use std::time::Instant;
-
-        // Initialize logger to a temp data root so SimpleFileLogger is active
-        let tmp = std::env::temp_dir().join("lrc_player_lock_test");
-        let _ = std::fs::create_dir_all(tmp.join("config"));
-        let paths = crate::core::persistence::PersistencePaths {
-            config_json: tmp.join("config").join("config.json"),
-            state_json: tmp.join("state.json"),
-            playlists_json: tmp.join("playlists.json"),
-        };
-        match crate::logging::init(&paths) {
-            Ok(_) => eprintln!("[test] logger initialized"),
-            Err(e) => eprintln!("[test] logger init error: {}", e),
-        }
-
-        // Spawn background threads that log frequently to create contention
-        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut bg_handles = Vec::new();
-        for _ in 0..4 {
-            let stopc = Arc::clone(&stop);
-            bg_handles.push(std::thread::spawn(move || {
-                while !stopc.load(Ordering::Relaxed) {
-                    log::info!("bg_logger: heartbeat");
-                    std::thread::sleep(std::time::Duration::from_micros(50));
-                }
-            }));
-        }
-
-        // Reproduce burst of small upserts via targeted scan outcome
-        let count = 1024usize;
-        let mut tracks: Vec<crate::core::library::TrackInput> = Vec::with_capacity(count);
-        for i in 0..count {
-            tracks.push(crate::core::library::TrackInput {
-                title: format!("Track {i}"),
-                album: Some(format!("Album {}", i % 100)),
-                artist: Some(format!("Artist {}", i % 200)),
-                album_artist: Some(format!("Artist {}", i % 200)),
-                composer: None,
-                normalized_path: format!("/music/Artist{}/Album{}/{:05}.flac", i % 200, i % 100, i),
-                file_size: i as u64 + 1,
-                modified_unix_secs: 10,
-                file_name: format!("{:05}.flac", i),
-                track_number: None,
-                duration_ms: 1_000,
-                artwork_key: None,
-            });
-        }
-
-        let mut facade = AppFacade::default();
-
-        let outcome = crate::core::scan::ScanOutcome {
-            result: crate::core::scan::ScanState::Completed,
-            progress: crate::core::scan::ScanProgress::default(),
-            tracks,
-            targeted: true,
-        };
-
-        let start = Instant::now();
-        facade.complete_scan(outcome);
-        let dur = start.elapsed();
-        eprintln!(
-            "burst_upserts: count={} total_ms={} albums={} artists={}",
-            count,
-            dur.as_millis(),
-            facade.library.albums.titles.len(),
-            facade.library.artists.names.len()
-        );
-
-        assert_eq!(facade.library.tracks.titles.len(), count);
-    }
-}

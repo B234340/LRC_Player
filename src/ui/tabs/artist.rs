@@ -8,6 +8,9 @@ use crate::app::view_models::TrackRowVm;
 pub struct ArtistTab {
     /// アーティスト総数
     pub artist_count: usize,
-    /// 選択中アーティストの表示用トラック行
+    /// 選択中アーティストの表示用トラック行（UI 用スナップショット）
+    /// - このベクタは UI 表示専用で、内部モデルとは独立している。
+    /// - 不変条件: `visible_tracks` は UI に表示される順序で整列されており、
+    ///   単一フレーム中はインデックスが安定している（クリックハンドラはこれを前提にする）。
     pub visible_tracks: Vec<TrackRowVm>,
 }
