@@ -6,3 +6,8 @@ pub mod core;
 pub mod logging;
 pub mod decode;
 pub mod ui;
+pub mod domain;
+pub mod application;
+pub mod infrastructure;
+pub mod presentation;
+pub mod shared;
