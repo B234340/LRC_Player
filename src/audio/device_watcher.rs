@@ -1,3 +1,9 @@
+//! Audio::device_watcher — 出力デバイスの変化を監視するユーティリティ
+//!
+//! `cpal` を用いて出力デバイス一覧やデフォルト出力の変化を定期的にポーリングし、
+//! 変化があれば `DeviceWatcherMessage::DevicesChanged` を送出します。UI はこれを受けて
+//! デバイス選択肢を更新できます。
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -6,14 +12,17 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 
+/// デバイス監視のイベント
 #[derive(Debug, Clone)]
 pub enum DeviceWatcherMessage {
+    /// デバイス一覧やデフォルトデバイスが変化した
     DevicesChanged {
         devices: Vec<String>,
         default: Option<String>,
     },
 }
 
+/// デバイス監視ワーカーのハンドル
 pub struct DeviceWatcherHandle {
     cancel_requested: Arc<AtomicBool>,
     receiver: Receiver<DeviceWatcherMessage>,

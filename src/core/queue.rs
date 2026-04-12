@@ -1,36 +1,57 @@
+//! Core::queue — 再生キューとその振る舞い
+//!
+//! 再生キューはエントリの順序管理、現在位置、リピート・シャッフル振る舞いなどを管理する
+//! 中核的なデータ構造を提供します。UI/コントローラはこの `Queue` を操作して再生順を制御します。
+
 use serde::{Deserialize, Serialize};
 
 use crate::core::ids::{QueueEntryId, TrackId};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// リピート／シャッフルモード
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RepeatMode {
+    /// 1 曲を繰り返す
     RepeatOne,
+    /// キュー全体を順次再生（デフォルト）
     #[default]
     RepeatQueue,
+    /// シャッフル再生
     ShuffleQueue,
 }
 
+/// キュー内の単一エントリ
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueEntry {
     pub id: QueueEntryId,
     pub track_id: TrackId,
 }
 
+/// シャッフル時の内部状態（順序とカーソル、乱数シード）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShuffleState {
+    /// シャッフル順を示すインデックス配列（元の entries インデックスを格納）
     pub order: Vec<u32>,
+    /// 現在のカーソル位置（order 内の位置）
     pub cursor: u32,
+    /// シャッフルの擬似乱数シード（再現性のため保存される）
     pub seed: u64,
 }
 
+/// 再生キュー本体
 #[derive(Debug, Clone, Default)]
 pub struct Queue {
+    /// キュー内のエントリ配列
     pub entries: Vec<QueueEntry>,
+    /// 現在の再生インデックス（None の場合は空）
     pub current_index: Option<u32>,
+    /// UI で選択されたエントリ ID の集合
     pub selected: Vec<QueueEntryId>,
+    /// リピート／シャッフルモード
     pub repeat_mode: RepeatMode,
+    /// シャッフル時の内部状態（存在するのは ShuffleQueue モード時）
     pub shuffle_state: Option<ShuffleState>,
+    /// 次に付与するエントリ ID（内部連番）
     next_entry_id: u32,
 }
 

@@ -1,3 +1,12 @@
+//! Audio 出力周りのコア実装
+//!
+//! - `BufferedAudioOutput` はアプリ側のオーディオフレームブロックを保持する有界キューを提供します。
+//! - `AudioDeviceOutput` は `cpal` を用いて OS の出力ストリームを構築し、`BufferedAudioOutput` からサンプルを取り出して
+//!   デバイスへ書き込みます。
+//!
+//! 設計上、バッファはブロック単位で enqueue/dequeue され、デバイススレッドはできるだけ短時間で次のサンプルを取得
+//! できるように最小限のコピーで処理します。
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -5,6 +14,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
 use crossbeam_queue::ArrayQueue;
 
+/// デバイス／バッファ設定
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioOutputConfig {
     pub sample_rate: u32,
@@ -22,6 +32,7 @@ impl Default for AudioOutputConfig {
     }
 }
 
+/// フレームブロック表現（チャンネル数・フレーム数・平坦化された f32 サンプル配列）
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioFrameBlock {
     pub channels: u16,
@@ -30,6 +41,7 @@ pub struct AudioFrameBlock {
 }
 
 impl AudioFrameBlock {
+    /// 指定長の無音ブロックを生成するユーティリティ
     pub fn silence(channels: u16, frames: u32) -> Self {
         let sample_count = channels as usize * frames as usize;
         Self {
@@ -39,6 +51,7 @@ impl AudioFrameBlock {
         }
     }
 
+    /// ブロックの長さをミリ秒で計算
     pub fn duration_ms(&self, sample_rate: u32) -> u32 {
         if sample_rate == 0 {
             return 0;
@@ -48,12 +61,18 @@ impl AudioFrameBlock {
     }
 }
 
+/// アプリ側のバッファを表すハイレベルラッパ
 #[derive(Clone)]
 pub struct BufferedAudioOutput {
+    /// 出力設定（サンプルレート、チャンネル数、フレーム長）
     config: AudioOutputConfig,
+    /// 内部ブロックキュー（bounded）
     queue: Arc<ArrayQueue<AudioFrameBlock>>,
+    /// 再生がアクティブかどうか（デバイススレッド参照用）
     playback_active: Arc<AtomicBool>,
+    /// 現在キューに溜まっているサンプル数の近似値
     pending_samples: Arc<AtomicUsize>,
+    /// バッファクリア時に増える epoch（デバイス側で検出して未消化サンプルを調整）
     reset_epoch: Arc<AtomicU64>,
 }
 
@@ -107,12 +126,18 @@ impl BufferedAudioOutput {
     }
 
     pub fn pop_or_silence(&self) -> AudioFrameBlock {
+        // キューからブロックを取り出す。なければ無音ブロックを返す。
+        // Try to pop a block from the bounded queue. When a block is obtained,
+        // decrement `pending_samples` to keep the approximate pending-samples metric aligned.
+        // This is approximate because `pending_samples` accounts for sample count rather than
+        // exact frame bookkeeping.
         if let Some(block) = self.queue.pop() {
             self.pending_samples
                 .fetch_sub(block.samples.len(), Ordering::Relaxed);
             return block;
         }
 
+        // If the queue is empty, return a short silence block so the device always receives data.
         AudioFrameBlock::silence(self.config.channels, self.config.frames_per_buffer)
     }
 
@@ -125,6 +150,11 @@ impl BufferedAudioOutput {
     }
 
     pub fn buffered_ms(&self) -> u32 {
+        // pending_samples はサンプル数を示すため、それをチャンネル数で割りフレーム数にし、
+        // サンプルレートからミリ秒へ換算する。
+        // Convert approximate pending sample count to milliseconds:
+        // frames = pending_samples / channels
+        // ms = frames * 1000 / sample_rate
         ((self.pending_samples.load(Ordering::Relaxed) as u64 / self.config.channels.max(1) as u64
             * 1_000)
             / self.config.sample_rate as u64) as u32
@@ -164,6 +194,7 @@ pub struct AudioDeviceOutput {
 }
 
 impl AudioDeviceOutput {
+    /// Query the preferred (default) device configuration, if available
     pub fn preferred_config() -> Option<AudioOutputConfig> {
         let host = cpal::default_host();
         let device = host.default_output_device()?;
@@ -203,6 +234,7 @@ impl AudioDeviceOutput {
     }
 
     pub fn try_start(buffered_output: &BufferedAudioOutput) -> Result<Self, String> {
+        // start default output device and hook into buffered_output
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -337,6 +369,8 @@ fn build_output_stream<T>(
 where
     T: Sample + SizedSample + FromSample<f32>,
 {
+    // `cpal` の出力ストリームを生成するユーティリティ。
+    // クロージャ内で `write_output_data` を呼び、BufferedAudioOutput からサンプルを取得して書き込む。
     let channels = stream_config.channels as usize;
     let err_playback_active = Arc::clone(&playback_active);
     let mut current_block: Option<AudioFrameBlock> = None;
@@ -381,6 +415,11 @@ fn write_output_data<T>(
 ) where
     T: Sample + FromSample<f32>,
 {
+    // Core device write loop:
+    // - Use `reset_epoch` to detect when the main thread cleared/reset the buffer; drop
+    //   any partially used current block when epochs differ.
+    // - If playback is inactive write silence; otherwise consume samples from current blocks.
+    // - Convert f32 samples into target sample type `T` and write into the `output` slice.
     let current_epoch = reset_epoch.load(Ordering::Relaxed);
     if *seen_reset_epoch != current_epoch {
         if let Some(block) = current_block.as_ref() {

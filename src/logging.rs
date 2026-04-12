@@ -1,3 +1,11 @@
+//! 非同期ファイルロガー実装
+//!
+//! - バウンデッドチャネル経由でログをキューに入れ、別スレッドがファイル書き込みを行う
+//! - `try_send` を使うことで呼び出し元スレッドをブロックしない（高頻度ログでの遅延軽減）
+//! - ログローテーションはベストエフォートで行う（サイズ超過でリネーム）
+//!
+//! UI 側で選べるカテゴリフィルタをサポートし、ランタイムでフィルタを適用します。
+
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -9,8 +17,7 @@ use std::thread;
 use log::{LevelFilter, Log, Metadata, Record};
 use crossbeam_channel::{bounded, TrySendError};
 
-// Built-in categories presented to the UI for selection. These are matched
-// against the record target (module path) using substring/prefix matching.
+// UI に提示する組み込みカテゴリ（サブストリング/プレフィクスでマッチ）
 const AVAILABLE_CATEGORIES: &[&str] = &[
     "all",
     "app",
@@ -23,12 +30,16 @@ const AVAILABLE_CATEGORIES: &[&str] = &[
     "cpal",
 ];
 
+// 実行時に選択されるログフィルタ（String の集合）を保持するためのグローバル
 static LOG_FILTERS: OnceLock<Arc<RwLock<Vec<String>>>> = OnceLock::new();
 
+/// 利用可能なログカテゴリのリストを文字列ベクタで返すユーティリティ
 pub fn available_log_categories() -> Vec<String> {
     AVAILABLE_CATEGORIES.iter().map(|s| s.to_string()).collect()
 }
 
+/// ランタイムでのログフィルタを設定する。
+/// UI から選択されたカテゴリをこの関数で反映させる想定。
 pub fn set_log_filters(filters: Vec<String>) {
     let arc = LOG_FILTERS.get_or_init(|| Arc::new(RwLock::new(Vec::new()))).clone();
     if let Ok(mut guard) = arc.write() {
@@ -37,8 +48,9 @@ pub fn set_log_filters(filters: Vec<String>) {
     }
 }
 
-/// Async file logger: non-blocking try_send on a bounded channel with
-/// a background writer thread performing actual file I/O.
+/// 非同期ファイルロガー本体
+///
+/// 内部で bounded チャネルを用い、書き込みは別スレッドで行うため呼び出し側は基本的にノンブロッキング。
 pub struct AsyncFileLogger {
     sender: crossbeam_channel::Sender<String>,
     dropped: AtomicUsize,
@@ -54,6 +66,7 @@ impl AsyncFileLogger {
         let dir_clone = dir.clone();
         let base_string = base.to_string();
 
+        // 背景スレッドを生成し、チャネルから来る行をファイルに書き込む
         thread::spawn(move || {
             let mut file = OpenOptions::new()
                 .create(true)
@@ -68,7 +81,6 @@ impl AsyncFileLogger {
                         .open("/dev/null")
                         .unwrap()
                 });
-
             for line in r.iter() {
                 let write_start = Instant::now();
                 let _ = file.write_all(line.as_bytes());
@@ -79,16 +91,19 @@ impl AsyncFileLogger {
                 }
 
                 // rotation (best-effort)
+                // ベストエフォートなローテーション処理: ファイルサイズをチェックして超過していればリネーム
                 let rot_start = Instant::now();
                 let file_path = dir_clone.join(format!("{}.log", base_string));
                 if let Ok(metadata) = fs::metadata(&file_path) {
                     if metadata.len() > max_size {
+                        // タイムスタンプを付与してログをローテート
                         let ts = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .map(|d| d.as_secs())
                             .unwrap_or(0);
                         let rotated = dir_clone.join(format!("{}.{}.log", base_string, ts));
                         let _ = fs::rename(&file_path, rotated);
+                        // 再オープン。失敗時は /dev/null へフォールバック
                         file = OpenOptions::new()
                             .create(true)
                             .append(true)
@@ -127,9 +142,7 @@ impl Log for AsyncFileLogger {
             return;
         }
 
-        // Apply runtime log filters (if any). If filters vector is empty,
-        // allow all records. Otherwise only allow records whose target
-        // matches at least one selected filter (or when "all" is selected).
+        // ランタイムフィルタの適用。フィルタが空なら全許可、そうでなければターゲットにマッチするもののみ許可。
         if let Some(filters_arc) = LOG_FILTERS.get() {
             let filters = filters_arc.read().unwrap();
             if !filters.is_empty() {
@@ -174,7 +187,10 @@ impl Log for AsyncFileLogger {
     fn flush(&self) {}
 }
 
-/// Initialize logging with an async file sink.
+/// 永続化パスに基づいて非同期ファイルロガーを初期化する。
+///
+/// - `paths` からログディレクトリを取得してディレクトリを作成
+/// - `AsyncFileLogger` を生成して `log` クレートのロガーとして登録
 pub fn init(paths: &crate::core::persistence::PersistencePaths) -> io::Result<()> {
     let store = crate::core::persistence::JsonStore::new(paths.clone());
     let logs_dir = store.logs_dir();

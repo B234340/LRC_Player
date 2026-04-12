@@ -1,3 +1,7 @@
+//! オーディオデコーディング関連
+//!
+//! - `Decoder` は symphonia をラップしてファイルをフレームブロックに変換する責務を持つ。
+//! - `DecodeWorkerHandle` はバックグラウンドでデコードして `BufferedAudioOutput` にブロックを供給するワーカのハンドル。
 use std::fs::File;
 use std::io;
 use std::sync::Arc;
@@ -21,12 +25,16 @@ pub struct Decoder;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeWorkerMessage {
+    /// デコードがソースを読み尽くした（ファイル末尾）
     SourceExhausted { track_id: TrackId },
+    /// デコードに失敗した（エラーメッセージを含む）
     Failed { track_id: TrackId, error: String },
 }
 
 pub struct DecodeWorkerHandle {
+    /// ワーカー終了要求用フラグ（共有）
     cancel_requested: Arc<AtomicBool>,
+    /// ワーカーからの結果受信用チャンネル
     receiver: Receiver<DecodeWorkerMessage>,
 }
 
@@ -57,6 +65,10 @@ impl Decoder {
         self.decode_blocks_inner(source, config, None)
     }
 
+    /// 指定されたソースをフレームブロック列へデコードする。
+    ///
+    /// - `max_blocks` が指定されれば最大ブロック数で切る。
+    /// - 内部で symphonia を使ってデコードし、必要に応じてリサンプリングを行う。
     fn decode_blocks_inner(
         &self,
         source: &DecodedSource,
@@ -186,6 +198,11 @@ impl DecodeWorkerHandle {
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel_requested);
 
+        // Decoder worker thread:
+        // - Decode all blocks from the source, skip initial `skip_blocks` (used for seeking).
+        // - Enqueue decoded blocks into the application's buffered queue.
+        // - If the queue is full, back off to avoid spinning and retry until space is available
+        //   or cancellation is requested.
         thread::spawn(move || {
             let decoder = Decoder::default();
             match decoder.decode_all_blocks(&source, config) {
@@ -248,6 +265,10 @@ fn append_output_channels(
         return;
     }
 
+    // 入力フレームのチャンネル数と出力のチャンネル数を合わせる
+    // - 同数ならそのまま追加
+    // - 入力が多ければ上位 N チャンネルを切り捨て
+    // - 入力が少なければ最初のチャンネルの値で埋めて拡張
     match input_frame.len().cmp(&output_channels) {
         std::cmp::Ordering::Equal => decoded_samples.extend_from_slice(input_frame),
         std::cmp::Ordering::Greater => {
@@ -272,6 +293,7 @@ fn max_required_input_frames(
         return 0;
     }
 
+    // 最大出力フレーム数に対して、入力サンプルレートから必要な入力フレーム数を計算する
     ((max_output_frames as u128 * source_rate as u128).div_ceil(output_rate as u128)) as usize
 }
 
@@ -306,6 +328,10 @@ fn resample_interleaved(
         source_rate as f64 / output_rate as f64
     };
 
+    // Simple linear interpolation resampler:
+    // For each requested output frame compute the corresponding position in the source frames
+    // and interpolate between nearest samples. This is simple and cheap but not high-quality;
+    // consider a polyphase or windowed-sinc resampler for production audio.
     for output_frame in 0..target_frames {
         let source_position = output_frame as f64 * step;
         let base_index = source_position.floor() as usize;
@@ -323,6 +349,7 @@ fn resample_interleaved(
 }
 
 fn map_symphonia_error(error: SymphoniaError) -> io::Error {
+    // Symphonia のエラーを std::io::Error にマップするユーティリティ
     match error {
         SymphoniaError::IoError(error) => error,
         other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),

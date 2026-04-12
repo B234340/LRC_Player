@@ -1,3 +1,9 @@
+//! Core::library — ライブラリ（トラック/アルバム/アーティスト等の管理）
+//!
+//! トラックの登録・更新（upsert）、インデックスの再構築、ディレクトリツリーの生成、
+//! および名前やパスのインターン管理を担う中核モジュールです。大きなバッチ操作のための
+//! `upsert_tracks_batch` のような API も提供します。
+
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::num::NonZeroU16;
@@ -26,76 +32,119 @@ pub enum ArtistKind {
 
 #[derive(Debug, Clone)]
 pub struct TrackInput {
+    /// 曲のタイトル（生の String）
     pub title: String,
+    /// アルバム名（存在しない場合は None）
     pub album: Option<String>,
+    /// トラックアーティスト（存在しない場合は None）
     pub artist: Option<String>,
+    /// アルバムアーティスト（存在しない場合は None）
     pub album_artist: Option<String>,
+    /// 作曲者（存在しない場合は None）
     pub composer: Option<String>,
+    /// 正規化されたパス（ライブラリ内で一意に扱う）
     pub normalized_path: String,
+    /// ファイルのサイズ（バイト）
     pub file_size: u64,
+    /// ファイルの最終更新時刻（Unix 秒）
     pub modified_unix_secs: u64,
+    /// 表示用ファイル名
     pub file_name: String,
+    /// トラック番号（アルバム内での番号）
     pub track_number: Option<NonZeroU16>,
+    /// 曲の長さ（ミリ秒）
     pub duration_ms: u32,
+    /// 代表画像キー（存在しない場合は None）
     pub artwork_key: Option<ArtworkKey>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct TrackTable {
+    /// トラックごとの列構造。各 Vec のインデックスは `TrackId` と対応します。
     pub titles: Vec<StrId>,
+    /// トラックを一意に識別する安定キー（path+size+modified）
     pub stable_keys: Vec<TrackKey>,
+    /// 各トラックに対応するアルバム ID（ない場合は None）
     pub album_ids: Vec<Option<AlbumId>>,
+    /// 各トラックに対応するアーティスト ID（ない場合は None）
     pub artist_ids: Vec<Option<ArtistId>>,
+    /// 各トラックに対応するアルバムアーティスト ID（ない場合は None）
     pub album_artist_ids: Vec<Option<ArtistId>>,
+    /// 各トラックに対応する作曲者 ID（ない場合は None）
     pub composer_ids: Vec<Option<ArtistId>>,
+    /// ファイルのパス ID（paths 配列への参照）
     pub path_ids: Vec<PathId>,
+    /// 表示用ファイル名の文字列 ID
     pub file_name_ids: Vec<StrId>,
+    /// トラック番号（存在しない場合は None）
     pub track_numbers: Vec<Option<std::num::NonZeroU16>>,
+    /// 再生長（ミリ秒）
     pub durations_ms: Vec<u32>,
+    /// 代表画像キー
     pub artwork_keys: Vec<Option<ArtworkKey>>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct AlbumTable {
+    /// アルバムごとのタイトル ID
     pub titles: Vec<StrId>,
+    /// アルバムのアルバムアーティスト ID（存在しない場合は None）
     pub album_artist_ids: Vec<Option<ArtistId>>,
+    /// 代表画像キー（ない場合は None）
     pub representative_artwork: Vec<Option<ArtworkKey>>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct ArtistTable {
+    /// アーティスト名のインターン済み文字列 ID の配列
     pub names: Vec<StrId>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct DirectoryNode {
+    /// ディレクトリ名（文字列インターン ID）
     pub name: StrId,
+    /// 子ノードの ID（ディレクトリツリー中のインデックス）
     pub children: Vec<DirectoryNodeId>,
+    /// このディレクトリに含まれるトラック ID のリスト
     pub tracks: Vec<TrackId>,
 }
 
 #[derive(Debug, Clone)]
 pub struct DirectoryTree {
+    /// ノードの配列。各ノードはディレクトリを表す。
     pub nodes: Vec<DirectoryNode>,
+    /// ルートノードの ID（通常は 0）
     pub root: DirectoryNodeId,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct LibraryIndexes {
+    /// アルバムごとの可視トラックリスト
     pub tracks_by_album: Vec<Vec<TrackId>>,
+    /// アーティスト（トラック）ごとの可視トラックリスト
     pub tracks_by_artist: Vec<Vec<TrackId>>,
+    /// アルバムアーティストごとの可視トラックリスト
     pub tracks_by_album_artist: Vec<Vec<TrackId>>,
+    /// 作曲家ごとの可視トラックリスト
     pub tracks_by_composer: Vec<Vec<TrackId>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Library {
+    /// 内部変更を示す単純なリビジョンカウンタ（更新時にインクリメント）
     pub revision: u64,
+    /// トラックに関する列テーブル
     pub tracks: TrackTable,
+    /// アルバム情報テーブル
     pub albums: AlbumTable,
+    /// アーティスト情報テーブル
     pub artists: ArtistTable,
+    /// ファイルパス文字列のテーブル（PathId への参照先）
     pub paths: Vec<String>,
+    /// ディレクトリ構造
     pub directories: DirectoryTree,
+    /// すばやい参照用の索引群
     pub indexes: LibraryIndexes,
 }
 

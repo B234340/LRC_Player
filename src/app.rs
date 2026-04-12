@@ -1,3 +1,10 @@
+//! アプリケーション全体の薄いラッパー層
+//!
+//! - `AppFacade` と `JsonStore` をまとめ、UI と内部モデルの橋渡しを行う。
+//! - 永続化の閾値判定（位置保存タイミング）やバックグラウンドタスクのポーリングを担う。
+//!
+//! 注: 実際のビジネスロジックは `app::facade` や `core` 下にあり、`Application` はそれらを統合する役割に徹しています。
+
 pub mod commands;
 pub mod events;
 pub mod facade;
@@ -14,6 +21,11 @@ use crate::core::playback::PlaybackState;
 use crate::core::time::POSITION_SAVE_THRESHOLD_MS;
 use crate::core::scan::ScanState;
 
+/// `Application` は UI とアプリ内部ロジックの統合点。
+///
+/// - `facade`: 実際の操作ロジック（ライブラリ、キュー、再生制御など）を保持
+/// - `store`: 永続化層へのアクセスを提供
+/// - `last_saved_*`: 自動永続化のための直近保存時点のスナップショット
 pub struct Application {
     facade: AppFacade,
     store: JsonStore,
@@ -28,8 +40,12 @@ impl Default for Application {
             state_json: "state.json".into(),
             playlists_json: "playlists.json".into(),
         });
-        // Initialize logging to the app data logs directory.
+        // アプリデータ領域に対する永続化パスを決定。
+        // 失敗時はローカル相対パスにフォールバックする（テストや CI 向け）。
+        // ログ初期化を呼び、必要があればログ出力先を作成する。
         let _ = crate::logging::init(&paths);
+
+        // AppFacade と JsonStore を用いて Application を構築
         Self::with_store(AppFacade::default(), JsonStore::new(paths))
     }
 }
@@ -50,25 +66,37 @@ impl Application {
         Ok(())
     }
 
+    /// 永続化レイヤから初期状態を読み込み、内部状態を復元する。
+    /// `bootstrap_from_store` の成功後に保存時点をリフレッシュする。
+
     pub fn persist(&mut self) -> std::io::Result<()> {
         self.facade.save_to_store(&self.store)?;
         self.refresh_save_baseline();
         Ok(())
     }
 
+    /// 明示的にアプリ状態を永続化する。内部でエラーが発生すれば `Err` を返す。
+
     pub fn view_model(&mut self) -> AppViewModel {
         self.facade.view_model()
     }
+
+    /// UI 用の ViewModel を生成して返す。
 
     pub fn handle_command(&mut self, command: AppCommand) {
         let events = self.facade.handle_command(command);
         self.maybe_persist_after_events(&events);
     }
 
+    /// UI からのコマンドを受け取り、`facade` に委譲する。
+    /// 返ってきた `AppEvent` 列に応じて必要なら自動で永続化を行う。
+
     pub fn poll_background_tasks(&mut self) {
         let events = self.facade.poll_background_tasks();
         self.maybe_persist_after_events(&events);
     }
+
+    /// バックグラウンドワーカーのポーリングを行い、発生したイベントに応じて永続化を検討する。
 
     pub fn bootstrap_summary(&self) -> String {
         self.facade.bootstrap_summary()
@@ -92,6 +120,7 @@ impl Application {
         let mut save_for_scan = false;
         let mut save_for_settings = false;
 
+        // 発生したイベント列を走査し、永続化が必要か判定する。
         for event in events {
             if let AppEvent::Playback(playback_event) = event {
                 match playback_event {
@@ -110,6 +139,7 @@ impl Application {
                 }
             }
             if let AppEvent::ScanStateChanged(state) = event {
+                // スキャン完了時はインデックス更新が終わっているため保存対象とする
                 if *state == ScanState::Completed {
                     save_for_scan = true;
                 }
@@ -119,13 +149,18 @@ impl Application {
             }
         }
 
+        // 永続化判定ロジック：トラック変更、位置差分が閾値を超えた場合、スキャン完了、設定変更
         let should_persist =
             save_for_track_change
                 || (save_for_position && self.should_persist_position())
-                || save_for_scan;
-        let should_persist = should_persist || save_for_settings;
-        if should_persist && let Err(error) = self.persist() {
-            eprintln!("failed to persist application state: {error}");
+                || save_for_scan
+                || save_for_settings;
+
+        if should_persist {
+            if let Err(error) = self.persist() {
+                // 永続化失敗は致命ではないがログに出力しておく
+                eprintln!("failed to persist application state: {error}");
+            }
         }
     }
 

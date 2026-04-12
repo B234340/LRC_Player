@@ -1,3 +1,9 @@
+//! Core::artwork — アートワーク（アルバムカバー等）のキャッシュとハンドル
+//!
+//! アプリはトラックに対するアートワークをローカルにキャッシュし、頻繁に使う
+//! アートワークをメモリ上で保持します。`ArtworkKey` はアートワークの一意キー、
+//! `ArtworkHandle` は幅・高さなど描画に必要なメタデータを格納します。
+
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
@@ -5,18 +11,25 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// アートワークを一意に識別するキー（ソースパスや URL 等）
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArtworkKey {
+    /// アートワークのソース識別子（ファイルパスや外部リソース名）
     pub source: String,
 }
 
+/// キャッシュ内で使用するアートワークのハンドル（メタデータ）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtworkHandle {
+    /// 対応するキー
     pub key: ArtworkKey,
+    /// 画像幅
     pub width: u32,
+    /// 画像高さ
     pub height: u32,
 }
 
+/// シンプルな LRU 風アートワークキャッシュ
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ArtworkCache {
     capacity: usize,
@@ -33,8 +46,11 @@ impl ArtworkCache {
         }
     }
 
+    /// キーに紐づく `ArtworkHandle` を返す。ヒット時は LRU 的に末尾へ移動する。
+    /// クローンを返すため、呼び出し側は所有権を安全に扱えます。
     pub fn get(&mut self, key: &ArtworkKey) -> Option<ArtworkHandle> {
         let handle = self.entries.get(key).cloned()?;
+        // 使用されたキーを末尾へ移動してアクセス順を維持
         self.order.retain(|existing| existing != key);
         self.order.push_back(key.clone());
         Some(handle)
@@ -44,7 +60,7 @@ impl ArtworkCache {
         if self.capacity == 0 {
             return;
         }
-
+        // 既に存在する場合は order から削除して末尾へ再追加
         if self.entries.contains_key(&handle.key) {
             self.order.retain(|existing| existing != &handle.key);
         }
@@ -52,6 +68,7 @@ impl ArtworkCache {
         self.order.push_back(handle.key.clone());
         self.entries.insert(handle.key.clone(), handle);
 
+        // 容量を超える場合は最も古いエントリから削除
         while self.entries.len() > self.capacity {
             if let Some(oldest) = self.order.pop_front() {
                 self.entries.remove(&oldest);

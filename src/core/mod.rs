@@ -1,3 +1,6 @@
+//! Core 層の再エクスポート
+//!
+//! `core` はライブラリ、再生、永続化、スキャン、文字列インターンなどアプリのデータモデルをまとめます。
 pub mod artwork;
 pub mod ids;
 pub mod library;

@@ -1,3 +1,10 @@
+//! UI 層（egui）アプリケーション
+//!
+//! - `LrcPlayerEguiApp` は `eframe::App` を実装し、ViewModel を描画してユーザー操作を `AppCommand` として発行します。
+//! - UI 側の振る舞いは軽量に保ち、状態や永続化は `Application` / `AppFacade` に委譲します。
+//!
+//! 注: 多くのレンダリングヘルパー関数（タブごとの描画、行レンダリング、フォントインストールなど）を含む大きなファイルです。
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -15,6 +22,10 @@ use crate::core::ids::{AlbumId, ArtistId};
 use crate::core::persistence::TabId;
 use crate::core::scan::ScanCommand;
 
+/// egui ベースのアプリケーション実装。
+///
+/// - `application` は内部ロジックのエントリ（`Application`）で、UI はここにコマンドを渡す。
+/// - `last_highlighted_*` は UI のログ目的で、最後に選択された要素のトレースに使う。
 pub struct LrcPlayerEguiApp {
     application: Application,
     new_playlist_name: String,
@@ -24,8 +35,10 @@ pub struct LrcPlayerEguiApp {
 
 impl LrcPlayerEguiApp {
     pub fn new(cc: &CreationContext<'_>, mut application: Application) -> Self {
+        // フォントの補完（CJK）を行い、表示崩れを低減
         install_cjk_fonts(&cc.egui_ctx);
 
+        // アプリの永続化状態を復元する（失敗しても UI は起動する）
         if let Err(error) = application.initialize() {
             eprintln!("failed to restore application state: {error}");
         }
@@ -58,16 +71,23 @@ impl LrcPlayerEguiApp {
         });
     }
 
+    /// 上部タブ（Queue/Play/Album/...）を描画して、選択時に `SelectTab` コマンドを送る。
+
     fn render_track_rows(
         &mut self,
         ui: &mut egui::Ui,
         rows: &[TrackRowVm],
         origin: TrackListOrigin,
     ) {
-        let visible_tracks: Vec<_> = rows.iter().map(|row| row.track_id).collect();
+        // 現在表示されているトラック ID のリストを作成（クリック時に visible_tracks を渡すため）
+            // Create a snapshot of visible track IDs. This snapshot is intentionally cloned
+            // and passed to command handlers so that UI event handlers operate on a stable list
+            // even if the app's model mutates during or after event handling.
+            let visible_tracks: Vec<_> = rows.iter().map(|row| row.track_id).collect();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (index, row) in rows.iter().enumerate() {
                 ui.horizontal(|ui| {
+                    // 再生中を示すマーカー
                     let playing = if row.is_current { "▶" } else { " " };
                     if ui
                         .selectable_label(
@@ -76,13 +96,15 @@ impl LrcPlayerEguiApp {
                         )
                         .clicked()
                     {
-                        self.application.handle_command(AppCommand::ClickTrack {
-                            visible_tracks: visible_tracks.clone(),
-                            clicked_index: index,
-                            origin,
-                        });
+                        // トラッククリック -> visible_tracks + index を渡して再生等の動作をトリガー
+                            self.application.handle_command(AppCommand::ClickTrack {
+                                visible_tracks: visible_tracks.clone(),
+                                clicked_index: index,
+                                origin,
+                            });
                     }
 
+                    // お気に入りトグル
                     let favorite_label = match row.favorite_state {
                         crate::app::view_models::FavoriteStateVm::Included => "★",
                         crate::app::view_models::FavoriteStateVm::Excluded => "☆",
@@ -113,6 +135,8 @@ impl LrcPlayerEguiApp {
         self.render_track_rows(ui, &view_model.queue.rows, TrackListOrigin::Queue);
     }
 
+    /// 再生キュータブの描画（プレイコントロール + キューのトラック行）
+
     fn render_play_tab(&mut self, ui: &mut egui::Ui, view_model: &AppViewModel) {
         ui.heading("Now Playing");
         if let Some(track) = &view_model.play.current_track {
@@ -142,6 +166,8 @@ impl LrcPlayerEguiApp {
         });
     }
 
+    /// Now Playing タブの描画：現在トラック情報と基本的なシーク/再生操作を提供
+
     fn render_album_entry(&mut self, ui: &mut egui::Ui, album: &AlbumEntryVm, expanded: bool) {
         let log_label = if album.is_provisional { " [log]" } else { "" };
         let text = format!(
@@ -160,6 +186,7 @@ impl LrcPlayerEguiApp {
             log::info!("[egui_app] Album highlighted: id={:?}", album.album_id);
             self.last_highlighted_album = Some(album.album_id);
         }
+        // クリックされたら選択状態のトグルを行い、AppCommand を発行する
         if response.clicked() || reserve.clicked() {
             log::info!(
                 "[egui_app] Album clicked: id={:?}, expanded={}",

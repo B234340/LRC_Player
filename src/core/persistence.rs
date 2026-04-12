@@ -1,3 +1,9 @@
+//! Core::persistence — 永続化用の DTO と JSON ストア
+//!
+//! アプリの設定、状態、プレイリスト、インデックスなどを JSON フォーマットで読み書き
+//! するための補助型と `JsonStore` を提供します。安全なファイル書き込み（tmp ファイルを
+//! 書いてからリネームする）などの実装上の配慮があります。
+
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -30,35 +36,55 @@ pub enum TabId {
 
 #[derive(Debug, Clone)]
 pub struct PersistencePaths {
+    /// 設定ファイルのパス（config.json）
     pub config_json: PathBuf,
+    /// アプリ状態ファイルのパス（state.json）
     pub state_json: PathBuf,
+    /// プレイリスト保存用ファイルのパス（playlists.json）
     pub playlists_json: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeviceConfig {
+    /// サンプルレート（Hz）の希望値
     pub sample_rate: Option<u32>,
+    /// フレームバッファサイズ（フレーム数）の希望値
     pub frames_per_buffer: Option<u32>,
+    /// 目標バッファ長（ミリ秒）
     pub target_buffer_ms: Option<u32>,
+    /// 排他モードの希望（有効なら true）
     pub exclusive_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfigFile {
+    /// UI のアクセントカラー（16 進表記）
     pub accent_color: String,
+    /// テーマ設定（"dark"/"light"/"system" 等）
     pub theme: String,
+    /// シーク操作のステップ（ミリ秒）
     pub seek_step_ms: u64,
+    /// 再生位置復元ポリシー（例: resume/none）
     pub restore_position_policy: String,
+    /// 起動時の自動スキャンを有効にするか
     pub full_auto_scan: bool,
+    /// フォールバック用アートワークのパス
     pub fallback_artwork_path: Option<PathBuf>,
             #[serde(default)]
+            /// デバッグモードを有効にするか（デフォルト false）
             pub debug_mode: bool,
             #[serde(default)]
+            /// ログフィルタ一覧（デバッグ時に使用）
             pub log_filters: Vec<String>,
+    /// 空のときの再生動作設定
     pub play_empty_state: String,
+    /// スキャン対象ディレクトリのリスト
     pub include_dirs: Vec<PathBuf>,
+    /// スキャン除外ディレクトリのリスト
     pub exclude_dirs: Vec<PathBuf>,
+    /// 優先出力デバイスの名前（存在しない場合は None）
     pub preferred_output_device: Option<String>,
+    /// デバイスごとの追加設定
     pub per_device_settings: HashMap<String, DeviceConfig>,
 }
 
@@ -93,10 +119,15 @@ impl AppConfigFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppStateFile {
+    /// 最後に表示していたタブ
     pub last_tab: TabId,
+    /// 再生キュー（TrackKey のリスト）
     pub queue: Vec<TrackKey>,
+    /// キュー内の現在再生中インデックス（ない場合は None）
     pub current_index: Option<u32>,
+    /// リピートモード
     pub repeat_mode: RepeatMode,
+    /// 再生位置（ミリ秒）
     pub playback_position_ms: u64,
 }
 
@@ -144,14 +175,19 @@ impl AppStateFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlaylistFile {
+    /// プレイリストの ID（保存フォーマット上の数値）
     pub id: u32,
+    /// 表示名（未インターンの生文字列）
     pub name: String,
+    /// 種別を表す文字列（"system_favorite" | "user_defined"）
     pub kind: String,
+    /// トラックの安定キーのリスト（TrackKey）
     pub tracks: Vec<TrackKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlaylistsFile {
+    /// 保存されているプレイリスト群
     pub playlists: Vec<PlaylistFile>,
 }
 
@@ -235,16 +271,23 @@ impl PlaylistsFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AlbumIndexEntry {
+    /// アルバム名
     pub title: String,
+    /// アルバムアーティスト名
     pub album_artist: String,
+    /// トラック数
     pub track_count: usize,
+    /// 各トラックのパス
     pub tracks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ArtistIndexEntry {
+    /// アーティスト名
     pub name: String,
+    /// トラック数
     pub track_count: usize,
+    /// 各トラックのパス
     pub tracks: Vec<String>,
 }
 
@@ -257,8 +300,10 @@ pub struct ArtistIndexFile {
 
 #[derive(Debug, Clone)]
 pub struct JsonStore {
+    /// Json 保存先のパス情報
     pub paths: PersistencePaths,
 }
+
 
 impl JsonStore {
     pub fn new(paths: PersistencePaths) -> Self {
@@ -390,6 +435,7 @@ impl JsonStore {
     where
         T: for<'de> Deserialize<'de> + Default,
     {
+        // 指定パスから JSON を読み込む。ファイルが存在しない場合は T::default() を返す。
         match std::fs::File::open(path) {
             Ok(file) => {
                 let reader = std::io::BufReader::new(file);
@@ -405,10 +451,12 @@ impl JsonStore {
     where
         T: Serialize,
     {
+        // ディレクトリを作成しておく
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
+        // 一時ファイルへ書き、リネームで置換することで原子性を確保
         let tmp_path = path.with_extension("tmp");
         let file = std::fs::File::create(&tmp_path)?;
         let writer = std::io::BufWriter::new(file);

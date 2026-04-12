@@ -1,3 +1,12 @@
+//! AppFacade: アプリケーションの中核オーケストレータ
+//!
+//! - `AppFacade` はライブラリ、キュー、プレイリスト、再生モデル、スキャンワーカー、
+//!   デコーダ/デコードワーカー、オーディオ出力などアプリの主要サブシステムを所有します。
+//! - UI からの `AppCommand` を受け取り、状態変更やバックグラウンドワーカー起動、永続化のトリガを行い、
+//!   `AppEvent` 列を返して UI に通知します。
+//! - 大きな責務を持つため、非同期ワーカー（スキャン/デコード/ブラウズローダ等）とは明確に境界を設け、
+//!   メッセージ駆動で処理を行います。
+
 use std::io;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -44,6 +53,7 @@ const AUDIO_BLOCK_CAPACITY: usize = 8_192;
 const BROWSE_HYDRATE_BATCH_SIZE: usize = 64;
 const INITIAL_DECODE_PRIME_BLOCKS: usize = 64;
 
+// ブラウズ用のログスナップショットエントリ（永続化インデックスからの読み出し等で使用）
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AlbumLogEntry {
     album_id: AlbumId,
@@ -59,6 +69,7 @@ struct ArtistLogEntry {
     track_count: usize,
 }
 
+// ブラウズ UI のための遅延ハイドレーション状態
 #[derive(Debug, Clone, Default)]
 struct DeferredAlbumListState {
     log_entries: Vec<AlbumLogEntry>,
@@ -72,7 +83,7 @@ struct DeferredArtistListState {
 }
 
 #[derive(Debug, Clone, Default)]
-struct BrowseCacheState {
+pub(crate) struct BrowseCacheState {
     library_revision: u64,
     albums: DeferredAlbumListState,
     track_artists: DeferredArtistListState,
@@ -80,24 +91,32 @@ struct BrowseCacheState {
     composers: DeferredArtistListState,
 }
 
+// 背景ローダからのメッセージ（単一トラック、バッチ、完了マーカー）
 #[derive(Debug)]
-enum BrowseLoaderMessage {
+pub(crate) enum BrowseLoaderMessage {
     Track(crate::core::library::TrackInput),
     TrackBatch(Vec<crate::core::library::TrackInput>),
     Finished { missing_paths: Vec<String> },
 }
 
-struct BrowseLoaderHandle {
+// ブラウズ用のバックグラウンドローダハンドル
+pub(crate) struct BrowseLoaderHandle {
     cancel_requested: Arc<AtomicBool>,
     receiver: Receiver<BrowseLoaderMessage>,
 }
 
 impl BrowseLoaderHandle {
+    /// スレッドを生成して与えられたパス群を検証・TrackInput に変換し、
+    /// バッチ単位でメインスレッドへ送信するローダを起動します。
+    ///
+    /// - `paths` は永続化インデックスなどから得たファイルパスの列。
+    /// - 戻り値はキャンセルフラグと受信チャネルを保持するハンドルです。
     pub fn spawn(paths: Vec<String>) -> Self {
         let (sender, receiver) = mpsc::channel();
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel_requested);
 
+        // ワーカスレッド: ファイル存在チェック -> トラック入力生成 -> バッチ送信
         thread::spawn(move || {
             let mut missing_paths: Vec<String> = Vec::new();
             let mut batch: Vec<crate::core::library::TrackInput> = Vec::new();
@@ -135,11 +154,9 @@ impl BrowseLoaderHandle {
     pub fn cancel(&self) {
         self.cancel_requested.store(true, Ordering::Relaxed);
     }
-
     pub fn drain_messages(&self) -> Vec<BrowseLoaderMessage> {
         let mut messages = Vec::new();
-        // throttle per-poll work to avoid processing an unbounded number of
-        // background loader messages in a single UI frame (prevents freezes)
+        // UI フレーム内での処理量を制限するためバッチ上限を設ける
         for _ in 0..BROWSE_HYDRATE_BATCH_SIZE {
             if let Ok(msg) = self.receiver.try_recv() {
                 messages.push(msg);
@@ -154,13 +171,17 @@ impl BrowseLoaderHandle {
 // Background builder for the full browse cache. Builds a BrowseCacheState
 // from cloned `Library` + `StringInterner` on a worker thread and sends
 // the completed cache back to the main thread for an atomic swap.
-struct BrowseCacheBuilderHandle {
+pub(crate) struct BrowseCacheBuilderHandle {
     cancel_requested: Arc<AtomicBool>,
     receiver: Receiver<BrowseCacheState>,
     target_revision: u64,
 }
 
 impl BrowseCacheBuilderHandle {
+    /// ブラウズ用キャッシュ（アルバム/アーティストの一覧等）をバックグラウンドで構築するビルダを起動する。
+    ///
+    /// ライブラリと文字列インターンをクローンして重い処理をワーカスレッドで実行し、
+    /// 完成した `BrowseCacheState` をメインスレッドに送信する。
     pub fn spawn(library: Library, strings: StringInterner) -> Self {
         let target_revision = library.revision;
         let (sender, receiver) = mpsc::channel();
@@ -258,15 +279,17 @@ impl BrowseCacheBuilderHandle {
         self.cancel_requested.store(true, Ordering::Relaxed);
     }
 
+    /// ワーカが生成したキャッシュ状態をすべて受け取って返す（通常は 1 件）
     pub fn drain_messages(&self) -> Vec<BrowseCacheState> {
         let mut messages = Vec::new();
-        // Only expect a single final message, but drain any that exist
+        // 完成したキャッシュは通常単一だが、複数ある場合はすべて受け取る
         while let Ok(msg) = self.receiver.try_recv() {
             messages.push(msg);
         }
         messages
     }
 
+    /// ビルダが目標としているライブラリ revision（この revision に対してビルド中）を返す
     pub fn target_revision(&self) -> u64 {
         self.target_revision
     }
@@ -374,6 +397,16 @@ impl DeferredArtistListState {
     }
 }
 
+/// アプリケーションの中核を担うファサード構造体。
+///
+/// 主な責務:
+/// - 内部モデル（`Library` / `Queue` / `PlaybackModel` 等）の保持
+/// - バックグラウンドワーカー（スキャン/デコード/ブラウズローダ）の管理
+/// - オーディオデバイスの検出・再設定とバッファのプリフェッチ
+/// - 永続化層との入出力（`save_to_store` / `bootstrap_from_store`）
+///
+/// 設計上、重い処理はワーカスレッドに委譲し、メインスレッドではメッセージをポーリングして
+/// 状態遷移を適用することで UI ブロックを回避しています。
 pub struct AppFacade {
     pub strings: StringInterner,
     pub library: Library,
@@ -411,6 +444,9 @@ pub struct AppFacade {
 
 impl Default for AppFacade {
     fn default() -> Self {
+        // Default 構築: テスト時はデバイス周りをモック的に扱う。
+        // - オーディオ出力は `BufferedAudioOutput` を作成
+        // - デバイスウォッチャは通常起動（テスト時は無効）
         let mut strings = StringInterner::default();
         let favorite_name = strings.intern("favorite");
         let audio_config = if cfg!(test) {
@@ -491,13 +527,19 @@ impl AppFacade {
         )
     }
 
+    /// 簡易なブートサマリ文字列を返す。デバッグ/起動ログ用。
+
     pub fn load_demo_state(&mut self) {
         if self.playlists.selected.is_none() {
             self.playlists.selected = Some(self.playlists.favorite_playlist);
         }
     }
 
+    /// デモ状態を読み込む（テストや初回起動用の簡易ヘルパー）
+
     pub fn save_to_store(&self, store: &JsonStore) -> io::Result<()> {
+        // 永続化: Config / State / Playlists / Artwork / Indices を順に保存する。
+        // 各保存はベストエフォートで行い、失敗した場合は Err を返す。
         let mut config = self.settings.clone();
         config.include_dirs = self.scan.config.include_dirs.clone();
         config.exclude_dirs = self.scan.config.exclude_dirs.clone();
@@ -654,6 +696,8 @@ impl AppFacade {
     }
 
     pub fn bootstrap_from_store(&mut self, store: &JsonStore) -> io::Result<()> {
+        // ブートストラップ: 設定を読み込み、設定された include_dirs があれば
+        // フルスキャンを走らせてライブラリを構築した後に状態を復元する。
         let config = store.load_config()?;
         self.settings = config.clone();
         self.scan.config.include_dirs = config.include_dirs;
@@ -668,10 +712,16 @@ impl AppFacade {
     }
 
     pub fn restore_from_store(&mut self, store: &JsonStore) -> io::Result<()> {
+        // 単純に保存済みの状態を復元する（ライブラリは事前にセットされている想定）
         self.restore_loaded_state(store)
     }
 
     fn restore_loaded_state(&mut self, store: &JsonStore) -> io::Result<()> {
+        // 永続化レイヤからの復元処理:
+        // - 設定の反映
+        // - キュー/再生状態の復元
+        // - プレイリストの復元
+        // - アートワークキャッシュやインデックスの読み込み（ベストエフォート）
         let config = store.load_config()?;
         self.settings = config.clone();
         self.scan.config.include_dirs = config.include_dirs;
@@ -829,7 +879,19 @@ impl AppFacade {
         Ok(())
     }
 
+    /// UI からのコマンドを受け取り処理するメインエントリ。
+    ///
+    /// - 与えられた `AppCommand` を解釈して内部状態を更新する。
+    /// - 必要に応じてワーカー起動やデバイス再初期化、永続化トリガを行う。
+    /// - 発生した副作用を `AppEvent` の列として返すので、呼び出し元（UI）はそれを使って表示更新を行う。
     pub fn handle_command(&mut self, command: AppCommand) -> Vec<AppEvent> {
+        // Entrypoint for command processing: dispatch and side-effect orchestration.
+        // Invariants:
+        // - Handlers must not perform long-blocking work; heavy tasks should be spawned to worker threads.
+        // - Apply model updates before starting workers or emitting events so the UI observes a
+        //   consistent state snapshot.
+        // - The returned `Vec<AppEvent>` should reflect causal ordering of side effects and be
+        //   safe to consume immediately by the UI layer.
         log::info!("handle_command start: {:?}", command);
         let events = match command {
             AppCommand::ClickTrack {
@@ -1097,10 +1159,17 @@ impl AppFacade {
             }
         };
         log::info!("handle_command end: produced {} events", events.len());
+        // Preserve causal ordering: model mutations applied above, events reflect those changes.
         events
     }
 
+    /// 現在の内部状態から UI 描画用の `AppViewModel` を組み立てて返す。
+    ///
+    /// - 軽量な DTO を返すために必要なデータのみを抽出する。
+    /// - 呼び出し中に `ensure_browse_cache_current()` をトリガして、ブラウズキャッシュのバックグラウンド構築を開始する。
+    /// - UI フレーム中に頻繁に呼ばれることを想定しているため、コストを抑えた実装である。
     pub fn view_model(&mut self) -> AppViewModel {
+        // assemble and return a lightweight view model for the UI
         // Capture selection snapshot to detect unexpected overwrites
         let prev_selected_album = self.selected_album;
         let prev_selected_artist = self.selected_artist;
@@ -1173,9 +1242,15 @@ impl AppFacade {
         }
     }
 
+    /// バックグラウンドワーカーをポーリングしてメッセージを処理する。
+    ///
+    /// - デバイスのホットプラグ/デフォルトデバイス変化の検出と処理
+    /// - スキャン/デコード/ブラウズローダーからのメッセージハンドリング
+    /// - ライブラリへのバッチ upsert を制限付きで実行し、UI に更新イベントを返す
+    ///
+    /// この関数はメインスレッドから頻繁に呼ばれることを想定しており、長時間ブロックしないよう
+    /// 1 回の呼び出しで処理するアップサート数やバッチサイズに上限を設けています。
     pub fn poll_background_tasks(&mut self) -> Vec<AppEvent> {
-        // Defer browse-cache rebuilds to `view_model()` so we don't rebuild
-        // the entire cache multiple times while processing background messages.
         let mut events = Vec::new();
         let mut finished = None;
         let poll_start = Instant::now();
@@ -1632,6 +1707,11 @@ impl AppFacade {
     }
 
     fn prepare_audio(&mut self, track_id: TrackId) -> io::Result<()> {
+        // Prepare audio pipeline for the specified `track_id`.
+        //
+        // - 停止中のデコードワーカーをキャンセルし、出力バッファをクリア
+        // - ライブラリから `DecodedSource` を取得し、デコーダで初期ブロックを生成してプリフェッチ
+        // - 必要に応じてシーク位置に応じたスキップブロック数を計算してワーカーを起動
         self.cancel_decode_worker();
         self.audio_output.clear();
         let Some(source) = DecodedSource::from_library(track_id, &self.library) else {

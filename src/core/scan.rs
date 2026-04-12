@@ -1,3 +1,12 @@
+//! Core::scan — ファイルシステムスキャンとメタデータ抽出
+//!
+//! このモジュールは音楽ファイル群の走査（スキャン）を担当します。
+//! ディレクトリを再帰的に探索し、サポートされる音声ファイルを検出、
+//! メタデータ（タグやファイル情報）を抽出して `TrackInput` を生成します。
+//!
+//! 並列解析を用いてタグ抽出のパフォーマンスを高めつつ、探索自体は逐次で行い
+//! 作業負荷の暴発を抑えます。長時間実行される操作はワーカーとして起動できます。
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -67,6 +76,14 @@ pub struct ScanOutcome {
 pub enum ScanWorkerMessage {
     Progress(ScanProgress),
     Finished(ScanOutcome),
+}
+
+impl ScanWorkerMessage {
+    /// Debug / test helper to stringify the message variant if needed.
+    #[allow(dead_code)]
+    pub fn is_finished(&self) -> bool {
+        matches!(self, ScanWorkerMessage::Finished(_))
+    }
 }
 
 pub struct ScanWorkerHandle {

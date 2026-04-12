@@ -1,3 +1,6 @@
+//! UI が消費する ViewModel 型群
+//!
+//! これらの型は UI 描画用に軽量化された DTO で、`AppFacade::view_model()` が組み立てて UI に渡します。
 use crate::core::artwork::ArtworkHandle;
 use crate::core::ids::{AlbumId, ArtistId, PlaylistId, TrackId};
 use crate::core::library::{ArtistKind, DirectoryNodeId};
