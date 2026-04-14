@@ -1,39 +1,4 @@
-/target/
-/releases/
-
-# Logs
-*.log
-**/logs/
-
-# Caches / runtime state
-**/cache/
-**/state/
-data/**/cache/
-data/**/logs/
-data/**/state/
-LRC_Player/data/**/cache/
-LRC_Player/data/**/logs/
-LRC_Player/data/**/state/
-data/cache/
-data/index/
-data/**/index/
-LRC_Player/data/cache/
-LRC_Player/data/index/
-
-# IDE / editor
-.vscode/
-.idea/
-*.swp
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Build artifacts / binaries
-*.exe
-*.dll
-*.so
-*.dylib
-/build/
-/dist/
+target/
+**/*.db
+data/
+node_modules/
