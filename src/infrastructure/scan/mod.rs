@@ -7,16 +7,17 @@ use crate::infrastructure::persistence::MetaCache;
 use anyhow::Result;
 
 pub use self::io_worker::{Progress, ScanHandle, ScanOptions};
+pub use self::scan_worker::ScanWorker;
 
 pub struct ScanCoordinator {
-    worker: io_worker::IoWorkerHandle,
+    worker: ScanWorker,
     _meta: MetaCache,
 }
 
 impl ScanCoordinator {
     pub fn new(meta: MetaCache) -> Self {
-        // spawn io_worker with in-memory DB for now; integration with on-disk DB path can be added
-        let worker = io_worker::spawn_io_worker(None);
+        // spawn ScanWorker with an in-memory DB for now; integration with on-disk DB path can be added
+        let worker = ScanWorker::new();
         Self {
             worker,
             _meta: meta,
@@ -29,14 +30,14 @@ impl ScanCoordinator {
     }
 
     pub fn cancel_scan(&self, handle: &ScanHandle) -> Result<()> {
-        self.worker.cancel(handle)
+        self.worker.cancel_scan(handle)
     }
 
     pub fn subscribe_progress(
         &self,
         handle: &ScanHandle,
     ) -> tokio::sync::broadcast::Receiver<Progress> {
-        self.worker.subscribe(handle)
+        self.worker.subscribe_progress(handle)
     }
 
     pub fn checkpoint_now(&self, _handle: &ScanHandle) -> Result<()> {

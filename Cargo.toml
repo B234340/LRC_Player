@@ -25,5 +25,9 @@ crossbeam-channel = "0.5"
 directories = "4"
 eframe = "0.22"
 
+[target.'cfg(windows)'.dependencies.winapi]
+version = "0.3.9"
+features = ["winuser"]
+
 [dev-dependencies]
 tempfile = "3"

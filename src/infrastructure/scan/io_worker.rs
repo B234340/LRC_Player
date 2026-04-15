@@ -1,5 +1,6 @@
 use crate::infrastructure::dedup::{compute_partial_hash, DedupService};
 use crate::infrastructure::persistence::MetaCache;
+use crate::infrastructure::scan::file_scanner::FileScanner;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -180,11 +181,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
-                WorkerCommand::Start {
-                    id,
-                    paths,
-                    options: _options,
-                } => {
+                WorkerCommand::Start { id, paths, options } => {
                     let (cancel_tx, mut cancel_rx) = oneshot::channel();
                     jobs.lock().await.insert(id, cancel_tx);
 
@@ -198,7 +195,9 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
 
                     let dedup = DedupService::spawn();
                     let db_for_job = db_tx_clone.clone();
+                    let fast_scan = options.fast;
                     tokio::spawn(async move {
+                        let scanner = FileScanner::new();
                         if paths.is_empty() {
                             let total = 5u64;
                             for i in 0..total {
@@ -213,103 +212,128 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                             }
                         } else {
-                            for p in paths.into_iter() {
+                            for path in paths.into_iter() {
                                 if cancel_rx.try_recv().is_ok() {
                                     break;
                                 }
 
-                                let p_clone = p.clone();
-                                let partial_res = tokio::task::spawn_blocking(move || {
-                                    compute_partial_hash(&p_clone, 16)
-                                })
-                                .await;
-                                if let Ok(Ok(partial)) = partial_res {
-                                    let _ = sender.send(Progress {
-                                        scanned: 1,
-                                        parsed: 1,
-                                        registered: 0,
-                                    });
-                                    if let Ok(meta) = std::fs::metadata(&p) {
-                                        let size = meta.len() as i64;
-                                        let mtime = meta
-                                            .modified()
-                                            .ok()
-                                            .and_then(|t| {
-                                                t.duration_since(std::time::UNIX_EPOCH).ok()
-                                            })
-                                            .map(|d| d.as_secs() as i64)
-                                            .unwrap_or(0);
-                                        let norm = p.to_string_lossy().to_string();
-                                        let db_sender = db_for_job.clone();
-                                        let _ = db_sender
-                                            .send(DBCommand::UpsertFile {
-                                                path: p.to_string_lossy().to_string(),
-                                                norm_path: norm.clone(),
-                                                size,
-                                                mtime,
-                                                device: None,
-                                                inode: None,
-                                                stable_key: Some(partial.clone()),
-                                            })
-                                            .await;
+                                let files = scanner.enumerate_paths(&path);
+                                for file_path in files.into_iter() {
+                                    if cancel_rx.try_recv().is_ok() {
+                                        break;
                                     }
 
-                                    let rx = dedup.request_full_hash(p.clone()).await;
-                                    let db_sender_for_task = db_for_job.clone();
-                                    let p_inner = p.clone();
-                                    let _partial_inner = partial.clone();
-                                    let sender_cloned = sender.clone();
-                                    tokio::spawn(async move {
-                                        match rx.await {
-                                            Ok(Ok(full)) => {
-                                                let _ = sender_cloned.send(Progress {
-                                                    scanned: 1,
-                                                    parsed: 1,
-                                                    registered: 1,
-                                                });
-                                                if let Ok(meta) = std::fs::metadata(&p_inner) {
-                                                    let size = meta.len() as i64;
-                                                    let mtime = meta
-                                                        .modified()
-                                                        .ok()
-                                                        .and_then(|t| {
-                                                            t.duration_since(std::time::UNIX_EPOCH)
+                                    let partial_result = tokio::task::spawn_blocking({
+                                        let file_path = file_path.clone();
+                                        move || compute_partial_hash(&file_path, 16)
+                                    })
+                                    .await;
+
+                                    let partial_hash = match partial_result {
+                                        Ok(Ok(hash)) => Some(hash),
+                                        _ => None,
+                                    };
+
+                                    let scanned = 1;
+                                    let parsed = partial_hash.is_some() as u64;
+                                    let registered = if parsed > 0 { 0 } else { 0 };
+                                    let _ = sender.send(Progress {
+                                        scanned,
+                                        parsed,
+                                        registered,
+                                    });
+
+                                    if let Some(partial) = partial_hash.clone() {
+                                        if let Ok(meta) = std::fs::metadata(&file_path) {
+                                            let size = meta.len() as i64;
+                                            let mtime = meta
+                                                .modified()
+                                                .ok()
+                                                .and_then(|t| {
+                                                    t.duration_since(std::time::UNIX_EPOCH).ok()
+                                                })
+                                                .map(|d| d.as_secs() as i64)
+                                                .unwrap_or(0);
+                                            let norm = file_path.to_string_lossy().to_string();
+                                            let db_sender = db_for_job.clone();
+                                            let _ = db_sender
+                                                .send(DBCommand::UpsertFile {
+                                                    path: file_path.to_string_lossy().to_string(),
+                                                    norm_path: norm.clone(),
+                                                    size,
+                                                    mtime,
+                                                    device: None,
+                                                    inode: None,
+                                                    stable_key: Some(partial.clone()),
+                                                })
+                                                .await;
+                                        }
+
+                                        if fast_scan {
+                                            let _ = sender.send(Progress {
+                                                scanned: 1,
+                                                parsed: 1,
+                                                registered: 1,
+                                            });
+                                            continue;
+                                        }
+
+                                        let request_path = file_path.clone();
+                                        let full_rx =
+                                            dedup.request_full_hash(request_path.clone()).await;
+                                        let db_sender_for_task = db_for_job.clone();
+                                        let sender_cloned = sender.clone();
+                                        tokio::spawn(async move {
+                                            match full_rx.await {
+                                                Ok(Ok(full)) => {
+                                                    let _ = sender_cloned.send(Progress {
+                                                        scanned: 1,
+                                                        parsed: 1,
+                                                        registered: 1,
+                                                    });
+                                                    if let Ok(meta) =
+                                                        std::fs::metadata(&request_path)
+                                                    {
+                                                        let size = meta.len() as i64;
+                                                        let mtime = meta
+                                                            .modified()
+                                                            .ok()
+                                                            .and_then(|t| {
+                                                                t.duration_since(
+                                                                    std::time::UNIX_EPOCH,
+                                                                )
                                                                 .ok()
-                                                        })
-                                                        .map(|d| d.as_secs() as i64)
-                                                        .unwrap_or(0);
-                                                    let norm =
-                                                        p_inner.to_string_lossy().to_string();
-                                                    let _ = db_sender_for_task
-                                                        .send(DBCommand::UpsertFile {
-                                                            path: p_inner
-                                                                .to_string_lossy()
-                                                                .to_string(),
-                                                            norm_path: norm.clone(),
-                                                            size,
-                                                            mtime,
-                                                            device: None,
-                                                            inode: None,
-                                                            stable_key: Some(full),
-                                                        })
-                                                        .await;
+                                                            })
+                                                            .map(|d| d.as_secs() as i64)
+                                                            .unwrap_or(0);
+                                                        let norm = request_path
+                                                            .to_string_lossy()
+                                                            .to_string();
+                                                        let _ = db_sender_for_task
+                                                            .send(DBCommand::UpsertFile {
+                                                                path: request_path
+                                                                    .to_string_lossy()
+                                                                    .to_string(),
+                                                                norm_path: norm.clone(),
+                                                                size,
+                                                                mtime,
+                                                                device: None,
+                                                                inode: None,
+                                                                stable_key: Some(full),
+                                                            })
+                                                            .await;
+                                                    }
+                                                }
+                                                Ok(Err(_)) | Err(_) => {
+                                                    let _ = sender_cloned.send(Progress {
+                                                        scanned: 1,
+                                                        parsed: 0,
+                                                        registered: 0,
+                                                    });
                                                 }
                                             }
-                                            Ok(Err(_)) | Err(_) => {
-                                                let _ = sender_cloned.send(Progress {
-                                                    scanned: 1,
-                                                    parsed: 0,
-                                                    registered: 0,
-                                                });
-                                            }
-                                        }
-                                    });
-                                } else {
-                                    let _ = sender.send(Progress {
-                                        scanned: 1,
-                                        parsed: 0,
-                                        registered: 0,
-                                    });
+                                        });
+                                    }
                                 }
                             }
                         }
