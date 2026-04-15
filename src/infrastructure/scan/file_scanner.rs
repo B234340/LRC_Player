@@ -1,3 +1,4 @@
+#[derive(Default)]
 pub struct FileScanner;
 
 impl FileScanner {

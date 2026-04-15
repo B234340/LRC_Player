@@ -1,4 +1,4 @@
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Queue {
     pub track_ids: Vec<String>,
     pub position: Option<usize>,
@@ -6,9 +6,6 @@ pub struct Queue {
 
 impl Queue {
     pub fn new() -> Self {
-        Self {
-            track_ids: Vec::new(),
-            position: None,
-        }
+        Self::default()
     }
 }

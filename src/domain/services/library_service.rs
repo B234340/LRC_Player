@@ -7,3 +7,9 @@ impl LibraryService {
         LibraryService
     }
 }
+
+impl Default for LibraryService {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -2,8 +2,13 @@ use crate::ports::audio_output::{AudioFormat, AudioOutput};
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{bounded, Receiver, Sender};
-use ringbuf::RingBuffer;
 use std::sync::Arc;
+
+// Type aliases to reduce complex type signatures flagged by clippy
+type ArcF32Vec = Arc<Vec<f32>>;
+type ProducerSender = Sender<ArcF32Vec>;
+type ProducerReceiver = Receiver<ArcF32Vec>;
+use ringbuf::RingBuffer;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 
@@ -106,7 +111,7 @@ impl CpalOutput {
         // background writer that owns `prod`. Small capacity avoids unbounded memory growth while
         // remaining mostly non-blocking for the caller via `try_send`.
         let pool = Arc::new(BufferPool::new());
-        let (tx, rx): (Sender<Arc<Vec<f32>>>, Receiver<Arc<Vec<f32>>>) = bounded(16);
+        let (tx, rx): (ProducerSender, ProducerReceiver) = bounded(16);
 
         // spawn writer thread that owns `prod` and drains the channel, pushing into ring buffer
         let pool_clone = pool.clone();
@@ -198,6 +203,8 @@ impl CpalOutput {
         }
     }
 
+    // Default impl will be provided at module scope below.
+
     /// Return a clone of the producer sender so callers can send Arc<Vec<f32>> directly.
     pub fn producer_sender(&self) -> Option<Sender<Arc<Vec<f32>>>> {
         self.producer_tx.clone()
@@ -288,5 +295,11 @@ impl CpalOutput {
     /// Return the selected device name if available (after `start_with_device`).
     pub fn selected_device_name(&self) -> Option<String> {
         self.selected_device_name.clone()
+    }
+}
+
+impl Default for CpalOutput {
+    fn default() -> Self {
+        Self::new()
     }
 }

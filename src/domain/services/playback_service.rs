@@ -7,3 +7,9 @@ impl PlaybackService {
         PlaybackService
     }
 }
+
+impl Default for PlaybackService {
+    fn default() -> Self {
+        Self::new()
+    }
+}

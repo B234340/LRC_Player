@@ -24,8 +24,8 @@ impl StreamConverter {
         taps: usize,
     ) -> Self {
         let incr = src_rate as f64 / dst_rate as f64;
-        let taps = taps.max(4).min(256); // clamp to reasonable range
-                                         // precompute Blackman window
+        let taps = taps.clamp(4, 256); // clamp to reasonable range
+                                       // precompute Blackman window
         let mut window = Vec::with_capacity(taps);
         let n_max = (taps - 1) as f64;
         for n in 0..taps {
@@ -75,41 +75,36 @@ impl StreamConverter {
             mid = src;
         } else if src_channels == 1 && self.dst_channels == 2 {
             // mono -> stereo duplicate
-            for i in 0..frames_in {
-                let v = src[0][i];
+            for &v in src[0].iter().take(frames_in) {
                 mid[0].push(v);
                 mid[1].push(v);
             }
         } else if src_channels as usize > 1 && self.dst_channels == 1 {
             // downmix to mono by averaging
-            for i in 0..frames_in {
-                let mut sum = 0.0f32;
-                for ch in 0..src_channels as usize {
-                    sum += src[ch][i];
-                }
+            for (i, _) in src[0].iter().enumerate().take(frames_in) {
+                let sum: f32 = src.iter().map(|ch| ch[i]).sum();
                 mid[0].push(sum / (src_channels as f32));
             }
         } else if self.dst_channels > src_channels as usize {
             // upmix by repeating channels round-robin
-            for i in 0..frames_in {
-                for dest in 0..self.dst_channels {
+            for (i, _) in src[0].iter().enumerate().take(frames_in) {
+                for (dest, slot) in mid.iter_mut().enumerate().take(self.dst_channels) {
                     let src_ch = dest % (src_channels as usize);
-                    mid[dest].push(src[src_ch][i]);
+                    slot.push(src[src_ch][i]);
                 }
             }
         } else {
             // other cases (e.g., src 6 -> dst 2): take first dst channels
-            for dest in 0..self.dst_channels {
+            for (dest, slot) in mid.iter_mut().enumerate().take(self.dst_channels) {
                 let src_ch = dest.min(src_channels as usize - 1);
-                mid[dest] = src[src_ch].clone();
+                *slot = src[src_ch].clone();
             }
         }
 
         // resample per channel using linear interpolation, keeping continuity using `prev` and `phase`.
         let mut out_channels: Vec<Vec<f32>> = vec![Vec::new(); self.dst_channels];
 
-        for ch in 0..self.dst_channels {
-            let in_chan = &mid[ch];
+        for (ch, in_chan) in mid.iter().enumerate() {
             // construct working input: optional prev sample then current samples
             let mut work: Vec<f32> = Vec::with_capacity(in_chan.len() + 1);
             if let Some(p) = self.prev[ch] {
@@ -131,7 +126,7 @@ impl StreamConverter {
                 let taps_isize = self.taps as isize;
                 let half = taps_isize / 2;
                 for tap in -half..half {
-                    let sample_idx = (idx + tap) as isize;
+                    let sample_idx = idx + tap;
                     let in_val = if sample_idx < 0 {
                         work[0]
                     } else if (sample_idx as usize) < work.len() {
@@ -171,12 +166,12 @@ impl StreamConverter {
             self.phase -= l as f64 - 1.0;
         }
         // re-interleave outputs into provided `out` buffer
-        let out_frames = out_channels.get(0).map(|c| c.len()).unwrap_or(0);
+        let out_frames = out_channels.first().map(|c| c.len()).unwrap_or(0);
         out.clear();
         out.reserve(out_frames * self.dst_channels);
-        for i in 0..out_frames {
-            for ch in 0..self.dst_channels {
-                out.push(out_channels[ch][i]);
+        for (i, _) in out_channels.first().iter().enumerate().take(out_frames) {
+            for ch_samples in out_channels.iter() {
+                out.push(ch_samples[i]);
             }
         }
     }

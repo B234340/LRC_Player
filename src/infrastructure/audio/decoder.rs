@@ -52,7 +52,7 @@ pub fn spawn_decode_to_producer(
                 .unwrap_or(2);
 
             let mut decoder =
-                symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default())?;
+                symphonia::default::get_codecs().make(codec_params, &DecoderOptions::default())?;
 
             // converter from src -> target
             let mut conv = crate::infrastructure::audio::stream_adapter::StreamConverter::new(
@@ -180,7 +180,7 @@ pub fn spawn_decode_stream(
                 .unwrap_or(2);
 
             let mut decoder =
-                symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default())?;
+                symphonia::default::get_codecs().make(codec_params, &DecoderOptions::default())?;
 
             // accumulator for interleaved samples
             let mut acc: Vec<f32> = Vec::new();

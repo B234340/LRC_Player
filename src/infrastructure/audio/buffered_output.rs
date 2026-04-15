@@ -7,3 +7,9 @@ impl BufferedOutput {
         BufferedOutput
     }
 }
+
+impl Default for BufferedOutput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
