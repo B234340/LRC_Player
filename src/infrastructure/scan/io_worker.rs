@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -28,7 +28,6 @@ enum WorkerCommand {
         id: u64,
         paths: Vec<PathBuf>,
         options: ScanOptions,
-        progress_tx: mpsc::Sender<Progress>,
     },
     Cancel {
         id: u64,
@@ -45,25 +44,29 @@ enum DBCommand {
         inode: Option<i64>,
         stable_key: Option<String>,
     },
+    Checkpoint,
 }
 
 /// Handle to control the IO worker. Cloneable.
 #[derive(Clone)]
 pub struct IoWorkerHandle {
     cmd_tx: mpsc::Sender<WorkerCommand>,
+    progress_senders: Arc<Mutex<HashMap<u64, broadcast::Sender<Progress>>>>,
+    db_tx: mpsc::Sender<DBCommand>,
     _inner: Arc<Mutex<()>>, // placeholder for possible shared state
 }
 
 impl IoWorkerHandle {
     pub fn start_scan(&self, paths: Vec<PathBuf>, options: ScanOptions) -> ScanHandle {
         let id = rand::random::<u64>();
-        let (progress_tx, _progress_rx) = mpsc::channel(32);
-        let cmd = WorkerCommand::Start {
-            id,
-            paths,
-            options,
-            progress_tx,
-        };
+        let (progress_tx, _progress_rx) = broadcast::channel(32);
+        let mut senders = self
+            .progress_senders
+            .try_lock()
+            .expect("failed to lock progress_senders in start_scan");
+        senders.insert(id, progress_tx.clone());
+
+        let cmd = WorkerCommand::Start { id, paths, options };
         let _ = self.cmd_tx.try_send(cmd);
         ScanHandle { id }
     }
@@ -77,10 +80,30 @@ impl IoWorkerHandle {
         Ok(())
     }
 
-    pub fn subscribe(&self, _handle: &ScanHandle) -> mpsc::Receiver<Progress> {
-        // For now return a fresh receiver that won't receive events; real implementation should wire per-job channels
-        let (_tx, rx) = mpsc::channel(1);
-        rx
+    pub fn subscribe(&self, handle: &ScanHandle) -> broadcast::Receiver<Progress> {
+        let senders = self
+            .progress_senders
+            .try_lock()
+            .expect("failed to lock progress_senders in subscribe");
+        if let Some(sender) = senders.get(&handle.id) {
+            sender.subscribe()
+        } else {
+            let (tx, rx) = broadcast::channel(1);
+            let _ = tx.send(Progress {
+                scanned: 0,
+                parsed: 0,
+                registered: 0,
+            });
+            rx
+        }
+    }
+
+    pub fn checkpoint_now(&self) -> Result<()> {
+        let cmd = DBCommand::Checkpoint;
+        self.db_tx
+            .try_send(cmd)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(())
     }
 }
 
@@ -89,6 +112,10 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
 
     // DB command channel
     let (db_tx, mut db_rx) = mpsc::channel::<DBCommand>(64);
+
+    // Progress sender map
+    let progress_senders: Arc<Mutex<HashMap<u64, broadcast::Sender<Progress>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // Active job cancellation senders
     let active_jobs: Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>> =
@@ -121,10 +148,13 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                         let _ = m.upsert_file_staging(&path, &norm_path, size, mtime, device, inode, stable_key.as_deref());
                                         staged_count += 1;
                                         if staged_count >= CHECKPOINT_N {
-                                            // checkpoint now
                                             let _ = m.checkpoint();
                                             staged_count = 0;
                                         }
+                                    }
+                                    DBCommand::Checkpoint => {
+                                        let _ = m.checkpoint();
+                                        staged_count = 0;
                                     }
                                 }
                             }
@@ -145,6 +175,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
     });
 
     let jobs = active_jobs.clone();
+    let progress_senders_clone = progress_senders.clone();
     let db_tx_clone = db_tx.clone();
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
@@ -153,56 +184,51 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                     id,
                     paths,
                     options: _options,
-                    progress_tx,
                 } => {
                     let (cancel_tx, mut cancel_rx) = oneshot::channel();
                     jobs.lock().await.insert(id, cancel_tx);
 
-                    // spawn background task for this scan job
+                    let sender = {
+                        let senders = progress_senders_clone.lock().await;
+                        senders
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_else(|| broadcast::channel(1).0)
+                    };
+
                     let dedup = DedupService::spawn();
-                    // clone DB sender for this job so the root sender isn't moved
                     let db_for_job = db_tx_clone.clone();
                     tokio::spawn(async move {
-                        // rebind job-local db sender
-                        let db_tx_clone = db_for_job;
                         if paths.is_empty() {
-                            // fallback simulated scanning
                             let total = 5u64;
                             for i in 0..total {
                                 if cancel_rx.try_recv().is_ok() {
                                     break;
                                 }
-                                let _ = progress_tx
-                                    .send(Progress {
-                                        scanned: i + 1,
-                                        parsed: i,
-                                        registered: i / 2,
-                                    })
-                                    .await;
+                                let _ = sender.send(Progress {
+                                    scanned: i + 1,
+                                    parsed: i,
+                                    registered: i / 2,
+                                });
                                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                             }
                         } else {
-                            // Realistic per-path processing: partial hash -> enqueue full-hash job
                             for p in paths.into_iter() {
                                 if cancel_rx.try_recv().is_ok() {
                                     break;
                                 }
 
-                                // compute partial hash in blocking thread
                                 let p_clone = p.clone();
                                 let partial_res = tokio::task::spawn_blocking(move || {
                                     compute_partial_hash(&p_clone, 16)
                                 })
                                 .await;
                                 if let Ok(Ok(partial)) = partial_res {
-                                    let _ = progress_tx
-                                        .send(Progress {
-                                            scanned: 1,
-                                            parsed: 1,
-                                            registered: 0,
-                                        })
-                                        .await;
-                                    // record partial hash in DB staging via db_tx
+                                    let _ = sender.send(Progress {
+                                        scanned: 1,
+                                        parsed: 1,
+                                        registered: 0,
+                                    });
                                     if let Ok(meta) = std::fs::metadata(&p) {
                                         let size = meta.len() as i64;
                                         let mtime = meta
@@ -214,7 +240,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                             .map(|d| d.as_secs() as i64)
                                             .unwrap_or(0);
                                         let norm = p.to_string_lossy().to_string();
-                                        let db_sender = db_tx_clone.clone();
+                                        let db_sender = db_for_job.clone();
                                         let _ = db_sender
                                             .send(DBCommand::UpsertFile {
                                                 path: p.to_string_lossy().to_string(),
@@ -228,31 +254,19 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                             .await;
                                     }
 
-                                    // request full hash asynchronously
                                     let rx = dedup.request_full_hash(p.clone()).await;
-                                    // prepare clones to move into spawned task without capturing db_tx_clone by reference
-                                    let db_sender_for_task = db_tx_clone.clone();
+                                    let db_sender_for_task = db_for_job.clone();
                                     let p_inner = p.clone();
-                                    let partial_inner = partial.clone();
-                                    let progress_tx_cloned = progress_tx.clone();
-                                    // spawn a task to await full hash without blocking the scan loop
+                                    let _partial_inner = partial.clone();
+                                    let sender_cloned = sender.clone();
                                     tokio::spawn(async move {
                                         match rx.await {
                                             Ok(Ok(full)) => {
-                                                let _ = progress_tx_cloned
-                                                    .send(Progress {
-                                                        scanned: 1,
-                                                        parsed: 1,
-                                                        registered: 1,
-                                                    })
-                                                    .await;
-                                                tracing::info!(
-                                                    "full hash for {:?}: {} partial {}",
-                                                    p_inner,
-                                                    full,
-                                                    partial_inner
-                                                );
-                                                // update DB with full hash
+                                                let _ = sender_cloned.send(Progress {
+                                                    scanned: 1,
+                                                    parsed: 1,
+                                                    registered: 1,
+                                                });
                                                 if let Ok(meta) = std::fs::metadata(&p_inner) {
                                                     let size = meta.len() as i64;
                                                     let mtime = meta
@@ -281,31 +295,24 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                         .await;
                                                 }
                                             }
-                                            Ok(Err(e)) => tracing::warn!(
-                                                "full hash failed for {:?}: {}",
-                                                p_inner,
-                                                e
-                                            ),
-                                            Err(e) => tracing::warn!(
-                                                "full hash receive error for {:?}: {}",
-                                                p_inner,
-                                                e
-                                            ),
+                                            Ok(Err(_)) | Err(_) => {
+                                                let _ = sender_cloned.send(Progress {
+                                                    scanned: 1,
+                                                    parsed: 0,
+                                                    registered: 0,
+                                                });
+                                            }
                                         }
                                     });
                                 } else {
-                                    // partial hash failed; report parsed=0
-                                    let _ = progress_tx
-                                        .send(Progress {
-                                            scanned: 1,
-                                            parsed: 0,
-                                            registered: 0,
-                                        })
-                                        .await;
+                                    let _ = sender.send(Progress {
+                                        scanned: 1,
+                                        parsed: 0,
+                                        registered: 0,
+                                    });
                                 }
                             }
                         }
-                        // job complete — drop progress_tx
                     });
                 }
                 WorkerCommand::Cancel { id } => {
@@ -319,6 +326,8 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
 
     IoWorkerHandle {
         cmd_tx,
+        progress_senders,
+        db_tx,
         _inner: Arc::new(Mutex::new(())),
     }
 }

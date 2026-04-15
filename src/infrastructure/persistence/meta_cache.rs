@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS tracks (
 CREATE TABLE IF NOT EXISTS locations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content_id TEXT REFERENCES tracks(content_id),
-    path TEXT NOT NULL,
+    path TEXT NOT NULL UNIQUE,
     device INTEGER,
     inode INTEGER,
     size INTEGER,
@@ -110,8 +110,8 @@ CREATE TABLE IF NOT EXISTS tracks_staging (
 
 CREATE TABLE IF NOT EXISTS locations_staging (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    content_id TEXT REFERENCES tracks(content_id),
-    path TEXT NOT NULL,
+    content_id TEXT,
+    path TEXT NOT NULL UNIQUE,
     device INTEGER,
     inode INTEGER,
     size INTEGER,
@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS locations_staging (
 
 CREATE TABLE IF NOT EXISTS hashes_staging (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    content_id TEXT REFERENCES tracks(content_id),
+    content_id TEXT,
     algo TEXT,
     full_hash TEXT,
     partial_hash TEXT,
@@ -224,15 +224,206 @@ COMMIT;
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_track(
+        &self,
+        content_id: &str,
+        title: Option<&str>,
+        artist: Option<&str>,
+        album: Option<&str>,
+        canonical_location_id: Option<i64>,
+        created_at: i64,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO tracks (content_id,title,artist,album,canonical_location_id,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(content_id) DO UPDATE SET
+               title=excluded.title,
+               artist=excluded.artist,
+               album=excluded.album,
+               canonical_location_id=excluded.canonical_location_id,
+               created_at=excluded.created_at
+            ",
+            params![
+                content_id,
+                title,
+                artist,
+                album,
+                canonical_location_id,
+                created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_track_staging(
+        &self,
+        content_id: &str,
+        title: Option<&str>,
+        artist: Option<&str>,
+        album: Option<&str>,
+        canonical_location_id: Option<i64>,
+        created_at: i64,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO tracks_staging (content_id,title,artist,album,canonical_location_id,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(content_id) DO UPDATE SET
+               title=excluded.title,
+               artist=excluded.artist,
+               album=excluded.album,
+               canonical_location_id=excluded.canonical_location_id,
+               created_at=excluded.created_at
+            ",
+            params![
+                content_id,
+                title,
+                artist,
+                album,
+                canonical_location_id,
+                created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_location(
+        &self,
+        content_id: &str,
+        path: &str,
+        device: Option<i64>,
+        inode: Option<i64>,
+        size: i64,
+        mtime: i64,
+        last_seen: i64,
+        preferred: bool,
+        available: bool,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO locations (content_id,path,device,inode,size,mtime,last_seen,preferred,available)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(path) DO UPDATE SET
+               content_id=excluded.content_id,
+               device=excluded.device,
+               inode=excluded.inode,
+               size=excluded.size,
+               mtime=excluded.mtime,
+               last_seen=excluded.last_seen,
+               preferred=excluded.preferred,
+               available=excluded.available
+            ",
+            params![
+                content_id,
+                path,
+                device,
+                inode,
+                size,
+                mtime,
+                last_seen,
+                preferred,
+                available,
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_location_staging(
+        &self,
+        content_id: &str,
+        path: &str,
+        device: Option<i64>,
+        inode: Option<i64>,
+        size: i64,
+        mtime: i64,
+        last_seen: i64,
+        preferred: bool,
+        available: bool,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO locations_staging (content_id,path,device,inode,size,mtime,last_seen,preferred,available)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(path) DO UPDATE SET
+               content_id=excluded.content_id,
+               device=excluded.device,
+               inode=excluded.inode,
+               size=excluded.size,
+               mtime=excluded.mtime,
+               last_seen=excluded.last_seen,
+               preferred=excluded.preferred,
+               available=excluded.available
+            ",
+            params![
+                content_id,
+                path,
+                device,
+                inode,
+                size,
+                mtime,
+                last_seen,
+                preferred,
+                available,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_hash(
+        &self,
+        content_id: &str,
+        algo: &str,
+        full_hash: Option<&str>,
+        partial_hash: Option<&str>,
+        computed_at: i64,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO hashes (content_id,algo,full_hash,partial_hash,computed_at)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![content_id, algo, full_hash, partial_hash, computed_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_hash_staging(
+        &self,
+        content_id: &str,
+        algo: &str,
+        full_hash: Option<&str>,
+        partial_hash: Option<&str>,
+        computed_at: i64,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO hashes_staging (content_id,algo,full_hash,partial_hash,computed_at)
+             VALUES (?1,?2,?3,?4,?5)
+             ",
+            params![content_id, algo, full_hash, partial_hash, computed_at],
+        )?;
+        Ok(())
+    }
+
     /// Checkpoint: atomically move staging tables into main tables and clear staging.
     pub fn checkpoint(&self) -> anyhow::Result<()> {
         // Use INSERT OR REPLACE for compatibility with older SQLite builds in test
-        // environments. This will replace rows with the same `path` value.
+        // environments. This will replace rows with the same primary key or unique key.
         let sql = r#"
     BEGIN TRANSACTION;
     INSERT OR REPLACE INTO files (path,norm_path,size,mtime,device,inode,stable_key,tag_title,tag_artist,tag_album,parsed_at,status)
     SELECT path,norm_path,size,mtime,device,inode,stable_key,tag_title,tag_artist,tag_album,parsed_at,status FROM files_staging;
     DELETE FROM files_staging;
+
+    INSERT OR REPLACE INTO tracks (content_id,title,artist,album,canonical_location_id,created_at)
+    SELECT content_id,title,artist,album,canonical_location_id,created_at FROM tracks_staging;
+    DELETE FROM tracks_staging;
+
+    INSERT OR REPLACE INTO locations (content_id,path,device,inode,size,mtime,last_seen,preferred,available)
+    SELECT content_id,path,device,inode,size,mtime,last_seen,preferred,available FROM locations_staging;
+    DELETE FROM locations_staging;
+
+    INSERT INTO hashes (content_id,algo,full_hash,partial_hash,computed_at)
+    SELECT content_id,algo,full_hash,partial_hash,computed_at FROM hashes_staging;
+    DELETE FROM hashes_staging;
     COMMIT;
     "#;
 
@@ -343,5 +534,57 @@ mod tests {
             .expect("upsert file");
         let id = cache.get_file_id("/tmp/song2.mp3").expect("get id");
         assert!(id.is_some());
+    }
+
+    #[test]
+    fn checkpoint_tracks_locations_hashes() {
+        let cache = MetaCache::new(":memory:").expect("create in-memory db");
+
+        cache
+            .upsert_track_staging(
+                "track-1",
+                Some("Song 1"),
+                Some("Artist"),
+                Some("Album"),
+                None,
+                100,
+            )
+            .expect("upsert track staging");
+        cache
+            .upsert_location_staging(
+                "track-1",
+                "/tmp/song1.mp3",
+                None,
+                None,
+                1234,
+                42,
+                1620000000,
+                true,
+                true,
+            )
+            .expect("upsert location staging");
+        cache
+            .upsert_hash_staging("track-1", "sha1", Some("abcdef"), Some("abcd"), 1620000000)
+            .expect("upsert hash staging");
+
+        cache.checkpoint().expect("checkpoint");
+
+        let track_count: i64 = cache
+            .connection()
+            .query_row("SELECT count(*) FROM tracks", [], |r| r.get(0))
+            .expect("count tracks");
+        assert_eq!(track_count, 1);
+
+        let location_count: i64 = cache
+            .connection()
+            .query_row("SELECT count(*) FROM locations", [], |r| r.get(0))
+            .expect("count locations");
+        assert_eq!(location_count, 1);
+
+        let hash_count: i64 = cache
+            .connection()
+            .query_row("SELECT count(*) FROM hashes", [], |r| r.get(0))
+            .expect("count hashes");
+        assert_eq!(hash_count, 1);
     }
 }

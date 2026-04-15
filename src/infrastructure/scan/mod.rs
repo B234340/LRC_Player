@@ -32,12 +32,14 @@ impl ScanCoordinator {
         self.worker.cancel(handle)
     }
 
-    pub fn subscribe_progress(&self, handle: &ScanHandle) -> tokio::sync::mpsc::Receiver<Progress> {
+    pub fn subscribe_progress(
+        &self,
+        handle: &ScanHandle,
+    ) -> tokio::sync::broadcast::Receiver<Progress> {
         self.worker.subscribe(handle)
     }
 
     pub fn checkpoint_now(&self, _handle: &ScanHandle) -> Result<()> {
-        // Placeholder: forward to worker for immediate checkpoint
-        Ok(())
+        self.worker.checkpoint_now()
     }
 }
