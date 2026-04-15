@@ -236,7 +236,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
 
                                     let scanned = 1;
                                     let parsed = partial_hash.is_some() as u64;
-                                    let registered = if parsed > 0 { 0 } else { 0 };
+                                    let registered = 0;
                                     let _ = sender.send(Progress {
                                         scanned,
                                         parsed,

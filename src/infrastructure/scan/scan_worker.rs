@@ -12,7 +12,15 @@ impl ScanWorker {
             inner: spawn_io_worker(None),
         }
     }
+}
 
+impl Default for ScanWorker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScanWorker {
     pub fn start_scan(&self, paths: Vec<std::path::PathBuf>, options: ScanOptions) -> ScanHandle {
         self.inner.start_scan(paths, options)
     }
