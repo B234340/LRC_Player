@@ -4,5 +4,9 @@ pub struct AppVm {
 }
 
 impl AppVm {
-    pub fn new(title: impl Into<String>) -> Self { Self { title: title.into() } }
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+        }
+    }
 }

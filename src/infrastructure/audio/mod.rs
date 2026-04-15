@@ -1,11 +1,10 @@
 pub mod backends;
-pub mod decoder;
-pub mod stream_adapter;
+pub mod buffered_output;
 pub mod cpal_backend;
 pub mod cpal_output;
-pub mod buffered_output;
+pub mod decoder;
 pub mod device_watcher;
-
+pub mod stream_adapter;
 
 // keep existing backend file (if present) accessible through cpal_output wrapper
 #[allow(dead_code)]

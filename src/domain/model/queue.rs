@@ -5,5 +5,10 @@ pub struct Queue {
 }
 
 impl Queue {
-    pub fn new() -> Self { Self { track_ids: Vec::new(), position: None } }
+    pub fn new() -> Self {
+        Self {
+            track_ids: Vec::new(),
+            position: None,
+        }
+    }
 }

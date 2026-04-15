@@ -6,5 +6,7 @@ pub struct Library {
 }
 
 impl Library {
-    pub fn new() -> Self { Self { tracks: Vec::new() } }
+    pub fn new() -> Self {
+        Self { tracks: Vec::new() }
+    }
 }

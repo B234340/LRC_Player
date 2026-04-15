@@ -8,5 +8,7 @@ pub enum PlaybackState {
 }
 
 impl Default for PlaybackState {
-    fn default() -> Self { PlaybackState::Stopped }
+    fn default() -> Self {
+        PlaybackState::Stopped
+    }
 }

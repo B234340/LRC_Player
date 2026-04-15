@@ -3,5 +3,7 @@
 pub struct DeviceWatcher;
 
 impl DeviceWatcher {
-    pub fn start() -> Self { DeviceWatcher }
+    pub fn start() -> Self {
+        DeviceWatcher
+    }
 }

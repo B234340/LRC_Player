@@ -5,5 +5,7 @@ pub struct ScanCoordinator2 {
 }
 
 impl ScanCoordinator2 {
-    pub fn new(meta: MetaCache) -> Self { Self { _meta: meta } }
+    pub fn new(meta: MetaCache) -> Self {
+        Self { _meta: meta }
+    }
 }

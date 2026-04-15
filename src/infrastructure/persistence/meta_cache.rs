@@ -171,7 +171,17 @@ COMMIT;
                parsed_at=excluded.parsed_at,
                status=excluded.status
             ",
-            params![path, norm_path, size, mtime, device, inode, stable_key, now_ts, "enumerated"],
+            params![
+                path,
+                norm_path,
+                size,
+                mtime,
+                device,
+                inode,
+                stable_key,
+                now_ts,
+                "enumerated"
+            ],
         )?;
 
         Ok(())
@@ -231,9 +241,7 @@ COMMIT;
     }
     /// Basic query: get file id by path
     pub fn get_file_id(&self, path: &str) -> anyhow::Result<Option<i64>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM files WHERE path = ?1")?;
+        let mut stmt = self.conn.prepare("SELECT id FROM files WHERE path = ?1")?;
         let mut rows = stmt.query(params![path])?;
         if let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
@@ -259,7 +267,11 @@ mod tests {
         // schema should exist
         let row: i64 = cache
             .connection()
-            .query_row("SELECT count(*) FROM sqlite_master WHERE type='table'", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0),
+            )
             .expect("query sqlite_master");
         assert!(row >= 1);
     }
@@ -270,7 +282,15 @@ mod tests {
 
         // insert into staging
         cache
-            .upsert_file_staging("/tmp/song1.mp3", "/tmp/song1.mp3", 1234, 42, None, None, None)
+            .upsert_file_staging(
+                "/tmp/song1.mp3",
+                "/tmp/song1.mp3",
+                1234,
+                42,
+                None,
+                None,
+                None,
+            )
             .expect("upsert staging");
 
         // ensure staging has 1 row
@@ -311,7 +331,15 @@ mod tests {
     fn upsert_file_and_get_file_id() {
         let cache = MetaCache::new(":memory:").expect("create in-memory db");
         cache
-            .upsert_file("/tmp/song2.mp3", "/tmp/song2.mp3", 4321, 43, None, None, None)
+            .upsert_file(
+                "/tmp/song2.mp3",
+                "/tmp/song2.mp3",
+                4321,
+                43,
+                None,
+                None,
+                None,
+            )
             .expect("upsert file");
         let id = cache.get_file_id("/tmp/song2.mp3").expect("get id");
         assert!(id.is_some());

@@ -1,5 +1,5 @@
-pub mod io_worker;
 pub mod file_scanner;
+pub mod io_worker;
 pub mod scan_coordinator;
 pub mod scan_worker;
 
