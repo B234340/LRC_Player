@@ -56,3 +56,7 @@ jobs:
 
       - name: Release build
         run: cargo build --workspace --all-targets --release --verbose
+
+      - name: Bench smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo bench --all-features -- --nocapture

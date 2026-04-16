@@ -23,7 +23,12 @@ tempfile = { version = "3", optional = true }
 ringbuf = "0.2"
 crossbeam-channel = "0.5"
 directories = "4"
+image = "0.24"
 eframe = "0.22"
+
+[[bin]]
+name = "generate_10k_tracks"
+path = "bench/10k_tracks/generate.rs"
 
 [target.'cfg(windows)'.dependencies.winapi]
 version = "0.3.9"
@@ -31,3 +36,4 @@ features = ["winuser"]
 
 [dev-dependencies]
 tempfile = "3"
+criterion = "0.4"

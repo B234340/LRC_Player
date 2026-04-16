@@ -4,10 +4,26 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    En,
+    Ja,
+    Zh,
+}
+
+impl Default for Language {
+    fn default() -> Self {
+        Language::En
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub resampler_taps: usize,
     pub preferred_output_device: Option<String>,
+    #[serde(default)]
+    pub language: Language,
 }
 
 impl Default for Config {
@@ -15,6 +31,7 @@ impl Default for Config {
         Self {
             resampler_taps: 32,
             preferred_output_device: None,
+            language: Language::default(),
         }
     }
 }

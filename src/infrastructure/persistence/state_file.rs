@@ -1,12 +1,59 @@
-// Placeholder for state_file persistence (current queue, position, last tab)
+use crate::application::dto::StateDto;
+use crate::infrastructure::persistence::json_store::JsonStore;
+use anyhow::{Context, Result};
+use directories::ProjectDirs;
+use std::path::{Path, PathBuf};
 
-pub struct StateFile;
+pub struct StateFile {
+    store: JsonStore,
+}
 
 impl StateFile {
-    pub fn load() -> anyhow::Result<()> {
-        Ok(())
+    fn default_path() -> Result<PathBuf> {
+        let dirs = ProjectDirs::from("com", "example", "lrc_player")
+            .context("unable to determine project directories")?;
+        Ok(dirs.data_dir().join("state.json"))
     }
-    pub fn save() -> anyhow::Result<()> {
-        Ok(())
+
+    pub fn open() -> Result<Self> {
+        let path = Self::default_path()?;
+        Self::open_with_path(path)
+    }
+
+    pub fn open_with_path<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let store = JsonStore::open(path)?;
+        Ok(StateFile { store })
+    }
+
+    pub fn load(&self) -> Result<StateDto> {
+        let state = self.store.load().with_context(|| {
+            format!("loading state file from {}", self.store.path().display())
+        })?;
+        Ok(state)
+    }
+
+    pub fn save(&self, state: &StateDto) -> Result<()> {
+        self.store.save(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn state_file_roundtrips_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let file = StateFile::open_with_path(path).unwrap();
+
+        let original = StateDto {
+            last_tab: Some("playlist".into()),
+        };
+        file.save(&original).unwrap();
+
+        let loaded = file.load().unwrap();
+        assert_eq!(loaded.last_tab, original.last_tab);
     }
 }

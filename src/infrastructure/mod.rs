@@ -1,6 +1,8 @@
 pub mod audio;
+pub mod artwork;
 pub mod decode;
 pub mod dedup;
+pub mod lyrics;
 pub mod persistence;
 pub mod scan;
 

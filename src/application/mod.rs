@@ -1,3 +1,4 @@
+pub mod dto;
 pub mod ports;
 pub mod repositories;
 pub mod usecases;

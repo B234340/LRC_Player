@@ -1,5 +1,6 @@
 pub mod play_track;
 pub mod scan_library;
+pub mod build_app_vm;
 
 pub mod add_to_playlist;
 pub mod select_album;
