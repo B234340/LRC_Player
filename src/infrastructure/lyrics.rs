@@ -52,7 +52,8 @@ impl Lyrics {
                         continue;
                     }
 
-                    let actual_path = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                    let actual_path =
+                        fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
                     if seen.insert(actual_path.clone()) {
                         results.push(actual_path);
                     }
