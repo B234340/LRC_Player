@@ -1,5 +1,5 @@
-pub mod audio;
 pub mod artwork;
+pub mod audio;
 pub mod decode;
 pub mod dedup;
 pub mod lyrics;

@@ -4,18 +4,13 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
+    #[default]
     En,
     Ja,
     Zh,
-}
-
-impl Default for Language {
-    fn default() -> Self {
-        Language::En
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

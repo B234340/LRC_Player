@@ -26,9 +26,10 @@ impl StateFile {
     }
 
     pub fn load(&self) -> Result<StateDto> {
-        let state = self.store.load().with_context(|| {
-            format!("loading state file from {}", self.store.path().display())
-        })?;
+        let state = self
+            .store
+            .load()
+            .with_context(|| format!("loading state file from {}", self.store.path().display()))?;
         Ok(state)
     }
 

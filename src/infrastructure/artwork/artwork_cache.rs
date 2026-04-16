@@ -19,7 +19,9 @@ impl ArtworkImage {
             .with_guessed_format()
             .with_context(|| format!("guessing artwork image format for {}", path.display()))?;
 
-        let format = reader.format().context("unable to determine image format")?;
+        let format = reader
+            .format()
+            .context("unable to determine image format")?;
         let image = reader
             .decode()
             .with_context(|| format!("decoding artwork image {}", path.display()))?;

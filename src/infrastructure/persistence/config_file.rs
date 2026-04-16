@@ -58,6 +58,9 @@ mod tests {
 
         let loaded = file.load().unwrap();
         assert_eq!(loaded.resampler_taps, original.resampler_taps);
-        assert_eq!(loaded.preferred_output_device, original.preferred_output_device);
+        assert_eq!(
+            loaded.preferred_output_device,
+            original.preferred_output_device
+        );
     }
 }

@@ -50,7 +50,10 @@ pub struct GuiApp {
 
 impl GuiApp {
     fn default_app_vm(active_tab: Tab, config: &Config) -> AppVm {
-        let settings = SettingsDto::new(config.preferred_output_device.clone(), config.resampler_taps);
+        let settings = SettingsDto::new(
+            config.preferred_output_device.clone(),
+            config.resampler_taps,
+        );
         let state = StateDto {
             last_tab: Some(active_tab.label().to_string()),
         };
@@ -66,7 +69,7 @@ impl GuiApp {
 
     fn update_app_vm(&mut self) {
         let cfg = Config::load();
-        self.language = cfg.language.clone();
+        self.language = cfg.language;
         self.app_vm = Self::default_app_vm(self.active_tab, &cfg);
     }
 
@@ -94,7 +97,7 @@ impl GuiApp {
             device_filter: String::new(),
             play_path: String::new(),
             taps: cfg.resampler_taps,
-            language: cfg.language.clone(),
+            language: cfg.language,
         }
     }
 }
@@ -270,17 +273,15 @@ impl App for GuiApp {
             }
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.active_tab {
-                Tab::Library => tabs::library_tab::ui(ui, &self.app_vm),
-                Tab::Play => tabs::play_tab::ui(ui, &self.app_vm),
-                Tab::Playlist => tabs::playlist_tab::ui(ui, &self.app_vm),
-                Tab::Album => tabs::album_tab::ui(ui, &self.app_vm),
-                Tab::Artist => tabs::artist_tab::ui(ui, &self.app_vm),
-                Tab::Queue => tabs::queue_tab::ui(ui, &self.app_vm),
-                Tab::Scan => tabs::scan_tab::ui(ui, &self.app_vm),
-                Tab::Settings => tabs::settings_tab::ui(ui, &self.app_vm),
-            }
+        egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
+            Tab::Library => tabs::library_tab::ui(ui, &self.app_vm),
+            Tab::Play => tabs::play_tab::ui(ui, &self.app_vm),
+            Tab::Playlist => tabs::playlist_tab::ui(ui, &self.app_vm),
+            Tab::Album => tabs::album_tab::ui(ui, &self.app_vm),
+            Tab::Artist => tabs::artist_tab::ui(ui, &self.app_vm),
+            Tab::Queue => tabs::queue_tab::ui(ui, &self.app_vm),
+            Tab::Scan => tabs::scan_tab::ui(ui, &self.app_vm),
+            Tab::Settings => tabs::settings_tab::ui(ui, &self.app_vm),
         });
     }
 }

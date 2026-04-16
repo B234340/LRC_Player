@@ -25,17 +25,14 @@ impl Lyrics {
                 continue;
             }
 
-            let mut remainder = line;
-            while let Some(start) = remainder.find('[') {
-                if let Some(end) = remainder[start..].find(']') {
-                    let tag = &remainder[start + 1..start + end];
+            if let Some(start) = line.find('[') {
+                if let Some(end) = line[start..].find(']') {
+                    let tag = &line[start + 1..start + end];
                     if let Some(ms) = parse_timestamp(tag) {
-                        let text = remainder[start + end + 1..].trim().to_string();
+                        let text = line[start + end + 1..].trim().to_string();
                         lines.push(LyricLine { time_ms: ms, text });
-                        break;
                     }
                 }
-                break;
             }
         }
 
@@ -84,9 +81,9 @@ fn parse_timestamp(tag: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use std::fs::File;
     use std::io::Write;
+    use tempfile::tempdir;
 
     #[test]
     fn parse_timestamp_formats() {

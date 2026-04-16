@@ -10,7 +10,14 @@ pub fn build_app_vm(
     library: &LibraryDto,
     queue: QueueVm,
 ) -> AppVm {
-    AppVm::new(title, settings.clone(), state.clone(), playlists, library, queue)
+    AppVm::new(
+        title,
+        settings.clone(),
+        state.clone(),
+        playlists,
+        library,
+        queue,
+    )
 }
 
 #[cfg(test)]
@@ -39,7 +46,10 @@ mod tests {
 
         assert_eq!(vm.title, "LRC Player");
         assert_eq!(vm.active_tab.as_deref(), Some("library"));
-        assert_eq!(vm.settings.preferred_output_device.as_deref(), Some("USB Audio"));
+        assert_eq!(
+            vm.settings.preferred_output_device.as_deref(),
+            Some("USB Audio")
+        );
         assert_eq!(vm.settings.resampler_taps, 64);
         assert_eq!(vm.library.track_count, 42);
         assert_eq!(vm.playlists.len(), 1);

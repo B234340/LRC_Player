@@ -50,8 +50,9 @@ impl JsonStore {
             .with_context(|| format!("serializing json for {}", self.path.display()))?;
         tmp_file.write_all(contents.as_bytes())?;
         tmp_file.sync_all()?;
-        fs::rename(&tmp_path, &self.path)
-            .with_context(|| format!("renaming {} to {}", tmp_path.display(), self.path.display()))?;
+        fs::rename(&tmp_path, &self.path).with_context(|| {
+            format!("renaming {} to {}", tmp_path.display(), self.path.display())
+        })?;
         Ok(())
     }
 }

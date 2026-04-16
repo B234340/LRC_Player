@@ -26,9 +26,10 @@ impl PlaylistsFile {
     }
 
     pub fn load(&self) -> Result<Vec<PlaylistDto>> {
-        let playlists = self.store.load().with_context(|| {
-            format!("loading playlists from {}", self.store.path().display())
-        })?;
+        let playlists = self
+            .store
+            .load()
+            .with_context(|| format!("loading playlists from {}", self.store.path().display()))?;
         Ok(playlists)
     }
 
