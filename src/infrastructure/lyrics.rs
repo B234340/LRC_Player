@@ -42,13 +42,19 @@ impl Lyrics {
 
     pub fn discover_for_track<P: AsRef<Path>>(track_path: P) -> Vec<PathBuf> {
         let mut results = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         let track_path = track_path.as_ref();
         if let Some(parent) = track_path.parent() {
             if let Some(stem) = track_path.file_stem().and_then(|s| s.to_str()) {
                 for ext in ["lrc", "LRC"] {
                     let candidate = parent.join(format!("{}.{}", stem, ext));
-                    if candidate.exists() {
-                        results.push(candidate);
+                    if !candidate.exists() {
+                        continue;
+                    }
+
+                    let actual_path = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                    if seen.insert(actual_path.clone()) {
+                        results.push(actual_path);
                     }
                 }
             }
