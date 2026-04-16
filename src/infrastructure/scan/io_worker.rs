@@ -1,4 +1,4 @@
-use crate::infrastructure::dedup::{compute_partial_hash, DedupService};
+use crate::domain::services::DedupService;
 use crate::infrastructure::persistence::MetaCache;
 use crate::infrastructure::scan::file_scanner::FileScanner;
 use anyhow::Result;
@@ -45,6 +45,21 @@ enum DBCommand {
         inode: Option<i64>,
         stable_key: Option<String>,
     },
+    UpsertTrack {
+        content_id: String,
+        title: Option<String>,
+        artist: Option<String>,
+        album: Option<String>,
+        canonical_location_id: Option<i64>,
+        created_at: i64,
+    },
+    UpsertHash {
+        content_id: String,
+        algo: String,
+        full_hash: Option<String>,
+        partial_hash: Option<String>,
+        computed_at: i64,
+    },
     Checkpoint,
 }
 
@@ -58,7 +73,11 @@ pub struct IoWorkerHandle {
 }
 
 impl IoWorkerHandle {
-    pub fn start_scan(&self, paths: Vec<PathBuf>, options: ScanOptions) -> ScanHandle {
+    pub async fn start_scan(
+        &self,
+        paths: Vec<PathBuf>,
+        options: ScanOptions,
+    ) -> Result<ScanHandle> {
         let id = rand::random::<u64>();
         let (progress_tx, _progress_rx) = broadcast::channel(32);
         let mut senders = self
@@ -68,15 +87,18 @@ impl IoWorkerHandle {
         senders.insert(id, progress_tx.clone());
 
         let cmd = WorkerCommand::Start { id, paths, options };
-        let _ = self.cmd_tx.try_send(cmd);
-        ScanHandle { id }
+        self.cmd_tx
+            .send(cmd)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(ScanHandle { id })
     }
 
-    pub fn cancel(&self, handle: &ScanHandle) -> Result<()> {
+    pub async fn cancel(&self, handle: &ScanHandle) -> Result<()> {
         let cmd = WorkerCommand::Cancel { id: handle.id };
-        // best-effort send
         self.cmd_tx
-            .try_send(cmd)
+            .send(cmd)
+            .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
     }
@@ -99,10 +121,11 @@ impl IoWorkerHandle {
         }
     }
 
-    pub fn checkpoint_now(&self) -> Result<()> {
+    pub async fn checkpoint_now(&self) -> Result<()> {
         let cmd = DBCommand::Checkpoint;
         self.db_tx
-            .try_send(cmd)
+            .send(cmd)
+            .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
     }
@@ -148,15 +171,30 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                     DBCommand::UpsertFile { path, norm_path, size, mtime, device, inode, stable_key } => {
                                         let _ = m.upsert_file_staging(&path, &norm_path, size, mtime, device, inode, stable_key.as_deref());
                                         staged_count += 1;
-                                        if staged_count >= CHECKPOINT_N {
-                                            let _ = m.checkpoint();
-                                            staged_count = 0;
-                                        }
+                                    }
+                                    DBCommand::UpsertTrack { content_id, title, artist, album, canonical_location_id, created_at } => {
+                                        let _ = m.upsert_track_staging(
+                                            &content_id,
+                                            title.as_deref(),
+                                            artist.as_deref(),
+                                            album.as_deref(),
+                                            canonical_location_id,
+                                            created_at,
+                                        );
+                                        staged_count += 1;
+                                    }
+                                    DBCommand::UpsertHash { content_id, algo, full_hash, partial_hash, computed_at } => {
+                                        let _ = m.upsert_hash_staging(&content_id, &algo, full_hash.as_deref(), partial_hash.as_deref(), computed_at);
+                                        staged_count += 1;
                                     }
                                     DBCommand::Checkpoint => {
                                         let _ = m.checkpoint();
                                         staged_count = 0;
                                     }
+                                }
+                                if staged_count >= CHECKPOINT_N {
+                                    let _ = m.checkpoint();
+                                    staged_count = 0;
                                 }
                             }
                         }
@@ -193,7 +231,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                             .unwrap_or_else(|| broadcast::channel(1).0)
                     };
 
-                    let dedup = DedupService::spawn();
+                    let dedup = DedupService::new();
                     let db_for_job = db_tx_clone.clone();
                     let fast_scan = options.fast;
                     tokio::spawn(async move {
@@ -223,9 +261,10 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                         break;
                                     }
 
-                                    let partial_result = tokio::task::spawn_blocking({
-                                        let file_path = file_path.clone();
-                                        move || compute_partial_hash(&file_path, 16)
+                                    let file_path_clone = file_path.clone();
+                                    let dedup_for_partial = dedup.clone();
+                                    let partial_result = tokio::task::spawn_blocking(move || {
+                                        dedup_for_partial.compute_stable_key(&file_path_clone)
                                     })
                                     .await;
 
@@ -267,6 +306,31 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                     stable_key: Some(partial.clone()),
                                                 })
                                                 .await;
+
+                                            let now_ts = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_secs() as i64)
+                                                .unwrap_or(0);
+                                            let _ = db_sender
+                                                .send(DBCommand::UpsertTrack {
+                                                    content_id: partial.clone(),
+                                                    title: None,
+                                                    artist: None,
+                                                    album: None,
+                                                    canonical_location_id: None,
+                                                    created_at: now_ts,
+                                                })
+                                                .await;
+
+                                            let _ = db_sender
+                                                .send(DBCommand::UpsertHash {
+                                                    content_id: partial.clone(),
+                                                    algo: "blake3-partial".to_string(),
+                                                    full_hash: None,
+                                                    partial_hash: Some(partial.clone()),
+                                                    computed_at: now_ts,
+                                                })
+                                                .await;
                                         }
 
                                         if fast_scan {
@@ -279,11 +343,14 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                         }
 
                                         let request_path = file_path.clone();
-                                        let full_rx =
-                                            dedup.request_full_hash(request_path.clone()).await;
                                         let db_sender_for_task = db_for_job.clone();
                                         let sender_cloned = sender.clone();
+                                        let partial_clone = partial.clone();
+                                        let dedup_for_full = dedup.clone();
                                         tokio::spawn(async move {
+                                            let full_rx = dedup_for_full
+                                                .request_full_hash(request_path.clone())
+                                                .await;
                                             match full_rx.await {
                                                 Ok(Ok(full)) => {
                                                     let _ = sender_cloned.send(Progress {
@@ -291,38 +358,23 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                         parsed: 1,
                                                         registered: 1,
                                                     });
-                                                    if let Ok(meta) =
-                                                        std::fs::metadata(&request_path)
-                                                    {
-                                                        let size = meta.len() as i64;
-                                                        let mtime = meta
-                                                            .modified()
-                                                            .ok()
-                                                            .and_then(|t| {
-                                                                t.duration_since(
-                                                                    std::time::UNIX_EPOCH,
-                                                                )
-                                                                .ok()
-                                                            })
-                                                            .map(|d| d.as_secs() as i64)
-                                                            .unwrap_or(0);
-                                                        let norm = request_path
-                                                            .to_string_lossy()
-                                                            .to_string();
-                                                        let _ = db_sender_for_task
-                                                            .send(DBCommand::UpsertFile {
-                                                                path: request_path
-                                                                    .to_string_lossy()
-                                                                    .to_string(),
-                                                                norm_path: norm.clone(),
-                                                                size,
-                                                                mtime,
-                                                                device: None,
-                                                                inode: None,
-                                                                stable_key: Some(full),
-                                                            })
-                                                            .await;
-                                                    }
+                                                    let _ = db_sender_for_task
+                                                        .send(DBCommand::UpsertHash {
+                                                            content_id: partial_clone.clone(),
+                                                            algo: "blake3-full".to_string(),
+                                                            full_hash: Some(full.clone()),
+                                                            partial_hash: Some(
+                                                                partial_clone.clone(),
+                                                            ),
+                                                            computed_at:
+                                                                std::time::SystemTime::now()
+                                                                    .duration_since(
+                                                                        std::time::UNIX_EPOCH,
+                                                                    )
+                                                                    .map(|d| d.as_secs() as i64)
+                                                                    .unwrap_or(0),
+                                                        })
+                                                        .await;
                                                 }
                                                 Ok(Err(_)) | Err(_) => {
                                                     let _ = sender_cloned.send(Progress {
@@ -333,6 +385,29 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                 }
                                             }
                                         });
+                                    } else if let Ok(meta) = std::fs::metadata(&file_path) {
+                                        let size = meta.len() as i64;
+                                        let mtime = meta
+                                            .modified()
+                                            .ok()
+                                            .and_then(|t| {
+                                                t.duration_since(std::time::UNIX_EPOCH).ok()
+                                            })
+                                            .map(|d| d.as_secs() as i64)
+                                            .unwrap_or(0);
+                                        let norm = file_path.to_string_lossy().to_string();
+                                        let db_sender = db_for_job.clone();
+                                        let _ = db_sender
+                                            .send(DBCommand::UpsertFile {
+                                                path: file_path.to_string_lossy().to_string(),
+                                                norm_path: norm.clone(),
+                                                size,
+                                                mtime,
+                                                device: None,
+                                                inode: None,
+                                                stable_key: None,
+                                            })
+                                            .await;
                                     }
                                 }
                             }
@@ -359,12 +434,52 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+    use tokio::time::{sleep, timeout, Duration};
 
     #[tokio::test]
     async fn spawn_and_start() {
         let w = spawn_io_worker(None);
-        let handle = w.start_scan(vec![], ScanOptions { fast: true });
-        let res = w.cancel(&handle);
+        let handle = w
+            .start_scan(vec![], ScanOptions { fast: true })
+            .await
+            .expect("start scan");
+        let res = w.cancel(&handle).await;
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_writes_scanned_file_to_meta_cache() {
+        let db_dir = tempdir().unwrap();
+        let db_path = db_dir.path().join("scan.db");
+        let scan_dir = tempdir().unwrap();
+        let test_file = scan_dir.path().join("track.mp3");
+        let mut file = File::create(&test_file).unwrap();
+        use std::io::Write;
+        file.write_all(b"test audio content").unwrap();
+
+        let worker = spawn_io_worker(Some(db_path.clone()));
+        let handle = worker
+            .start_scan(
+                vec![scan_dir.path().to_path_buf()],
+                ScanOptions { fast: true },
+            )
+            .await
+            .expect("start scan");
+        let mut progress_rx = worker.subscribe(&handle);
+
+        let _ = timeout(Duration::from_secs(3), progress_rx.recv())
+            .await
+            .expect("expected at least one progress event");
+
+        worker.checkpoint_now().await.expect("checkpoint send");
+        sleep(Duration::from_secs(1)).await;
+
+        let cache = MetaCache::new(db_path).expect("open db");
+        let id = cache
+            .get_file_id(test_file.to_string_lossy().as_ref())
+            .expect("query file id");
+        assert!(id.is_some(), "scanned file should appear in metadata cache");
     }
 }

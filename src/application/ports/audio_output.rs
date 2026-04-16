@@ -1,5 +1,11 @@
-// Application-level port for audio output
+use crate::ports::audio_output::{AudioFormat, AudioOutput};
 
-pub trait AudioOutputPort {
-    fn start(&mut self) -> anyhow::Result<()>;
-}
+/// Application-level port for audio output. This is a thin abstraction over the
+/// lower-level cross-cutting audio output trait used by the infrastructure.
+pub trait AudioOutputPort: AudioOutput {}
+
+impl<T: AudioOutput> AudioOutputPort for T {}
+
+pub type AppAudioFormat = AudioFormat;
+
+pub use crate::ports::audio_output::SampleFormat;

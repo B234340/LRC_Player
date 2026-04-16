@@ -5,6 +5,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 
+#[derive(Clone, Debug)]
 pub struct DedupService {
     tx: mpsc::Sender<(PathBuf, oneshot::Sender<Result<String>>)>,
 }

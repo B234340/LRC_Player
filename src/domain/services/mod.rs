@@ -5,4 +5,5 @@ pub mod dedup_service;
 pub mod playlist_service;
 
 pub use dedup_service::*;
+pub use playback_service::*;
 pub use playlist_service::*;

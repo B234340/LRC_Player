@@ -21,20 +21,24 @@ impl Default for ScanWorker {
 }
 
 impl ScanWorker {
-    pub fn start_scan(&self, paths: Vec<std::path::PathBuf>, options: ScanOptions) -> ScanHandle {
-        self.inner.start_scan(paths, options)
+    pub async fn start_scan(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        options: ScanOptions,
+    ) -> Result<ScanHandle> {
+        self.inner.start_scan(paths, options).await
     }
 
-    pub fn cancel_scan(&self, handle: &ScanHandle) -> Result<()> {
-        self.inner.cancel(handle)
+    pub async fn cancel_scan(&self, handle: &ScanHandle) -> Result<()> {
+        self.inner.cancel(handle).await
     }
 
     pub fn subscribe_progress(&self, handle: &ScanHandle) -> broadcast::Receiver<Progress> {
         self.inner.subscribe(handle)
     }
 
-    pub fn checkpoint_now(&self) -> Result<()> {
-        self.inner.checkpoint_now()
+    pub async fn checkpoint_now(&self) -> Result<()> {
+        self.inner.checkpoint_now().await
     }
 }
 
@@ -52,7 +56,10 @@ mod tests {
         File::create(root.join("track.mp3")).unwrap();
 
         let worker = ScanWorker::new();
-        let handle = worker.start_scan(vec![root.to_path_buf()], ScanOptions { fast: true });
+        let handle = worker
+            .start_scan(vec![root.to_path_buf()], ScanOptions { fast: true })
+            .await
+            .expect("start scan");
         let mut rx = worker.subscribe_progress(&handle);
 
         let progress = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;

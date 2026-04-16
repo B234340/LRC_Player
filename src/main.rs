@@ -114,11 +114,10 @@ async fn main() -> anyhow::Result<()> {
                 let paths = cli.scan.clone();
                 let pb: Vec<_> = paths.into_iter().collect();
                 let opts = ScanOptions { fast: false };
-                let handle = coordinator.start_scan(pb, opts);
+                let handle = coordinator.start_scan(pb, opts).await?;
                 tracing::info!("started initial scan: id={}", handle.id);
             }
 
-            // demo play (runs in-process when server instance)
             if let Some(play_path) = cli.play.clone() {
                 tracing::info!("play demo requested: {:?}", play_path);
                 // Start output first so we can hand the producer sender and pool to the decoder
@@ -175,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("received IPC ScanRequest: {:?}", req.paths);
                 let paths = req.paths.into_iter().map(PathBuf::from).collect();
                 let opts = ScanOptions { fast: false };
-                let handle = coordinator.start_scan(paths, opts);
+                let handle = coordinator.start_scan(paths, opts).await?;
                 tracing::info!("started scan from IPC: id={}", handle.id);
             }
         }

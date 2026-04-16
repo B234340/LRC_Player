@@ -203,6 +203,21 @@ impl CpalOutput {
         }
     }
 
+    /// List available output device names for the default host.
+    pub fn available_device_names() -> Vec<String> {
+        let host = cpal::default_host();
+        match host.output_devices() {
+            Ok(devs) => devs.filter_map(|d| d.name().ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Return the name of the default output device if available.
+    pub fn default_device_name() -> Option<String> {
+        let host = cpal::default_host();
+        host.default_output_device().and_then(|d| d.name().ok())
+    }
+
     // Default impl will be provided at module scope below.
 
     /// Return a clone of the producer sender so callers can send Arc<Vec<f32>> directly.
