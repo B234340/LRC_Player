@@ -3,13 +3,19 @@ use crate::infrastructure::persistence::MetaCache;
 use crate::infrastructure::scan::file_scanner::FileScanner;
 use anyhow::Result;
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::default::get_probe;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
     pub fast: bool,
+    pub excludes: Vec<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +76,48 @@ pub struct IoWorkerHandle {
     progress_senders: Arc<Mutex<HashMap<u64, broadcast::Sender<Progress>>>>,
     db_tx: mpsc::Sender<DBCommand>,
     _inner: Arc<Mutex<()>>, // placeholder for possible shared state
+}
+
+fn extract_audio_tags(path: &PathBuf) -> (Option<String>, Option<String>, Option<String>) {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (None, None, None),
+    };
+
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut probe = match get_probe().format(
+        &Default::default(),
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    ) {
+        Ok(p) => p,
+        Err(_) => return (None, None, None),
+    };
+
+    let mut title = None;
+    let mut artist = None;
+    let mut album = None;
+
+    if let Some(metadata) = probe.format.metadata().current() {
+        for tag in metadata.tags() {
+            let key = tag.key.to_string().to_lowercase();
+            match key.as_str() {
+                "title" | "tracktitle" | "track title" => {
+                    title.get_or_insert_with(|| tag.value.to_string());
+                }
+                "artist" | "performer" | "albumartist" => {
+                    artist.get_or_insert_with(|| tag.value.to_string());
+                }
+                "album" | "album title" => {
+                    album.get_or_insert_with(|| tag.value.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (title, artist, album)
 }
 
 impl IoWorkerHandle {
@@ -233,7 +281,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
 
                     let dedup = DedupService::new();
                     let db_for_job = db_tx_clone.clone();
-                    let fast_scan = options.fast;
+                    let _fast_scan = options.fast;
                     tokio::spawn(async move {
                         let scanner = FileScanner::new();
                         if paths.is_empty() {
@@ -255,7 +303,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                     break;
                                 }
 
-                                let files = scanner.enumerate_paths(&path);
+                                let files = scanner.enumerate_paths(&path, &options.excludes);
                                 for file_path in files.into_iter() {
                                     if cancel_rx.try_recv().is_ok() {
                                         break;
@@ -307,6 +355,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                 })
                                                 .await;
 
+                                            let (title, artist, album) = extract_audio_tags(&file_path);
                                             let now_ts = std::time::SystemTime::now()
                                                 .duration_since(std::time::UNIX_EPOCH)
                                                 .map(|d| d.as_secs() as i64)
@@ -314,9 +363,9 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                             let _ = db_sender
                                                 .send(DBCommand::UpsertTrack {
                                                     content_id: partial.clone(),
-                                                    title: None,
-                                                    artist: None,
-                                                    album: None,
+                                                    title,
+                                                    artist,
+                                                    album,
                                                     canonical_location_id: None,
                                                     created_at: now_ts,
                                                 })
@@ -332,59 +381,6 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                 })
                                                 .await;
                                         }
-
-                                        if fast_scan {
-                                            let _ = sender.send(Progress {
-                                                scanned: 1,
-                                                parsed: 1,
-                                                registered: 1,
-                                            });
-                                            continue;
-                                        }
-
-                                        let request_path = file_path.clone();
-                                        let db_sender_for_task = db_for_job.clone();
-                                        let sender_cloned = sender.clone();
-                                        let partial_clone = partial.clone();
-                                        let dedup_for_full = dedup.clone();
-                                        tokio::spawn(async move {
-                                            let full_rx = dedup_for_full
-                                                .request_full_hash(request_path.clone())
-                                                .await;
-                                            match full_rx.await {
-                                                Ok(Ok(full)) => {
-                                                    let _ = sender_cloned.send(Progress {
-                                                        scanned: 1,
-                                                        parsed: 1,
-                                                        registered: 1,
-                                                    });
-                                                    let _ = db_sender_for_task
-                                                        .send(DBCommand::UpsertHash {
-                                                            content_id: partial_clone.clone(),
-                                                            algo: "blake3-full".to_string(),
-                                                            full_hash: Some(full.clone()),
-                                                            partial_hash: Some(
-                                                                partial_clone.clone(),
-                                                            ),
-                                                            computed_at:
-                                                                std::time::SystemTime::now()
-                                                                    .duration_since(
-                                                                        std::time::UNIX_EPOCH,
-                                                                    )
-                                                                    .map(|d| d.as_secs() as i64)
-                                                                    .unwrap_or(0),
-                                                        })
-                                                        .await;
-                                                }
-                                                Ok(Err(_)) | Err(_) => {
-                                                    let _ = sender_cloned.send(Progress {
-                                                        scanned: 1,
-                                                        parsed: 0,
-                                                        registered: 0,
-                                                    });
-                                                }
-                                            }
-                                        });
                                     } else if let Ok(meta) = std::fs::metadata(&file_path) {
                                         let size = meta.len() as i64;
                                         let mtime = meta
@@ -442,7 +438,13 @@ mod tests {
     async fn spawn_and_start() {
         let w = spawn_io_worker(None);
         let handle = w
-            .start_scan(vec![], ScanOptions { fast: true })
+            .start_scan(
+                vec![],
+                ScanOptions {
+                    fast: true,
+                    excludes: Vec::new(),
+                },
+            )
             .await
             .expect("start scan");
         let res = w.cancel(&handle).await;
@@ -463,7 +465,10 @@ mod tests {
         let handle = worker
             .start_scan(
                 vec![scan_dir.path().to_path_buf()],
-                ScanOptions { fast: true },
+                ScanOptions {
+                    fast: true,
+                    excludes: Vec::new(),
+                },
             )
             .await
             .expect("start scan");

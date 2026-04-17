@@ -9,7 +9,9 @@ pub async fn scan_paths<G: ScanGateway>(
     paths: Vec<PathBuf>,
     fast: bool,
 ) -> Result<ScanHandle> {
-    gateway.start_scan(paths, ScanOptions { fast }).await
+    gateway
+        .start_scan(paths, ScanOptions { fast, excludes: Vec::new() })
+        .await
 }
 
 #[cfg(test)]

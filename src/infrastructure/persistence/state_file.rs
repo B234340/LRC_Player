@@ -51,6 +51,17 @@ mod tests {
 
         let original = StateDto {
             last_tab: Some("playlist".into()),
+            last_play_path: Some("/tmp/track1.mp3".into()),
+            last_play_position_ms: Some(120_000),
+            last_scan_status: None,
+            scan_scanned: None,
+            scan_parsed: None,
+            scan_registered: None,
+            scan_targets: Vec::new(),
+            scan_excludes: Vec::new(),
+            queue_tracks: vec!["/tmp/track1.mp3".into(), "/tmp/track2.mp3".into()],
+            selected_queue_index: Some(1),
+            favorite_directories: Vec::new(),
         };
         file.save(&original).unwrap();
 

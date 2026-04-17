@@ -6,8 +6,6 @@ pub struct StreamConverter {
     _src_channels: usize,
     _dst_rate: u32,
     dst_channels: usize,
-    taps: usize,
-    window: Vec<f32>,
     // per-target-channel previous sample for continuity
     prev: Vec<Option<f32>>,
     // phase in input-sample units relative to working_input start
@@ -21,27 +19,15 @@ impl StreamConverter {
         src_channels: u16,
         dst_rate: u32,
         dst_channels: u16,
-        taps: usize,
+        _taps: usize,
     ) -> Self {
         let incr = src_rate as f64 / dst_rate as f64;
-        let taps = taps.clamp(4, 256); // clamp to reasonable range
-                                       // precompute Blackman window
-        let mut window = Vec::with_capacity(taps);
-        let n_max = (taps - 1) as f64;
-        for n in 0..taps {
-            let n_f = n as f64;
-            let w = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * n_f / n_max).cos()
-                + 0.08 * (4.0 * std::f64::consts::PI * n_f / n_max).cos();
-            window.push(w as f32);
-        }
 
         StreamConverter {
             _src_rate: src_rate,
             _src_channels: src_channels as usize,
             _dst_rate: dst_rate,
             dst_channels: dst_channels as usize,
-            taps,
-            window,
             prev: vec![None; dst_channels as usize],
             phase: 0.0,
             incr,
@@ -101,78 +87,106 @@ impl StreamConverter {
             }
         }
 
-        // resample per channel using linear interpolation, keeping continuity using `prev` and `phase`.
-        let mut out_channels: Vec<Vec<f32>> = vec![Vec::new(); self.dst_channels];
-
+        // Build work buffers with previous-sample continuity.
+        let mut work_channels: Vec<Vec<f32>> = Vec::with_capacity(self.dst_channels);
         for (ch, in_chan) in mid.iter().enumerate() {
-            // construct working input: optional prev sample then current samples
-            let mut work: Vec<f32> = Vec::with_capacity(in_chan.len() + 1);
+            let mut work: Vec<f32> = Vec::with_capacity(in_chan.len() + 2);
             if let Some(p) = self.prev[ch] {
                 work.push(p);
             }
             work.extend_from_slice(in_chan);
-
-            let l = work.len();
-            // generate output samples while we have idx+1 < l
-            // Use windowed-sinc interpolation (higher-quality) with configurable taps
-            while (self.phase.floor() as usize) + 1 < l {
-                let pos = self.phase;
-                let idx = pos.floor() as isize;
-                let frac = pos - idx as f64;
-
-                // accumulate using windowed sinc
-                let mut sum = 0.0f32;
-                let mut norm = 0.0f32;
-                let taps_isize = self.taps as isize;
-                let half = taps_isize / 2;
-                for tap in -half..half {
-                    let sample_idx = idx + tap;
-                    let in_val = if sample_idx < 0 {
-                        work[0]
-                    } else if (sample_idx as usize) < work.len() {
-                        work[sample_idx as usize]
-                    } else {
-                        work[work.len() - 1]
-                    };
-                    let x = (tap as f64) - frac;
-                    // sinc(pi*x)
-                    let sinc = if x == 0.0 {
-                        1.0
-                    } else {
-                        (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
-                    };
-                    // window from precomputed table
-                    let n = (tap + half) as usize;
-                    let w = self.window[n] as f64;
-                    let coeff = (sinc * w) as f32;
-                    sum += in_val * coeff;
-                    norm += coeff.abs();
-                }
-                if norm > 0.0 {
-                    sum /= norm;
-                }
-                out_channels[ch].push(sum);
-                self.phase += self.incr;
+            if let Some(last) = in_chan.last() {
+                // Repeat the final sample for interpolation padding.
+                work.push(*last);
             }
-
-            // store last sample for continuity (last real sample in this chunk)
-            if !in_chan.is_empty() {
-                self.prev[ch] = Some(*in_chan.last().unwrap());
-            }
-
-            // adjust phase for next chunk: phase relative to next working input start
-            // current working input had length L = prev? + frames_in, and its last index is L-1 which
-            // corresponds to next chunk's prev sample. So subtract (L - 1) to rebase phase.
-            self.phase -= l as f64 - 1.0;
+            work_channels.push(work);
         }
+
+        let work_len = work_channels.first().map(|c| c.len()).unwrap_or(0);
+        if work_len < 2 {
+            for (ch, in_chan) in mid.iter().enumerate() {
+                if let Some(last) = in_chan.last() {
+                    self.prev[ch] = Some(*last);
+                }
+            }
+            return;
+        }
+
+        // Compute output positions once and apply to all channels to keep channel sync.
+        let mut positions: Vec<f64> = Vec::new();
+        let mut pos = self.phase;
+        while pos + 1.0 < work_len as f64 {
+            positions.push(pos);
+            pos += self.incr;
+        }
+
+        let mut out_channels: Vec<Vec<f32>> =
+            vec![Vec::with_capacity(positions.len()); self.dst_channels];
+        for (ch, work) in work_channels.iter().enumerate() {
+            for &p in positions.iter() {
+                let idx = p.floor() as usize;
+                let frac = (p - idx as f64) as f32;
+                let a = work[idx];
+                let b = work[idx + 1];
+                out_channels[ch].push(a + (b - a) * frac);
+            }
+        }
+
+        self.phase = pos - (work_len as f64 - 1.0);
+
+        // store last sample for continuity (last real sample in this chunk)
+        for (ch, in_chan) in mid.iter().enumerate() {
+            if let Some(last) = in_chan.last() {
+                self.prev[ch] = Some(*last);
+            }
+        }
+
         // re-interleave outputs into provided `out` buffer
         let out_frames = out_channels.first().map(|c| c.len()).unwrap_or(0);
         out.clear();
         out.reserve(out_frames * self.dst_channels);
-        for (i, _) in out_channels.first().iter().enumerate().take(out_frames) {
+        for (i, _) in out_channels[0].iter().enumerate().take(out_frames) {
             for ch_samples in out_channels.iter() {
                 out.push(ch_samples[i]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamConverter;
+
+    #[test]
+    fn process_preserves_frame_count_for_same_rate_same_channels() {
+        let mut conv = StreamConverter::new(44100, 2, 44100, 2, 32);
+        let samples: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let mut out = Vec::new();
+        conv.process(&samples, 2, 44100, &mut out);
+
+        assert_eq!(out.len(), samples.len());
+        assert_eq!(out, samples);
+    }
+
+    #[test]
+    fn process_preserves_frame_count_for_mono_to_stereo() {
+        let mut conv = StreamConverter::new(44100, 1, 44100, 2, 32);
+        let samples: Vec<f32> = vec![0.0, 0.5, -0.5, 1.0];
+        let mut out = Vec::new();
+        conv.process(&samples, 1, 44100, &mut out);
+
+        assert_eq!(out.len(), samples.len() * 2);
+        assert_eq!(out, vec![0.0, 0.0, 0.5, 0.5, -0.5, -0.5, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn process_resamples_down_by_half_at_same_position() {
+        let mut conv = StreamConverter::new(44100, 1, 22050, 1, 32);
+        let samples: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let mut out = Vec::new();
+        conv.process(&samples, 1, 44100, &mut out);
+
+        assert!(out.len() < samples.len());
+        assert_eq!(out.len(), 4);
     }
 }

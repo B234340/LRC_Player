@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("acquired single-instance lock, starting server");
 
             // create MetaCache and ScanCoordinator
-            let meta = MetaCache::new(":memory:")?;
+            let meta = MetaCache::open_default()?;
             let coordinator = ScanCoordinator::new(meta);
 
             // channel for IPC -> scan coordinator
@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
             if !cli.scan.is_empty() {
                 let paths = cli.scan.clone();
                 let pb: Vec<_> = paths.into_iter().collect();
-                let opts = ScanOptions { fast: false };
+                let opts = ScanOptions { fast: false, excludes: Vec::new() };
                 let handle = coordinator.start_scan(pb, opts).await?;
                 tracing::info!("started initial scan: id={}", handle.id);
             }
@@ -173,7 +173,8 @@ async fn main() -> anyhow::Result<()> {
             while let Some(req) = rx.recv().await {
                 tracing::info!("received IPC ScanRequest: {:?}", req.paths);
                 let paths = req.paths.into_iter().map(PathBuf::from).collect();
-                let opts = ScanOptions { fast: false };
+                let excludes = req.excludes.into_iter().map(PathBuf::from).collect();
+                let opts = ScanOptions { fast: false, excludes };
                 let handle = coordinator.start_scan(paths, opts).await?;
                 tracing::info!("started scan from IPC: id={}", handle.id);
             }
@@ -186,7 +187,11 @@ async fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect();
-                let req = ipc_mod::ScanRequest { paths };
+                let req = ipc_mod::ScanRequest {
+                    paths,
+                    excludes: Vec::new(),
+                    cancel: false,
+                };
                 ipc_mod::send_scan_request(&socket, &req).await?;
                 tracing::info!("scan request sent");
             } else {

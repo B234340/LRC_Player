@@ -49,27 +49,49 @@ impl SymphoniaDecoder {
             symphonia::default::get_codecs().make(codec_params, &DecoderOptions::default())?;
         let mut samples: Vec<f32> = Vec::new();
 
-        loop {
-            match format.next_packet() {
-                Ok(packet) => match decoder.decode(&packet) {
-                    Ok(audio_buf) => {
-                        let frames = audio_buf.frames();
-                        let mut sb = SampleBuffer::<f32>::new(
-                            frames as symphonia::core::units::Duration,
-                            *audio_buf.spec(),
-                        );
-                        sb.copy_interleaved_ref(audio_buf);
-                        samples.extend_from_slice(sb.samples());
-                    }
-                    Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-                    Err(e) => return Err(anyhow::anyhow!(e.to_string())),
-                },
-                Err(symphonia::core::errors::Error::IoError(_)) => break,
+        while let Ok(packet) = format.next_packet() {
+            match decoder.decode(&packet) {
+                Ok(audio_buf) => {
+                    let frames = audio_buf.frames();
+                    let mut sb = SampleBuffer::<f32>::new(
+                        frames as symphonia::core::units::Duration,
+                        *audio_buf.spec(),
+                    );
+                    sb.copy_interleaved_ref(audio_buf);
+                    samples.extend_from_slice(sb.samples());
+                }
+                Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
                 Err(e) => return Err(anyhow::anyhow!(e.to_string())),
             }
         }
 
-        Ok(DecodedSource::new(samples, sample_rate, channels))
+        let mut title = None;
+        let mut artist = None;
+        let mut album = None;
+
+        if let Some(metadata) = format.metadata().current() {
+            for tag in metadata.tags() {
+                if let symphonia::core::meta::Value::String(value) = &tag.value {
+                    let key = tag.key.to_lowercase();
+                    if key == "title" {
+                        let _ = title.get_or_insert_with(|| value.clone());
+                    } else if key == "artist" {
+                        let _ = artist.get_or_insert_with(|| value.clone());
+                    } else if key == "album" {
+                        let _ = album.get_or_insert_with(|| value.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(DecodedSource::with_metadata(
+            samples,
+            sample_rate,
+            channels,
+            title,
+            artist,
+            album,
+        ))
     }
 }
 

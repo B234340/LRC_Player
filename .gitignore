@@ -2,3 +2,5 @@ target/
 **/*.db
 data/
 node_modules/
+bench_tracks/
+.github/workflows/

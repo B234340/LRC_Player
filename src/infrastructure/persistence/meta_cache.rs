@@ -1,9 +1,13 @@
+use crate::application::dto::LibraryDirectoryDto;
 use anyhow::Context;
+use directories::ProjectDirs;
 use rusqlite::{params, Connection, OpenFlags};
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
 pub struct MetaCache {
     conn: Connection,
+    path: PathBuf,
 }
 
 impl MetaCache {
@@ -24,7 +28,10 @@ impl MetaCache {
         conn.pragma_update(None, "synchronous", "NORMAL")
             .context("set synchronous to NORMAL")?;
 
-        let cache = MetaCache { conn };
+        let cache = MetaCache {
+            conn,
+            path: path.to_path_buf(),
+        };
         cache.init_schema()?;
         Ok(cache)
     }
@@ -138,6 +145,24 @@ COMMIT;
             .context("creating meta cache schema")?;
 
         Ok(())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn default_path() -> anyhow::Result<PathBuf> {
+        let dirs = ProjectDirs::from("com", "example", "lrc_player")
+            .context("unable to determine project directories")?;
+        let cache_dir = dirs.data_dir().join("cache");
+        std::fs::create_dir_all(&cache_dir)
+            .with_context(|| format!("creating cache directory {}", cache_dir.display()))?;
+        Ok(cache_dir.join("meta_cache.db"))
+    }
+
+    pub fn open_default() -> anyhow::Result<Self> {
+        let path = Self::default_path()?;
+        Self::new(path)
     }
 
     /// Example helper: insert or replace a `files` row based on path
@@ -442,6 +467,229 @@ COMMIT;
         }
     }
 
+    /// Return groups of duplicate files that share the same stable key.
+    pub fn duplicate_groups(&self) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stable_key, path FROM files
+             WHERE stable_key IS NOT NULL
+               AND stable_key IN (
+                   SELECT stable_key FROM files WHERE stable_key IS NOT NULL GROUP BY stable_key HAVING COUNT(*) > 1
+               )
+             ORDER BY stable_key, path",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut groups = Vec::new();
+        let mut current_key: Option<String> = None;
+        let mut current_paths = Vec::new();
+
+        for row in rows {
+            let (key, path) = row?;
+            if current_key.as_ref() != Some(&key) {
+                if let Some(prev_key) = current_key.take() {
+                    groups.push((prev_key, current_paths));
+                    current_paths = Vec::new();
+                }
+                current_key = Some(key);
+            }
+            current_paths.push(path);
+        }
+
+        if let Some(prev_key) = current_key {
+            groups.push((prev_key, current_paths));
+        }
+
+        Ok(groups)
+    }
+
+    /// Return aggregate library counts from the current meta cache.
+    pub fn library_counts(&self) -> anyhow::Result<(usize, usize)> {
+        let track_count: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM tracks", [], |r| r.get(0))?;
+        let album_count: i64 = self.conn.query_row(
+            "SELECT count(DISTINCT album) FROM tracks WHERE album IS NOT NULL AND album <> ''",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((album_count as usize, track_count as usize))
+    }
+
+    /// Return the most recently seen track locations from the library.
+    pub fn recent_locations(&self, limit: usize) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM locations ORDER BY last_seen DESC LIMIT ?1")?;
+        let rows = stmt.query_map(params![limit as i64], |row| row.get(0))?;
+        let mut paths = Vec::new();
+        for path in rows {
+            paths.push(path?);
+        }
+        Ok(paths)
+    }
+
+    /// Return a list of recently seen library directories.
+    pub fn recent_directories(&self, limit: usize) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM locations ORDER BY last_seen DESC")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut dirs = Vec::new();
+        let mut seen = HashSet::new();
+
+        for path in rows {
+            let path: String = path?;
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                if let Some(parent_str) = parent.to_str() {
+                    if seen.insert(parent_str.to_string()) {
+                        dirs.push(parent_str.to_string());
+                        if dirs.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(dirs)
+    }
+
+    /// Return distinct album names in the library.
+    pub fn library_albums(&self) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT album FROM tracks WHERE album IS NOT NULL AND album <> '' ORDER BY album COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut albums = Vec::new();
+        for album in rows {
+            albums.push(album?);
+        }
+        Ok(albums)
+    }
+
+    /// Return distinct artist names in the library.
+    pub fn library_artists(&self) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT artist FROM tracks WHERE artist IS NOT NULL AND artist <> '' ORDER BY artist COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut artists = Vec::new();
+        for artist in rows {
+            artists.push(artist?);
+        }
+        Ok(artists)
+    }
+
+    /// Return track titles grouped by album.
+    pub fn library_tracks_by_album(&self, album: &str) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT title FROM tracks WHERE album = ?1 ORDER BY title COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![album], |row| row.get(0))?;
+        let mut titles = Vec::new();
+        for title in rows {
+            titles.push(title?);
+        }
+        Ok(titles)
+    }
+
+    /// Return track titles grouped by artist.
+    pub fn library_tracks_by_artist(&self, artist: &str) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT title FROM tracks WHERE artist = ?1 ORDER BY title COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![artist], |row| row.get(0))?;
+        let mut titles = Vec::new();
+        for title in rows {
+            titles.push(title?);
+        }
+        Ok(titles)
+    }
+
+    /// Return a hierarchical tree of scanned library directories.
+    pub fn library_directories(&self, limit: usize) -> anyhow::Result<Vec<LibraryDirectoryDto>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT path FROM locations")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut dirs = HashSet::new();
+
+        for path in rows {
+            let path: String = path?;
+            let mut current = PathBuf::from(&path);
+            while let Some(parent) = current.parent() {
+                if parent.as_os_str().is_empty() {
+                    break;
+                }
+                dirs.insert(parent.to_path_buf());
+                current = parent.to_path_buf();
+            }
+        }
+
+        let mut children: std::collections::HashMap<PathBuf, Vec<PathBuf>> = std::collections::HashMap::new();
+        let mut roots = Vec::new();
+
+        for dir in dirs.iter() {
+            if let Some(parent) = dir.parent() {
+                if dirs.contains(parent) {
+                    children.entry(parent.to_path_buf()).or_default().push(dir.clone());
+                } else {
+                    roots.push(dir.clone());
+                }
+            }
+        }
+
+        let mut sorted_roots: Vec<_> = roots.into_iter().collect();
+        sorted_roots.sort();
+
+        fn build_tree(
+            path: PathBuf,
+            children: &std::collections::HashMap<PathBuf, Vec<PathBuf>>,
+            limit: usize,
+        ) -> LibraryDirectoryDto {
+            let mut child_nodes = children
+                .get(&path)
+                .cloned()
+                .unwrap_or_default();
+            child_nodes.sort();
+            let children = child_nodes
+                .into_iter()
+                .take(limit)
+                .map(|child| build_tree(child, children, limit))
+                .collect();
+            LibraryDirectoryDto {
+                path: path.to_string_lossy().to_string(),
+                children,
+            }
+        }
+
+        let mut result = Vec::new();
+        for root in sorted_roots.into_iter().take(limit) {
+            result.push(build_tree(root, &children, limit));
+        }
+
+        Ok(result)
+    }
+
+    /// Return track titles under the given directory path.
+    pub fn library_tracks_by_directory(&self, directory: &str) -> anyhow::Result<Vec<String>> {
+        let mut pattern = directory.to_string();
+        if !pattern.ends_with(MAIN_SEPARATOR) {
+            pattern.push(MAIN_SEPARATOR);
+        }
+        pattern.push('%');
+
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT t.title FROM tracks t JOIN locations l ON l.content_id = t.content_id WHERE l.path = ?1 OR l.path LIKE ?2 ORDER BY t.title COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![directory, pattern], |row| row.get(0))?;
+        let mut titles = Vec::new();
+        for title in rows {
+            titles.push(title?);
+        }
+        Ok(titles)
+    }
+
     /// Expose a raw connection reference for advanced ops (use carefully)
     pub fn connection(&self) -> &Connection {
         &self.conn
@@ -586,5 +834,278 @@ mod tests {
             .query_row("SELECT count(*) FROM hashes", [], |r| r.get(0))
             .expect("count hashes");
         assert_eq!(hash_count, 1);
+    }
+
+    #[test]
+    fn library_counts_and_recent_locations_work() {
+        let cache = MetaCache::new(":memory:").expect("create in-memory db");
+
+        cache
+            .upsert_track(
+                "track-a",
+                Some("Song A"),
+                Some("Artist A"),
+                Some("Album X"),
+                None,
+                100,
+            )
+            .expect("upsert track A");
+        cache
+            .upsert_track(
+                "track-b",
+                Some("Song B"),
+                Some("Artist B"),
+                Some("Album X"),
+                None,
+                101,
+            )
+            .expect("upsert track B");
+        cache
+            .upsert_track(
+                "track-c",
+                Some("Song C"),
+                Some("Artist C"),
+                Some("Album Y"),
+                None,
+                102,
+            )
+            .expect("upsert track C");
+
+        cache
+            .upsert_location(
+                "track-a",
+                "/tmp/track-a.mp3",
+                None,
+                None,
+                1234,
+                42,
+                1620000000,
+                false,
+                true,
+            )
+            .expect("upsert location A");
+        cache
+            .upsert_location(
+                "track-b",
+                "/tmp/track-b.mp3",
+                None,
+                None,
+                1235,
+                43,
+                1620000001,
+                false,
+                true,
+            )
+            .expect("upsert location B");
+        cache
+            .upsert_location(
+                "track-c",
+                "/tmp/track-c.mp3",
+                None,
+                None,
+                1236,
+                44,
+                1620000002,
+                false,
+                true,
+            )
+            .expect("upsert location C");
+
+        let (album_count, track_count) = cache.library_counts().expect("library counts");
+        assert_eq!(album_count, 2);
+        assert_eq!(track_count, 3);
+
+        let recent = cache.recent_locations(2).expect("recent locations");
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0], "/tmp/track-c.mp3");
+        assert_eq!(recent[1], "/tmp/track-b.mp3");
+    }
+
+    #[test]
+    fn duplicate_groups_returns_same_stable_key_paths() {
+        let cache = MetaCache::new(":memory:").expect("create in-memory db");
+        cache
+            .upsert_file(
+                "/tmp/song1.mp3",
+                "/tmp/song1.mp3",
+                1000,
+                1,
+                None,
+                None,
+                Some("stable-a"),
+            )
+            .expect("upsert file 1");
+        cache
+            .upsert_file(
+                "/tmp/song2.mp3",
+                "/tmp/song2.mp3",
+                1000,
+                1,
+                None,
+                None,
+                Some("stable-a"),
+            )
+            .expect("upsert file 2");
+        cache
+            .upsert_file(
+                "/tmp/song3.mp3",
+                "/tmp/song3.mp3",
+                1000,
+                1,
+                None,
+                None,
+                Some("stable-b"),
+            )
+            .expect("upsert file 3");
+
+        let groups = cache.duplicate_groups().expect("duplicate groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "stable-a");
+        assert_eq!(groups[0].1, vec!["/tmp/song1.mp3".to_string(), "/tmp/song2.mp3".to_string()]);
+    }
+
+    #[test]
+    fn library_album_and_artist_lists_work() {
+        let cache = MetaCache::new(":memory:").expect("create in-memory db");
+
+        cache
+            .upsert_track(
+                "track-a",
+                Some("Song A"),
+                Some("Artist B"),
+                Some("Album X"),
+                None,
+                100,
+            )
+            .expect("upsert track A");
+        cache
+            .upsert_track(
+                "track-b",
+                Some("Song B"),
+                Some("Artist A"),
+                Some("Album Y"),
+                None,
+                101,
+            )
+            .expect("upsert track B");
+        cache
+            .upsert_track(
+                "track-c",
+                Some("Song C"),
+                Some("Artist B"),
+                Some("Album X"),
+                None,
+                102,
+            )
+            .expect("upsert track C");
+
+        let albums = cache.library_albums().expect("library albums");
+        assert_eq!(albums, vec!["Album X".to_string(), "Album Y".to_string()]);
+
+        let artists = cache.library_artists().expect("library artists");
+        assert_eq!(artists, vec!["Artist A".to_string(), "Artist B".to_string()]);
+    }
+
+    #[test]
+    fn library_track_queries_by_album_and_artist_work() {
+        let cache = MetaCache::new(":memory:").expect("create in-memory db");
+
+        cache
+            .upsert_track(
+                "track-a",
+                Some("Song A"),
+                Some("Artist A"),
+                Some("Album X"),
+                None,
+                100,
+            )
+            .expect("upsert track A");
+        cache
+            .upsert_track(
+                "track-b",
+                Some("Song B"),
+                Some("Artist A"),
+                Some("Album Y"),
+                None,
+                101,
+            )
+            .expect("upsert track B");
+        cache
+            .upsert_track(
+                "track-c",
+                Some("Song C"),
+                Some("Artist B"),
+                Some("Album X"),
+                None,
+                102,
+            )
+            .expect("upsert track C");
+
+        let album_x_tracks = cache
+            .library_tracks_by_album("Album X")
+            .expect("album X tracks");
+        assert_eq!(album_x_tracks, vec!["Song A".to_string(), "Song C".to_string()]);
+
+        let artist_a_tracks = cache
+            .library_tracks_by_artist("Artist A")
+            .expect("artist A tracks");
+        assert_eq!(artist_a_tracks, vec!["Song A".to_string(), "Song B".to_string()]);
+    }
+
+    #[test]
+    fn recent_directories_work() {
+        let cache = MetaCache::new(":memory:").expect("create in-memory db");
+
+        cache
+            .upsert_track(
+                "track-a",
+                Some("Song A"),
+                Some("Artist A"),
+                Some("Album A"),
+                None,
+                100,
+            )
+            .expect("upsert track A");
+        cache
+            .upsert_location(
+                "track-a",
+                "/tmp/music/Artist A/Album A/track-a.mp3",
+                None,
+                None,
+                1234,
+                42,
+                1620000000,
+                true,
+                true,
+            )
+            .expect("upsert location A");
+        cache
+            .upsert_track(
+                "track-b",
+                Some("Song B"),
+                Some("Artist B"),
+                Some("Album B"),
+                None,
+                101,
+            )
+            .expect("upsert track B");
+        cache
+            .upsert_location(
+                "track-b",
+                "/tmp/music/Artist B/Album B/track-b.mp3",
+                None,
+                None,
+                1235,
+                43,
+                1620000001,
+                true,
+                true,
+            )
+            .expect("upsert location B");
+
+        let dirs = cache.recent_directories(2).expect("recent directories");
+        assert_eq!(dirs.len(), 2);
+        assert_eq!(dirs[0], "/tmp/music/Artist B/Album B");
+        assert_eq!(dirs[1], "/tmp/music/Artist A/Album A");
     }
 }

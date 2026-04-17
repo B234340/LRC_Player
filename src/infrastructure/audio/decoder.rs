@@ -65,6 +65,7 @@ pub fn spawn_decode_to_producer(
 
             // accumulator for interleaved samples at source format
             let mut acc: Vec<f32> = Vec::new();
+            let mut read_idx: usize = 0;
             let src_target_len = chunk_frames.saturating_mul(channels as usize);
 
             loop {
@@ -79,8 +80,10 @@ pub fn spawn_decode_to_producer(
                             sb.copy_interleaved_ref(audio_buf);
                             acc.extend_from_slice(sb.samples());
 
-                            while acc.len() >= src_target_len {
-                                let chunk = acc.drain(0..src_target_len).collect::<Vec<_>>();
+                            while acc.len().saturating_sub(read_idx) >= src_target_len {
+                                let chunk_end = read_idx + src_target_len;
+                                let chunk = &acc[read_idx..chunk_end];
+                                read_idx = chunk_end;
 
                                 // get output buffer from pool or new
                                 let mut out_buf = if let Some(p) = &pool {
@@ -90,10 +93,17 @@ pub fn spawn_decode_to_producer(
                                 };
 
                                 // convert in-place: stream_adapter writes into out_buf
-                                conv.process(&chunk, channels, sample_rate, &mut out_buf);
+                                conv.process(chunk, channels, sample_rate, &mut out_buf);
 
                                 // send to producer (blocking send to apply backpressure)
                                 let _ = producer_tx.send(Arc::new(out_buf));
+                            }
+
+                            // Compact periodically to avoid O(n) drain for every chunk.
+                            if read_idx > 0 && read_idx >= acc.len() / 2 {
+                                acc.copy_within(read_idx.., 0);
+                                acc.truncate(acc.len() - read_idx);
+                                read_idx = 0;
                             }
                         }
                         Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
@@ -105,14 +115,14 @@ pub fn spawn_decode_to_producer(
             }
 
             // send remaining samples if any
-            if !acc.is_empty() {
-                let chunk = acc;
+            if read_idx < acc.len() {
+                let chunk = &acc[read_idx..];
                 let mut out_buf = if let Some(p) = &pool {
                     p.get((chunk.len() / channels as usize) * target_channels as usize)
                 } else {
                     Vec::with_capacity((chunk.len() / channels as usize) * target_channels as usize)
                 };
-                conv.process(&chunk, channels, sample_rate, &mut out_buf);
+                conv.process(chunk, channels, sample_rate, &mut out_buf);
                 let _ = producer_tx.send(Arc::new(out_buf));
             }
 
@@ -184,6 +194,7 @@ pub fn spawn_decode_stream(
 
             // accumulator for interleaved samples
             let mut acc: Vec<f32> = Vec::new();
+            let mut read_idx: usize = 0;
             let target_len = chunk_frames.saturating_mul(channels as usize);
 
             loop {
@@ -198,8 +209,10 @@ pub fn spawn_decode_stream(
                             sb.copy_interleaved_ref(audio_buf);
                             acc.extend_from_slice(sb.samples());
 
-                            while acc.len() >= target_len {
-                                let chunk = acc.drain(0..target_len).collect::<Vec<_>>();
+                            while acc.len().saturating_sub(read_idx) >= target_len {
+                                let chunk_end = read_idx + target_len;
+                                let chunk = acc[read_idx..chunk_end].to_vec();
+                                read_idx = chunk_end;
                                 let dc = DecodedChunk {
                                     samples: chunk,
                                     sample_rate,
@@ -207,6 +220,13 @@ pub fn spawn_decode_stream(
                                 };
                                 // ignore send error (receiver closed)
                                 let _ = tx.send(Ok(dc));
+                            }
+
+                            // Compact periodically to avoid O(n) drain for every chunk.
+                            if read_idx > 0 && read_idx >= acc.len() / 2 {
+                                acc.copy_within(read_idx.., 0);
+                                acc.truncate(acc.len() - read_idx);
+                                read_idx = 0;
                             }
                         }
                         Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
@@ -218,9 +238,9 @@ pub fn spawn_decode_stream(
             }
 
             // send remaining samples if any
-            if !acc.is_empty() {
+            if read_idx < acc.len() {
                 let dc = DecodedChunk {
-                    samples: acc,
+                    samples: acc[read_idx..].to_vec(),
                     sample_rate,
                     channels,
                 };

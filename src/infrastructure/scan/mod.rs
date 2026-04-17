@@ -16,12 +16,8 @@ pub struct ScanCoordinator {
 
 impl ScanCoordinator {
     pub fn new(meta: MetaCache) -> Self {
-        // spawn ScanWorker with an in-memory DB for now; integration with on-disk DB path can be added
-        let worker = ScanWorker::new();
-        Self {
-            worker,
-            _meta: meta,
-        }
+        let worker = ScanWorker::new_with_db_path(Some(meta.path().to_path_buf()));
+        Self { worker, _meta: meta }
     }
 
     /// Start a scan for given paths. Returns a `ScanHandle` to control/observe the scan.

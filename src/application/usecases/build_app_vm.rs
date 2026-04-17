@@ -31,14 +31,38 @@ mod tests {
         let settings = SettingsDto::new(Some("USB Audio".into()), 64);
         let state = StateDto {
             last_tab: Some("library".into()),
+            last_play_path: None,
+            last_play_position_ms: Some(10_000),
+            last_scan_status: Some("library".into()),
+            scan_scanned: Some(10),
+            scan_parsed: Some(8),
+            scan_registered: Some(4),
+            scan_targets: vec!["/tmp/music".into()],
+            scan_excludes: vec!["/tmp/music/temp".into()],
+            queue_tracks: vec!["/tmp/track1.mp3".into(), "/tmp/track2.mp3".into()],
+            selected_queue_index: Some(0),
+            favorite_directories: Vec::new(),
         };
         let playlists = vec![PlaylistDto {
             id: "pl1".into(),
             name: "Favorites".into(),
+            tracks: Vec::new(),
         }];
         let library = LibraryDto {
             album_count: 2,
             track_count: 42,
+            recent_locations: vec![],
+            recent_directories: vec![],
+            directory_tree: vec![],
+            favorite_directories: vec!["/tmp/music".into()],
+            albums: vec!["Album X".into(), "Album Y".into()],
+            selected_album: None,
+            selected_album_tracks: Vec::new(),
+            artists: vec!["Artist A".into(), "Artist B".into()],
+            selected_artist: None,
+            selected_artist_tracks: Vec::new(),
+            selected_directory: None,
+            selected_directory_tracks: Vec::new(),
         };
         let queue = QueueVm::new(vec!["track1".into(), "track2".into()]);
 

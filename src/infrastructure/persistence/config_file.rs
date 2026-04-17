@@ -52,7 +52,10 @@ mod tests {
         let original = Config {
             resampler_taps: 64,
             preferred_output_device: Some("usb_audio".into()),
+            device_settings: std::collections::HashMap::new(),
             language: crate::config::Language::En,
+            theme: crate::config::Theme::System,
+            log_level: crate::config::LogLevel::Info,
         };
         file.save(&original).unwrap();
 

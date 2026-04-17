@@ -52,6 +52,7 @@ mod tests {
         let original = vec![PlaylistDto {
             id: "playlist-1".into(),
             name: "Favorites".into(),
+            tracks: Vec::new(),
         }];
         file.save(&original).unwrap();
 

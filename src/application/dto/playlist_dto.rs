@@ -4,4 +4,6 @@ use serde::{Deserialize, Serialize};
 pub struct PlaylistDto {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub tracks: Vec<String>,
 }

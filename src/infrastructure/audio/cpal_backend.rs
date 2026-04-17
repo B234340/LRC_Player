@@ -87,12 +87,7 @@ impl CpalOutput {
 
         // attempt to use the device's default output config
         let supported = device.default_output_config()?;
-        let mut stream_config: cpal::StreamConfig = supported.config();
-
-        // prefer requested sample rate/channels when possible
-        stream_config.channels = format.channels;
-        stream_config.sample_rate = cpal::SampleRate(format.sample_rate);
-
+        let stream_config: cpal::StreamConfig = supported.config();
         let sample_format = supported.sample_format();
 
         // create a ring buffer sized to ~1 second of audio at requested rate (clamped)
@@ -189,8 +184,13 @@ impl CpalOutput {
         self.producer_tx = Some(tx);
         self.writer_handle = Some(writer);
         self.pool = Some(pool);
-        self.format = Some(format);
-        Ok(self.format.clone().unwrap())
+        let actual_format = AudioFormat {
+            sample_rate: stream_config.sample_rate.0,
+            channels: stream_config.channels,
+            sample_format: format.sample_format,
+        };
+        self.format = Some(actual_format);
+        Ok(actual_format)
     }
     pub fn new() -> Self {
         CpalOutput {

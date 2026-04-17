@@ -8,8 +8,12 @@ pub struct ScanWorker {
 
 impl ScanWorker {
     pub fn new() -> Self {
+        Self::new_with_db_path(None)
+    }
+
+    pub fn new_with_db_path(db_path: Option<std::path::PathBuf>) -> Self {
         Self {
-            inner: spawn_io_worker(None),
+            inner: spawn_io_worker(db_path),
         }
     }
 }
@@ -57,7 +61,13 @@ mod tests {
 
         let worker = ScanWorker::new();
         let handle = worker
-            .start_scan(vec![root.to_path_buf()], ScanOptions { fast: true })
+            .start_scan(
+                vec![root.to_path_buf()],
+                ScanOptions {
+                    fast: true,
+                    excludes: Vec::new(),
+                },
+            )
             .await
             .expect("start scan");
         let mut rx = worker.subscribe_progress(&handle);

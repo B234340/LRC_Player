@@ -1,5 +1,6 @@
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -13,12 +14,59 @@ pub enum Language {
     Zh,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    System,
+    Light,
+    Dark,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Theme::System
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Info,
+    Error,
+    Warn,
+    Debug,
+    Trace,
+}
+
+impl Default for LogLevel {
+    fn default() -> Self {
+        LogLevel::Info
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeviceSettings {
+    pub resampler_taps: usize,
+}
+
+impl Default for DeviceSettings {
+    fn default() -> Self {
+        Self { resampler_taps: 32 }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub resampler_taps: usize,
     pub preferred_output_device: Option<String>,
     #[serde(default)]
+    pub device_settings: HashMap<String, DeviceSettings>,
+    #[serde(default)]
     pub language: Language,
+    #[serde(default)]
+    pub theme: Theme,
+    #[serde(default)]
+    pub log_level: LogLevel,
 }
 
 impl Default for Config {
@@ -26,12 +74,31 @@ impl Default for Config {
         Self {
             resampler_taps: 32,
             preferred_output_device: None,
+            device_settings: HashMap::new(),
             language: Language::default(),
+            theme: Theme::default(),
+            log_level: LogLevel::default(),
         }
     }
 }
 
 impl Config {
+    pub fn taps_for_device(&self, device: Option<&String>) -> usize {
+        if let Some(device_name) = device {
+            if let Some(settings) = self.device_settings.get(device_name) {
+                return settings.resampler_taps;
+            }
+        }
+        self.resampler_taps
+    }
+
+    pub fn set_taps_for_device(&mut self, device: String, taps: usize) {
+        self.device_settings
+            .entry(device)
+            .or_insert_with(DeviceSettings::default)
+            .resampler_taps = taps;
+    }
+
     fn path() -> Option<PathBuf> {
         ProjectDirs::from("com", "example", "lrc_player")
             .map(|pd| pd.config_dir().join("config.json"))
@@ -61,5 +128,21 @@ impl Config {
             fs::rename(tmp, &path)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_specific_taps_override_global_setting() {
+        let mut cfg = Config::default();
+        cfg.resampler_taps = 64;
+        cfg.set_taps_for_device("Device A".into(), 128);
+
+        assert_eq!(cfg.taps_for_device(None), 64);
+        assert_eq!(cfg.taps_for_device(Some(&"Device A".into())), 128);
+        assert_eq!(cfg.taps_for_device(Some(&"Device B".into())), 64);
     }
 }

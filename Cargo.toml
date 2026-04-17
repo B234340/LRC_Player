@@ -25,6 +25,7 @@ crossbeam-channel = "0.5"
 directories = "4"
 image = "0.24"
 eframe = "0.22"
+fontdb = "0.10"
 
 [[bin]]
 name = "generate_10k_tracks"

@@ -14,6 +14,8 @@ mod unix_ipc {
     #[derive(Serialize, Deserialize, Debug)]
     pub struct ScanRequest {
         pub paths: Vec<String>,
+        pub excludes: Vec<String>,
+        pub cancel: bool,
     }
 
     /// Try to bind to the socket path. If successful, start server later.
@@ -101,6 +103,8 @@ mod unix_ipc {
 
                 let request = ScanRequest {
                     paths: vec!["/tmp/scan1".into()],
+                    excludes: Vec::new(),
+                    cancel: false,
                 };
                 send_scan_request(&path, &request).await.unwrap();
 
@@ -122,26 +126,47 @@ pub use unix_ipc::*;
 mod fallback {
     use super::*;
     use anyhow::Result;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+    use tokio::sync::mpsc;
 
-    #[derive(Serialize, Deserialize, Debug)]
+    static FALLBACK_SCAN_TX: OnceLock<Mutex<Option<mpsc::Sender<ScanRequest>>>> = OnceLock::new();
+
+    #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct ScanRequest {
         pub paths: Vec<String>,
+        pub excludes: Vec<String>,
+        pub cancel: bool,
     }
 
     pub async fn try_bind_socket(_path: &Path) -> Result<bool> {
-        Err(anyhow::anyhow!("IPC not implemented on this platform"))
+        // Windows fallback does not yet support single-instance socket locking.
+        Ok(true)
     }
+
     pub async fn start_server(
         _path: &Path,
-        _scan_tx: tokio::sync::mpsc::Sender<ScanRequest>,
+        scan_tx: mpsc::Sender<ScanRequest>,
     ) -> Result<()> {
-        Err(anyhow::anyhow!("IPC not implemented on this platform"))
+        let tx_slot = FALLBACK_SCAN_TX.get_or_init(|| Mutex::new(None));
+        let mut guard = tx_slot.lock().unwrap();
+        *guard = Some(scan_tx);
+        Ok(())
     }
-    pub async fn send_scan_request(_path: &Path, _req: &ScanRequest) -> Result<()> {
-        Err(anyhow::anyhow!("IPC not implemented on this platform"))
+
+    pub async fn send_scan_request(_path: &Path, req: &ScanRequest) -> Result<()> {
+        if let Some(mutex) = FALLBACK_SCAN_TX.get() {
+            let guard = mutex.lock().unwrap();
+            if let Some(tx) = guard.as_ref() {
+                tx.try_send(req.clone())?;
+                return Ok(());
+            }
+        }
+
+        Err(anyhow::anyhow!("IPC not initialized on this platform"))
     }
-    pub fn default_socket_path() -> std::path::PathBuf {
+
+    pub fn default_socket_path() -> PathBuf {
         std::env::temp_dir().join("lrc_player.sock")
     }
 }
