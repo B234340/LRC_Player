@@ -766,22 +766,22 @@ impl GuiApp {
         database.load_system_fonts();
 
         let candidates = [
-            "Noto Sans CJK JP",
             "Noto Sans CJK SC",
-            "Noto Sans CJK TC",
-            "Noto Sans CJK KR",
-            "Source Han Sans JP",
             "Source Han Sans SC",
+            "Microsoft YaHei",
+            "PingFang SC",
+            "Noto Sans CJK TC",
             "Source Han Sans TC",
+            "Microsoft JhengHei",
+            "Noto Sans CJK JP",
+            "Source Han Sans JP",
+            "Noto Sans CJK KR",
             "Source Han Sans KR",
             "Noto Sans JP",
             "Noto Sans SC",
             "Noto Sans TC",
             "IPAPGothic",
             "WenQuanYi Zen Hei",
-            "Microsoft YaHei",
-            "Microsoft JhengHei",
-            "PingFang SC",
             "Hiragino Sans",
         ];
 
@@ -1050,13 +1050,6 @@ impl App for GuiApp {
                 let _ = cfg.save();
                 self.update_app_vm();
             }
-
-            ui.separator();
-            ui.label(translate("play_demo", self.language));
-            ui.text_edit_singleline(&mut self.play_path);
-            if ui.button(translate("play", self.language)).clicked() {
-                self.request_play();
-            }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -1129,38 +1122,6 @@ impl App for GuiApp {
                         self.request_cancel();
                     }
                 });
-            }
-
-            if self.active_tab == Tab::Playlist {
-                ui.separator();
-                ui.heading("Playlist Controls");
-                ui.label("Create and manage playlists.");
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.new_playlist_name);
-                    if ui.button("Create playlist").clicked() {
-                        self.add_playlist();
-                    }
-                });
-
-                if self.playlists.is_empty() {
-                    ui.label("No playlists saved.");
-                } else {
-                    let playlists = self.playlists.clone();
-                    for (index, playlist) in playlists.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(self.selected_playlist == Some(index),
-                                    &playlist.name)
-                                .clicked()
-                            {
-                                self.selected_playlist = Some(index);
-                            }
-                            if ui.button("Delete").clicked() {
-                                self.remove_playlist(index);
-                            }
-                        });
-                    }
-                }
             }
 
             if self.active_tab == Tab::Queue {

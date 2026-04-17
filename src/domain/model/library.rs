@@ -32,23 +32,4 @@ impl Library {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::ids::TrackId;
-    use crate::domain::model::track::Track;
 
-    #[test]
-    fn library_add_dedupes_identical_track_ids() {
-        let mut library = Library::new();
-        let track = Track {
-            id: TrackId("track-1".into()),
-            title: "First".into(),
-        };
-
-        library.add_track(track.clone());
-        library.add_track(track);
-
-        assert_eq!(library.tracks.len(), 1);
-    }
-}

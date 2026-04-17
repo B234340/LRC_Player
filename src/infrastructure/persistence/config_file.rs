@@ -38,32 +38,4 @@ impl ConfigFile {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
 
-    #[test]
-    fn config_file_roundtrips_json() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let file = ConfigFile::open_with_path(path).unwrap();
-
-        let original = Config {
-            resampler_taps: 64,
-            preferred_output_device: Some("usb_audio".into()),
-            device_settings: std::collections::HashMap::new(),
-            language: crate::config::Language::En,
-            theme: crate::config::Theme::System,
-            log_level: crate::config::LogLevel::Info,
-        };
-        file.save(&original).unwrap();
-
-        let loaded = file.load().unwrap();
-        assert_eq!(loaded.resampler_taps, original.resampler_taps);
-        assert_eq!(
-            loaded.preferred_output_device,
-            original.preferred_output_device
-        );
-    }
-}

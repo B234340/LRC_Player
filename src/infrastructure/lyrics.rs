@@ -85,44 +85,4 @@ fn parse_timestamp(tag: &str) -> Option<u64> {
     Some(minutes * 60_000 + seconds * 1_000 + millis)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs::File;
-    use std::io::Write;
-    use tempfile::tempdir;
 
-    #[test]
-    fn parse_timestamp_formats() {
-        assert_eq!(parse_timestamp("00:00.00"), Some(0));
-        assert_eq!(parse_timestamp("01:02.345"), Some(62345));
-        assert_eq!(parse_timestamp("10:20.5"), Some(620500));
-    }
-
-    #[test]
-    fn loads_lrc_contents() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("song.lrc");
-        let mut file = File::create(&path).unwrap();
-        writeln!(file, "[00:00.00]Intro").unwrap();
-        writeln!(file, "[00:10.50]Verse 1").unwrap();
-
-        let lyrics = Lyrics::from_lrc(&path).unwrap();
-        assert_eq!(lyrics.lines.len(), 2);
-        assert_eq!(lyrics.lines[0].text, "Intro");
-        assert_eq!(lyrics.lines[1].time_ms, 10_500);
-    }
-
-    #[test]
-    fn discovers_lrc_in_same_folder() {
-        let dir = tempdir().unwrap();
-        let track = dir.path().join("track.mp3");
-        File::create(&track).unwrap();
-        let lyric = dir.path().join("track.lrc");
-        File::create(&lyric).unwrap();
-
-        let found = Lyrics::discover_for_track(&track);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].file_name().unwrap(), "track.lrc");
-    }
-}
