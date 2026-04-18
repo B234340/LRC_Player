@@ -1,6 +1,7 @@
 use crate::infrastructure::persistence::MetaCache;
 use crate::presentation::egui_app::{ArtistViewMode, GuiApp};
 use eframe::egui;
+use std::collections::HashMap;
 
 pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let selected_artist = app.app_vm.library.selected_artist.clone();
@@ -28,6 +29,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         .map(|(idx, p)| (idx, p.name.clone()))
         .collect();
     let meta_cache = MetaCache::open_default().ok();
+    let mut track_metadata_cache: HashMap<String, (String, String)> = HashMap::new();
 
     ui.heading("Artists");
     ui.horizontal(|ui| {
@@ -146,29 +148,34 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                                     .and_then(|n| n.to_str())
                                                     .unwrap_or(track_path);
 
-                                                let (title, album) = meta_cache
-                                                    .as_ref()
-                                                    .and_then(|cache| {
-                                                        cache.track_metadata_by_location(track_path)
-                                                            .ok()
-                                                            .flatten()
+                                                let (title, album) = track_metadata_cache
+                                                    .entry(track_path.clone())
+                                                    .or_insert_with(|| {
+                                                        meta_cache
+                                                            .as_ref()
+                                                            .and_then(|cache| {
+                                                                cache.track_metadata_by_location(track_path)
+                                                                    .ok()
+                                                                    .flatten()
+                                                            })
+                                                            .map(|(t, _a, al)| {
+                                                                let t = if t.trim().is_empty() {
+                                                                    file_name.to_string()
+                                                                } else {
+                                                                    t
+                                                                };
+                                                                let al = if al.trim().is_empty() {
+                                                                    "Unknown album".to_string()
+                                                                } else {
+                                                                    al
+                                                                };
+                                                                (t, al)
+                                                            })
+                                                            .unwrap_or_else(|| {
+                                                                (file_name.to_string(), "Unknown album".to_string())
+                                                            })
                                                     })
-                                                    .map(|(t, _a, al)| {
-                                                        let t = if t.trim().is_empty() {
-                                                            file_name.to_string()
-                                                        } else {
-                                                            t
-                                                        };
-                                                        let al = if al.trim().is_empty() {
-                                                            "Unknown album".to_string()
-                                                        } else {
-                                                            al
-                                                        };
-                                                        (t, al)
-                                                    })
-                                                    .unwrap_or_else(|| {
-                                                        (file_name.to_string(), "Unknown album".to_string())
-                                                    });
+                                                    .clone();
 
                                                 let label = format!("[{}] {}", album, title);
                                                 let response = ui.selectable_label(false, label);

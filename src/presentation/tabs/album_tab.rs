@@ -1,5 +1,6 @@
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
+use std::collections::HashMap;
 
 fn wrap_album_title(title: &str, max_chars_per_line: usize, max_lines: usize) -> String {
     if title.is_empty() || max_chars_per_line == 0 || max_lines == 0 {
@@ -90,6 +91,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let mut pending_add_to_playlist: Option<(usize, String)> = None;
     let mut pending_show_details_path: Option<String> = None;
     let meta_cache = crate::infrastructure::persistence::MetaCache::open_default().ok();
+    let mut track_metadata_cache: HashMap<String, (String, String)> = HashMap::new();
     let playlist_targets: Vec<(usize, String)> = app
         .playlists
         .iter()
@@ -305,106 +307,116 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             }
 
             if show_overlay {
-                egui::Area::new(egui::Id::new("album_detail_overlay"))
-                    .order(egui::Order::Foreground)
+                let ctx = ui.ctx();
+                egui::Window::new("Album Details")
+                    .id(egui::Id::new("album_detail_overlay"))
+                    .title_bar(false)
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_size(egui::vec2(panel_width, panel_height))
                     .fixed_pos(egui::pos2(panel_x, panel_y))
-                    .show(ui.ctx(), |ui| {
+                    .show(ctx, |ui| {
                         ui.set_width(panel_width);
-                        egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.set_min_height(panel_height);
-                            ui.heading("Album Details");
-                            ui.separator();
-                            let (album_title, album_owner) = decode_album_id(selected);
-                            if album_owner.is_empty() {
-                                ui.label(format!("Album: {}", album_title));
-                            } else {
-                                ui.label(format!("Album: {}", album_title));
-                                ui.label(format!("Album artist: {}", album_owner));
-                            }
-                            ui.add_space(4.0);
+                        ui.set_min_height(panel_height);
+                        ui.heading("Album Details");
+                        ui.separator();
+                        let (album_title, album_owner) = decode_album_id(selected);
+                        if album_owner.is_empty() {
+                            ui.label(format!("Album: {}", album_title));
+                        } else {
+                            ui.label(format!("Album: {}", album_title));
+                            ui.label(format!("Album artist: {}", album_owner));
+                        }
+                        ui.add_space(4.0);
 
-                            if selected_album_tracks.is_empty() {
-                                ui.label("No tracks found for this album.");
-                            } else {
-                                ui.label(format!("{} tracks", selected_album_tracks.len()));
-                                ui.label("Left click: create queue from this list and play. Right click: common actions.");
-                                ui.add_space(6.0);
-                                egui::ScrollArea::vertical()
-                                    .id_source("album_detail_tracks_scroll")
-                                    .auto_shrink([false, false])
-                                    .max_height((panel_height - 84.0).max(120.0))
-                                    .show(ui, |ui| {
-                                        for (i, track) in selected_album_tracks.iter().enumerate() {
-                                            ui.horizontal_wrapped(|ui| {
-                                                let fallback_title = std::path::Path::new(&track.title)
-                                                    .file_name()
-                                                    .and_then(|name| name.to_str())
-                                                    .unwrap_or(track.title.as_str())
-                                                    .to_string();
-                                                let (display_title, display_artist) = meta_cache
-                                                    .as_ref()
-                                                    .and_then(|cache| {
-                                                        cache.track_metadata_by_location(&track.title)
-                                                            .ok()
-                                                            .flatten()
-                                                    })
-                                                    .map(|(title, artist, _)| {
-                                                        let title = if title.trim().is_empty() {
-                                                            fallback_title.clone()
-                                                        } else {
-                                                            title
-                                                        };
-                                                        let artist = if artist.trim().is_empty() {
-                                                            "Unknown artist".to_string()
-                                                        } else {
-                                                            artist
-                                                        };
-                                                        (title, artist)
-                                                    })
-                                                    .unwrap_or((fallback_title, "Unknown artist".to_string()));
+                        if selected_album_tracks.is_empty() {
+                            ui.label("No tracks found for this album.");
+                        } else {
+                            ui.label(format!("{} tracks", selected_album_tracks.len()));
+                            ui.label("Left click: create queue from this list and play. Right click: common actions.");
+                            ui.add_space(6.0);
+                            egui::ScrollArea::vertical()
+                                .id_source("album_detail_tracks_scroll")
+                                .auto_shrink([false, false])
+                                .max_height((panel_height - 84.0).max(120.0))
+                                .show(ui, |ui| {
+                                    for (i, track) in selected_album_tracks.iter().enumerate() {
+                                        ui.horizontal_wrapped(|ui| {
+                                            let fallback_title = std::path::Path::new(&track.title)
+                                                .file_name()
+                                                .and_then(|name| name.to_str())
+                                                .unwrap_or(track.title.as_str())
+                                                .to_string();
+                                            let display_meta = track_metadata_cache
+                                                .entry(track.title.clone())
+                                                .or_insert_with(|| {
+                                                    meta_cache
+                                                        .as_ref()
+                                                        .and_then(|cache| {
+                                                            cache
+                                                                .track_metadata_by_location(&track.title)
+                                                                .ok()
+                                                                .flatten()
+                                                        })
+                                                        .map(|(title, artist, _)| {
+                                                            let title = if title.trim().is_empty() {
+                                                                fallback_title.clone()
+                                                            } else {
+                                                                title
+                                                            };
+                                                            let artist = if artist.trim().is_empty() {
+                                                                "Unknown artist".to_string()
+                                                            } else {
+                                                                artist
+                                                            };
+                                                            (title, artist)
+                                                        })
+                                                        .unwrap_or((fallback_title.clone(), "Unknown artist".to_string()))
+                                                })
+                                                .clone();
+                                            let (display_title, display_artist) = display_meta;
 
-                                                let label = format!("{:>2}. {} - {}", i + 1, display_title, display_artist);
-                                                let response = ui.selectable_label(false, label);
-                                                if response.clicked() {
-                                                    pending_play_index = Some(i);
-                                                    pending_play_list = selected_album_tracks
-                                                        .iter()
-                                                        .map(|row| row.title.clone())
-                                                        .collect();
+                                            let label = format!("{:>2}. {} - {}", i + 1, display_title, display_artist);
+                                            let response = ui.selectable_label(false, label);
+                                            if response.double_clicked() {
+                                                pending_play_index = Some(i);
+                                                pending_play_list = selected_album_tracks
+                                                    .iter()
+                                                    .map(|row| row.title.clone())
+                                                    .collect();
+                                            }
+                                            response.context_menu(|ui| {
+                                                if ui.button("Play now").clicked() {
+                                                    pending_play_now_path = Some(track.title.clone());
+                                                    ui.close_menu();
                                                 }
-                                                response.context_menu(|ui| {
-                                                    if ui.button("Play now").clicked() {
-                                                        pending_play_now_path = Some(track.title.clone());
+                                                if ui.button("Play next").clicked() {
+                                                    pending_next_path = Some(track.title.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if ui.button("Add to queue").clicked() {
+                                                    pending_enqueue_path = Some(track.title.clone());
+                                                    ui.close_menu();
+                                                }
+                                                ui.separator();
+                                                ui.label("Add to playlist");
+                                                for (target_index, target_name) in &playlist_targets {
+                                                    if ui.button(target_name).clicked() {
+                                                        pending_add_to_playlist =
+                                                            Some((*target_index, track.title.clone()));
                                                         ui.close_menu();
                                                     }
-                                                    if ui.button("Play next").clicked() {
-                                                        pending_next_path = Some(track.title.clone());
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui.button("Add to queue").clicked() {
-                                                        pending_enqueue_path = Some(track.title.clone());
-                                                        ui.close_menu();
-                                                    }
-                                                    ui.separator();
-                                                    ui.label("Add to playlist");
-                                                    for (target_index, target_name) in &playlist_targets {
-                                                        if ui.button(target_name).clicked() {
-                                                            pending_add_to_playlist =
-                                                                Some((*target_index, track.title.clone()));
-                                                            ui.close_menu();
-                                                        }
-                                                    }
-                                                    ui.separator();
-                                                    if ui.button("Show details").clicked() {
-                                                        pending_show_details_path = Some(track.title.clone());
-                                                        ui.close_menu();
-                                                    }
-                                                });
+                                                }
+                                                ui.separator();
+                                                if ui.button("Show details").clicked() {
+                                                    pending_show_details_path = Some(track.title.clone());
+                                                    ui.close_menu();
+                                                }
                                             });
-                                        }
-                                    });
-                            }
-                        });
+                                        });
+                                    }
+                                });
+                        }
                     });
             }
             }

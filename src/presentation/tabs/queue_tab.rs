@@ -3,6 +3,7 @@ use crate::infrastructure::persistence::MetaCache;
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
 use image::io::Reader as ImageReader;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -94,6 +95,30 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             }
         }
         None
+    }
+
+    fn get_cached_artwork_texture(
+        ctx: &egui::Context,
+        artwork_path: &Path,
+        id: &str,
+    ) -> Option<egui::TextureHandle> {
+        let cache_id = egui::Id::new("queue_artwork_texture_cache");
+        let cache_key = artwork_path.to_string_lossy().to_string();
+
+        let existing = ctx.data(|data| {
+            data.get_temp::<HashMap<String, egui::TextureHandle>>(cache_id)
+                .and_then(|cache| cache.get(&cache_key).cloned())
+        });
+        if existing.is_some() {
+            return existing;
+        }
+
+        let texture = load_artwork_texture(ctx, artwork_path, id)?;
+        ctx.data_mut(|data| {
+            let cache = data.get_temp_mut_or_default::<HashMap<String, egui::TextureHandle>>(cache_id);
+            cache.insert(cache_key, texture.clone());
+        });
+        Some(texture)
     }
 
     if let Some(source) = app.queue_drag_source_index {
@@ -235,7 +260,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                         }
 
                         if let Some(art_path) = discover_artwork_for_track(Path::new(track)) {
-                            if let Some(texture) = load_artwork_texture(ui.ctx(), &art_path, &format!("queue_art_{}", index)) {
+                            if let Some(texture) =
+                                get_cached_artwork_texture(ui.ctx(), &art_path, &format!("queue_art_{}", index))
+                            {
                                 ui.image(&texture, art_size);
                             } else {
                                 let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
