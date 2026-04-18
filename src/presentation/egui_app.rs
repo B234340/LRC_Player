@@ -424,16 +424,55 @@ impl GuiApp {
             return;
         }
 
+        let current_index = self.current_queue_index;
         let mut indices = self.selected_queue_indices.clone();
         indices.sort_unstable();
         indices.dedup();
+        let current_removed = current_index
+            .map(|current| indices.iter().any(|&i| i == current))
+            .unwrap_or(false);
+
         indices.reverse();
-        for index in indices {
+        for index in indices.iter().copied() {
             if index < self.queue.tracks.len() {
                 self.queue.tracks.remove(index);
             }
         }
+
+        let removed_before_current = current_index.map(|old_current| {
+            indices.iter().filter(|&&removed| removed < old_current).count()
+        });
+
         self.clear_queue_selection();
+
+        if current_removed {
+            if self.queue.tracks.is_empty() {
+                self.clear_queue();
+                self.stop_playback_and_clear_play_tab();
+            } else if let Some(old_index) = current_index {
+                let next_index = if old_index < self.queue.tracks.len() {
+                    old_index
+                } else {
+                    self.queue.tracks.len() - 1
+                };
+                self.select_queue_item_single(next_index);
+                match self.playback_state {
+                    PlaybackState::Paused => {
+                        self.load_selected_queue_item_paused(next_index);
+                    }
+                    PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
+                        self.play_selected_queue_item();
+                    }
+                    PlaybackState::Stopped => {
+                        self.load_selected_queue_item_stopped(next_index);
+                    }
+                }
+            }
+        } else if let Some(old_current) = current_index {
+            let shift = removed_before_current.unwrap_or(0);
+            self.current_queue_index = Some(old_current.saturating_sub(shift));
+        }
+
         self.update_app_vm();
     }
 
@@ -495,6 +534,7 @@ impl GuiApp {
 
     pub(crate) fn remove_queue_item(&mut self, index: usize) {
         if index < self.queue.tracks.len() {
+            let current_removed = self.current_queue_index == Some(index);
             self.queue.tracks.remove(index);
             self.selected_queue_indices = self
                 .selected_queue_indices
@@ -525,6 +565,42 @@ impl GuiApp {
                     Some(anchor)
                 };
             }
+
+            if current_removed {
+                if self.queue.tracks.is_empty() {
+                    self.clear_queue();
+                    self.stop_playback_and_clear_play_tab();
+                } else {
+                    let next_index = if index < self.queue.tracks.len() {
+                        index
+                    } else {
+                        self.queue.tracks.len() - 1
+                    };
+                    self.select_queue_item_single(next_index);
+                    match self.playback_state {
+                        PlaybackState::Paused => {
+                            self.load_selected_queue_item_paused(next_index);
+                        }
+                        PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
+                            self.play_selected_queue_item();
+                        }
+                        PlaybackState::Stopped => {
+                            self.load_selected_queue_item_stopped(next_index);
+                        }
+                    }
+                }
+            } else {
+                self.current_queue_index = if let Some(current) = self.current_queue_index {
+                    if current > index {
+                        Some(current - 1)
+                    } else {
+                        Some(current)
+                    }
+                } else {
+                    None
+                };
+            }
+
             self.update_app_vm();
         }
     }
@@ -553,6 +629,56 @@ impl GuiApp {
         self.cancel_queue_drag();
         self.current_queue_index = None;
         self.update_app_vm();
+    }
+
+    fn stop_playback_and_clear_play_tab(&mut self) {
+        self.signal_playback_stop();
+        self.playback_state = PlaybackState::Stopped;
+        self.play_status = Some("Playback stopped".to_string());
+        self.play_path.clear();
+        self.play_position_ms = 0;
+        self.play_duration_ms = None;
+        self.play_title = None;
+        self.play_artist = None;
+        self.play_album = None;
+        self.play_artwork_handle = None;
+        self.play_artwork_source = None;
+        self.lyrics_files.clear();
+        self.loaded_lyrics = None;
+        self.selected_lyrics_index = None;
+        self.lyrics_offset_ms = 0;
+        self.playback_start_instant = None;
+        self.pending_play_request = false;
+    }
+
+    fn load_selected_queue_item_paused(&mut self, index: usize) {
+        if let Some(path) = self.queue.tracks.get(index).cloned() {
+            self.select_queue_item_single(index);
+            self.current_queue_index = Some(index);
+            self.play_path = path;
+            self.play_position_ms = 0;
+            self.playback_state = PlaybackState::Paused;
+            self.play_status = Some("Paused at start of selected track".to_string());
+            self.discover_lyrics_for_current_play_path();
+            self.refresh_play_metadata();
+            self.playback_start_instant = None;
+            self.pending_play_request = false;
+        }
+    }
+
+    fn load_selected_queue_item_stopped(&mut self, index: usize) {
+        if let Some(path) = self.queue.tracks.get(index).cloned() {
+            self.select_queue_item_single(index);
+            self.current_queue_index = Some(index);
+            self.play_path = path;
+            self.play_position_ms = 0;
+            self.playback_state = PlaybackState::Stopped;
+            self.play_status = Some("Stopped at start of selected track".to_string());
+            self.discover_lyrics_for_current_play_path();
+            self.refresh_play_metadata();
+            self.playback_start_instant = None;
+            self.pending_play_request = false;
+        }
     }
 
     pub(crate) fn add_track_to_selected_playlist(&mut self) {

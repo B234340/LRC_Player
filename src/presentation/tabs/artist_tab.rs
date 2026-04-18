@@ -127,7 +127,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                             if selected_artist_tracks.is_empty() {
                                 ui.label("No tracks found for this artist.");
                             } else {
-                                ui.label("Left click: create queue from this list and play. Right click: common actions.");
+                                ui.label("Double left click: create queue from this list and play. Right click: common actions.");
                                 egui::ScrollArea::vertical()
                                     .id_source("artist_tracks_scroll")
                                     .auto_shrink([false, false])
@@ -179,7 +179,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
                                                 let label = format!("[{}] {}", album, title);
                                                 let response = ui.selectable_label(false, label);
-                                                if response.clicked() {
+                                                if response.double_clicked() {
                                                     pending_play_index = Some(row);
                                                     pending_play_list = displayed_tracks.clone();
                                                 }

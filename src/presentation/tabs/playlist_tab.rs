@@ -162,129 +162,134 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 ui.label("No tracks in this playlist.");
             } else {
                 ui.label("Left click: create queue from this list and play. Right click: common actions.");
-                for (track_index, track) in playlist.tracks.iter().enumerate() {
-                    let path = std::path::Path::new(track);
-                    let fallback_title = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(track);
-                    let metadata = meta_cache
-                        .as_ref()
-                        .and_then(|cache| cache.track_metadata_by_location(track).ok().flatten());
-                    let title = metadata
-                        .as_ref()
-                        .map(|(title, _, _)| title.as_str())
-                        .filter(|text| !text.trim().is_empty())
-                        .unwrap_or(fallback_title);
-                    let artist = metadata
-                        .as_ref()
-                        .map(|(_, artist, _)| artist.as_str())
-                        .filter(|text| !text.trim().is_empty())
-                        .unwrap_or("Unknown artist");
-                    let album = metadata
-                        .as_ref()
-                        .map(|(_, _, album)| album.as_str())
-                        .filter(|text| !text.trim().is_empty())
-                        .unwrap_or("Unknown album");
-                    let is_playing = app.play_path == *track;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(ui.available_height().max(120.0))
+                    .show(ui, |ui| {
+                        for (track_index, track) in playlist.tracks.iter().enumerate() {
+                            let path = std::path::Path::new(track);
+                            let fallback_title = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or(track);
+                            let metadata = meta_cache
+                                .as_ref()
+                                .and_then(|cache| cache.track_metadata_by_location(track).ok().flatten());
+                            let title = metadata
+                                .as_ref()
+                                .map(|(title, _, _)| title.as_str())
+                                .filter(|text| !text.trim().is_empty())
+                                .unwrap_or(fallback_title);
+                            let artist = metadata
+                                .as_ref()
+                                .map(|(_, artist, _)| artist.as_str())
+                                .filter(|text| !text.trim().is_empty())
+                                .unwrap_or("Unknown artist");
+                            let album = metadata
+                                .as_ref()
+                                .map(|(_, _, album)| album.as_str())
+                                .filter(|text| !text.trim().is_empty())
+                                .unwrap_or("Unknown album");
+                            let is_playing = app.play_path == *track;
 
-                    let mut frame = egui::Frame::group(ui.style());
-                    if is_playing {
-                        frame = frame
-                            .fill(ui.visuals().selection.bg_fill)
-                            .stroke(egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
-                    }
-
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let art_size = egui::vec2(44.0, 44.0);
-                            if let Some(art_path) = discover_artwork_for_track(Path::new(track)) {
-                                if let Some(texture) =
-                                    get_cached_artwork_texture(ui.ctx(), &art_path, &format!("playlist_art_{}_{}", selected_index, track_index))
-                                {
-                                    ui.image(&texture, art_size);
-                                } else {
-                                    let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
-                                    ui.painter()
-                                        .rect_filled(art_rect, 4.0, ui.visuals().faint_bg_color);
-                                    ui.painter().text(
-                                        art_rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "ART",
-                                        egui::TextStyle::Small.resolve(ui.style()),
-                                        ui.visuals().text_color(),
-                                    );
-                                }
-                            } else {
-                                let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
-                                ui.painter()
-                                    .rect_filled(art_rect, 4.0, ui.visuals().faint_bg_color);
-                                ui.painter().text(
-                                    art_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "ART",
-                                    egui::TextStyle::Small.resolve(ui.style()),
-                                    ui.visuals().text_color(),
-                                );
+                            let mut frame = egui::Frame::group(ui.style());
+                            if is_playing {
+                                frame = frame
+                                    .fill(ui.visuals().selection.bg_fill)
+                                    .stroke(egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
                             }
 
-                            ui.vertical(|ui| {
-                                let title_text = if is_playing {
-                                    format!("{}: {} [Playing]", track_index + 1, title)
-                                } else {
-                                    format!("{}: {}", track_index + 1, title)
-                                };
-
-                                let response = ui.selectable_label(false, title_text);
-                                if response.clicked() {
-                                    pending_play_index = Some(track_index);
-                                    pending_play_list = playlist.tracks.clone();
-                                }
-                                response.context_menu(|ui| {
-                                    if ui.button("Play now").clicked() {
-                                        pending_play_now_path = Some(track.clone());
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Play next").clicked() {
-                                        pending_next_path = Some(track.clone());
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Add to queue").clicked() {
-                                        pending_enqueue_path = Some(track.clone());
-                                        ui.close_menu();
-                                    }
-                                    ui.separator();
-                                    ui.label("Add to playlist");
-                                    for (target_index, target_name) in &playlist_targets {
-                                        if ui.button(target_name).clicked() {
-                                            pending_add_to_playlist = Some((*target_index, track.clone()));
-                                            ui.close_menu();
+                            frame.show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let art_size = egui::vec2(44.0, 44.0);
+                                    if let Some(art_path) = discover_artwork_for_track(Path::new(track)) {
+                                        if let Some(texture) =
+                                            get_cached_artwork_texture(ui.ctx(), &art_path, &format!("playlist_art_{}_{}", selected_index, track_index))
+                                        {
+                                            ui.image(&texture, art_size);
+                                        } else {
+                                            let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
+                                            ui.painter()
+                                                .rect_filled(art_rect, 4.0, ui.visuals().faint_bg_color);
+                                            ui.painter().text(
+                                                art_rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "ART",
+                                                egui::TextStyle::Small.resolve(ui.style()),
+                                                ui.visuals().text_color(),
+                                            );
                                         }
+                                    } else {
+                                        let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
+                                        ui.painter()
+                                            .rect_filled(art_rect, 4.0, ui.visuals().faint_bg_color);
+                                        ui.painter().text(
+                                            art_rect.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            "ART",
+                                            egui::TextStyle::Small.resolve(ui.style()),
+                                            ui.visuals().text_color(),
+                                        );
                                     }
-                                    ui.separator();
-                                    if ui.button("Show details").clicked() {
-                                        pending_show_details_path = Some(track.clone());
-                                        ui.close_menu();
-                                    }
+
+                                    ui.vertical(|ui| {
+                                        let title_text = if is_playing {
+                                            format!("{}: {} [Playing]", track_index + 1, title)
+                                        } else {
+                                            format!("{}: {}", track_index + 1, title)
+                                        };
+
+                                        let response = ui.selectable_label(false, title_text);
+                                        if response.clicked() {
+                                            pending_play_index = Some(track_index);
+                                            pending_play_list = playlist.tracks.clone();
+                                        }
+                                        response.context_menu(|ui| {
+                                            if ui.button("Play now").clicked() {
+                                                pending_play_now_path = Some(track.clone());
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Play next").clicked() {
+                                                pending_next_path = Some(track.clone());
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Add to queue").clicked() {
+                                                pending_enqueue_path = Some(track.clone());
+                                                ui.close_menu();
+                                            }
+                                            ui.separator();
+                                            ui.label("Add to playlist");
+                                            for (target_index, target_name) in &playlist_targets {
+                                                if ui.button(target_name).clicked() {
+                                                    pending_add_to_playlist = Some((*target_index, track.clone()));
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                            ui.separator();
+                                            if ui.button("Show details").clicked() {
+                                                pending_show_details_path = Some(track.clone());
+                                                ui.close_menu();
+                                            }
+                                        });
+
+                                        ui.label(format!("Artist: {}", artist));
+                                        ui.label(format!("Album: {}", album));
+                                    });
+
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("Remove").clicked() {
+                                            pending_remove_track = Some(track_index);
+                                        }
+                                        if ui.button("Play").clicked() {
+                                            pending_play_index = Some(track_index);
+                                            pending_play_list = playlist.tracks.clone();
+                                        }
+                                    });
                                 });
-
-                                ui.label(format!("Artist: {}", artist));
-                                ui.label(format!("Album: {}", album));
                             });
-
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("Remove").clicked() {
-                                    pending_remove_track = Some(track_index);
-                                }
-                                if ui.button("Play").clicked() {
-                                    pending_play_index = Some(track_index);
-                                    pending_play_list = playlist.tracks.clone();
-                                }
-                            });
-                        });
+                            ui.add_space(4.0);
+                        }
                     });
-                    ui.add_space(4.0);
-                }
             }
         }
 

@@ -136,11 +136,12 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
     let mut pending_move_up: Option<usize> = None;
     let mut pending_move_down: Option<usize> = None;
-    let mut pending_remove: Option<usize> = None;
+    let mut pending_remove_indices: Option<Vec<usize>> = None;
     let mut pending_play: Option<usize> = None;
     let mut pending_next_path: Option<String> = None;
     let mut pending_enqueue_path: Option<String> = None;
-    let mut pending_add_to_playlist: Option<(usize, String)> = None;
+    let mut pending_add_to_playlist: Option<(usize, Vec<String>)> = None;
+    let mut pending_add_to_favorite: Option<Vec<String>> = None;
     let mut pending_show_details_path: Option<String> = None;
     let playlist_targets: Vec<(usize, String)> = app
         .playlists
@@ -308,6 +309,15 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                 "Left click: play now (queue order unchanged). Right click: common actions.",
                             );
 
+                            let selected_track_paths: Vec<String> = if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
+                                app.selected_queue_indices
+                                    .iter()
+                                    .filter_map(|&selected_index| tracks.get(selected_index).cloned())
+                                    .collect()
+                            } else {
+                                vec![track.clone()]
+                            };
+
                             if response.clicked() {
                                 if let Some(source) = app.queue_drag_source_index {
                                     if source == index {
@@ -335,10 +345,15 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     ui.close_menu();
                                 }
                                 ui.separator();
+                                if ui.button("Add to favorite").clicked() {
+                                    pending_add_to_favorite = Some(selected_track_paths.clone());
+                                    ui.close_menu();
+                                }
+                                ui.separator();
                                 ui.label("Add to playlist");
                                 for (target_index, target_name) in &playlist_targets {
                                     if ui.button(target_name).clicked() {
-                                        pending_add_to_playlist = Some((*target_index, track.clone()));
+                                        pending_add_to_playlist = Some((*target_index, selected_track_paths.clone()));
                                         ui.close_menu();
                                     }
                                 }
@@ -349,7 +364,11 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                 }
                                 ui.separator();
                                 if ui.button("Remove from queue").clicked() {
-                                    pending_remove = Some(index);
+                                    if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
+                                        pending_remove_indices = Some(app.selected_queue_indices.clone());
+                                    } else {
+                                        pending_remove_indices = Some(vec![index]);
+                                    }
                                     ui.close_menu();
                                 }
                             });
@@ -368,7 +387,11 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                 pending_play = Some(index);
                             }
                             if ui.button("Remove").clicked() {
-                                pending_remove = Some(index);
+                                if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
+                                    pending_remove_indices = Some(app.selected_queue_indices.clone());
+                                } else {
+                                    pending_remove_indices = Some(vec![index]);
+                                }
                             }
                             if ui.button("Up").clicked() {
                                 pending_move_up = Some(index);
@@ -390,8 +413,14 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     if let Some(index) = pending_move_down {
         app.move_queue_item_down(index);
     }
-    if let Some(index) = pending_remove {
-        app.remove_queue_item(index);
+    if let Some(indices) = pending_remove_indices {
+        let mut indices = indices;
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        indices.dedup();
+        for index in indices {
+            app.remove_queue_item(index);
+        }
+        app.clear_queue_selection();
     }
     if let Some(index) = pending_play {
         app.select_queue_item_single(index);
@@ -403,8 +432,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     if let Some(path) = pending_enqueue_path {
         app.enqueue_track_path(&path);
     }
-    if let Some((target_index, track)) = pending_add_to_playlist {
-        app.add_track_to_playlist(target_index, &track);
+    if let Some((target_index, tracks_to_add)) = pending_add_to_playlist {
+        for track in tracks_to_add {
+            app.add_track_to_playlist(target_index, &track);
+        }
+    }
+    if let Some(tracks_to_favorite) = pending_add_to_favorite {
+        app.add_tracks_to_favorite_playlist(&tracks_to_favorite);
     }
     if let Some(path) = pending_show_details_path {
         app.open_track_details(&path);

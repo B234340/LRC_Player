@@ -333,7 +333,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                             ui.label("No tracks found for this album.");
                         } else {
                             ui.label(format!("{} tracks", selected_album_tracks.len()));
-                            ui.label("Left click: create queue from this list and play. Right click: common actions.");
+                            ui.label("Double left click: create queue from this list and play. Right click: common actions.");
                             ui.add_space(6.0);
                             egui::ScrollArea::vertical()
                                 .id_source("album_detail_tracks_scroll")
