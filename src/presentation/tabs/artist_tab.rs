@@ -178,38 +178,59 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                                     .clone();
 
                                                 let label = format!("[{}] {}", album, title);
-                                                let response = ui.selectable_label(false, label);
-                                                if response.double_clicked() {
-                                                    pending_play_index = Some(row);
-                                                    pending_play_list = displayed_tracks.clone();
-                                                }
-                                                response.context_menu(|ui| {
-                                                    if ui.button("Play now").clicked() {
-                                                        pending_play_now_path = Some(track_path.clone());
-                                                        ui.close_menu();
+                                                ui.horizontal(|ui| {
+                                                    let toggle_response = ui
+                                                        .allocate_ui_with_layout(
+                                                            egui::vec2(28.0, 44.0),
+                                                            egui::Layout::top_down(egui::Align::Center),
+                                                            |ui| {
+                                                                ui.add_sized(
+                                                                    [22.0, 22.0],
+                                                                    egui::Button::new(if app.is_track_favorite(track_path) { "★" } else { "☆" }),
+                                                                )
+                                                            },
+                                                        )
+                                                        .inner
+                                                        .on_hover_text("Toggle favorite");
+                                                    if toggle_response.clicked() {
+                                                        app.toggle_favorite_track(track_path);
                                                     }
-                                                    if ui.button("Play next").clicked() {
-                                                        pending_next_path = Some(track_path.clone());
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui.button("Add to queue").clicked() {
-                                                        pending_enqueue_path = Some(track_path.clone());
-                                                        ui.close_menu();
-                                                    }
-                                                    ui.separator();
-                                                    ui.label("Add to playlist");
-                                                    for (target_index, target_name) in &playlist_targets {
-                                                        if ui.button(target_name).clicked() {
-                                                            pending_add_to_playlist =
-                                                                Some((*target_index, track_path.clone()));
-                                                            ui.close_menu();
+                                                    ui.add_space(4.0);
+                                                    ui.vertical(|ui| {
+                                                        let response = ui.selectable_label(false, label);
+                                                        if response.double_clicked() {
+                                                            pending_play_index = Some(row);
+                                                            pending_play_list = displayed_tracks.clone();
                                                         }
-                                                    }
-                                                    ui.separator();
-                                                    if ui.button("Show details").clicked() {
-                                                        pending_show_details_path = Some(track_path.clone());
-                                                        ui.close_menu();
-                                                    }
+                                                        response.context_menu(|ui| {
+                                                            if ui.button("Play now").clicked() {
+                                                                pending_play_now_path = Some(track_path.clone());
+                                                                ui.close_menu();
+                                                            }
+                                                            if ui.button("Play next").clicked() {
+                                                                pending_next_path = Some(track_path.clone());
+                                                                ui.close_menu();
+                                                            }
+                                                            if ui.button("Add to queue").clicked() {
+                                                                pending_enqueue_path = Some(track_path.clone());
+                                                                ui.close_menu();
+                                                            }
+                                                            ui.separator();
+                                                            ui.label("Add to playlist");
+                                                            for (target_index, target_name) in &playlist_targets {
+                                                                if ui.button(target_name).clicked() {
+                                                                    pending_add_to_playlist =
+                                                                        Some((*target_index, track_path.clone()));
+                                                                    ui.close_menu();
+                                                                }
+                                                            }
+                                                            ui.separator();
+                                                            if ui.button("Show details").clicked() {
+                                                                pending_show_details_path = Some(track_path.clone());
+                                                                ui.close_menu();
+                                                            }
+                                                        });
+                                                    });
                                                 });
                                             }
                                         },

@@ -849,11 +849,7 @@ impl GuiApp {
             return;
         }
 
-        if self.playlists.is_empty() || !self.playlists[0].name.eq_ignore_ascii_case("favorite") {
-            self.playlists = Self::normalize_playlists(std::mem::take(&mut self.playlists));
-        }
-        let favorite_index = 0;
-
+        let favorite_index = self.ensure_favorite_playlist();
         let mut changed = false;
         if let Some(playlist) = self.playlists.get_mut(favorite_index) {
             for track in tracks {
@@ -867,6 +863,57 @@ impl GuiApp {
         if changed {
             self.save_playlists();
             self.update_app_vm();
+        }
+    }
+
+    fn ensure_favorite_playlist(&mut self) -> usize {
+        if self.playlists.is_empty() || !self.playlists[0].name.eq_ignore_ascii_case("favorite") {
+            self.playlists = Self::normalize_playlists(std::mem::take(&mut self.playlists));
+        }
+        0
+    }
+
+    pub(crate) fn is_track_favorite(&self, track: &str) -> bool {
+        self.playlists
+            .first()
+            .map(|playlist| playlist.tracks.contains(&track.to_string()))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn add_track_to_favorite_playlist(&mut self, track: &str) {
+        let track = track.trim();
+        if track.is_empty() {
+            return;
+        }
+        let favorite_index = self.ensure_favorite_playlist();
+        if let Some(playlist) = self.playlists.get_mut(favorite_index) {
+            if !playlist.tracks.contains(&track.to_string()) {
+                playlist.tracks.push(track.to_string());
+                self.save_playlists();
+                self.update_app_vm();
+            }
+        }
+    }
+
+    pub(crate) fn remove_track_from_favorite_playlist(&mut self, track: &str) {
+        if self.playlists.is_empty() {
+            return;
+        }
+        let favorite_index = self.ensure_favorite_playlist();
+        if let Some(playlist) = self.playlists.get_mut(favorite_index) {
+            if let Some(pos) = playlist.tracks.iter().position(|existing| existing == track) {
+                playlist.tracks.remove(pos);
+                self.save_playlists();
+                self.update_app_vm();
+            }
+        }
+    }
+
+    pub(crate) fn toggle_favorite_track(&mut self, track: &str) {
+        if self.is_track_favorite(track) {
+            self.remove_track_from_favorite_playlist(track);
+        } else {
+            self.add_track_to_favorite_playlist(track);
         }
     }
 

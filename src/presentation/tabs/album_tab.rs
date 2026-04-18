@@ -341,7 +341,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                 .max_height((panel_height - 84.0).max(120.0))
                                 .show(ui, |ui| {
                                     for (i, track) in selected_album_tracks.iter().enumerate() {
-                                        ui.horizontal_wrapped(|ui| {
+                                        ui.horizontal(|ui| {
                                             let fallback_title = std::path::Path::new(&track.title)
                                                 .file_name()
                                                 .and_then(|name| name.to_str())
@@ -377,6 +377,22 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                             let (display_title, display_artist) = display_meta;
 
                                             let label = format!("{:>2}. {} - {}", i + 1, display_title, display_artist);
+                                            let is_favorite = app.is_track_favorite(&track.title);
+                                            let star_label = if is_favorite { "★" } else { "☆" };
+                                            let toggle_response = ui
+                                                .allocate_ui_with_layout(
+                                                    egui::vec2(24.0, 22.0),
+                                                    egui::Layout::top_down(egui::Align::Center),
+                                                    |ui| {
+                                                        ui.add_sized([22.0, 22.0], egui::Button::new(star_label))
+                                                    },
+                                                )
+                                                .inner
+                                                .on_hover_text("Toggle favorite");
+                                            if toggle_response.clicked() {
+                                                app.toggle_favorite_track(&track.title);
+                                            }
+                                            ui.add_space(4.0);
                                             let response = ui.selectable_label(false, label);
                                             if response.double_clicked() {
                                                 pending_play_index = Some(i);
@@ -416,12 +432,12 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                         });
                                     }
                                 });
-                        }
-                    });
-            }
+                            }
+                        });
+                    }
+                }
             }
         }
-    }
 
     if let Some(next) = action {
         app.select_album(next);

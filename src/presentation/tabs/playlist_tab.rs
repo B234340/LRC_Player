@@ -151,7 +151,8 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             .enumerate()
             .map(|(idx, p)| (idx, p.name.clone()))
             .collect();
-        if let Some(playlist) = app.playlists.get(selected_index) {
+        let playlist = app.playlists.get(selected_index).cloned();
+        if let Some(playlist) = playlist {
             selected_name = Some(playlist.name.clone());
             selected_len = playlist.tracks.len();
             ui.separator();
@@ -202,6 +203,25 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                             frame.show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     let art_size = egui::vec2(44.0, 44.0);
+                                    let handle_pad_y = ((art_size.y - 24.0) * 0.5).max(0.0);
+                                    let toggle_response = ui
+                                        .allocate_ui_with_layout(
+                                            egui::vec2(28.0, art_size.y),
+                                            egui::Layout::top_down(egui::Align::Center),
+                                            |ui| {
+                                                ui.add_space(handle_pad_y);
+                                                let is_favorite = app.is_track_favorite(track);
+                                                let star_label = if is_favorite { "★" } else { "☆" };
+                                                ui.add_sized([24.0, 24.0], egui::Button::new(star_label))
+                                            },
+                                        )
+                                        .inner
+                                        .on_hover_text("Toggle favorite");
+                                    if toggle_response.clicked() {
+                                        app.toggle_favorite_track(track);
+                                    }
+                                    ui.add_space(4.0);
+
                                     if let Some(art_path) = discover_artwork_for_track(Path::new(track)) {
                                         if let Some(texture) =
                                             get_cached_artwork_texture(ui.ctx(), &art_path, &format!("playlist_art_{}_{}", selected_index, track_index))
@@ -238,7 +258,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                         } else {
                                             format!("{}: {}", track_index + 1, title)
                                         };
-
                                         let response = ui.selectable_label(false, title_text);
                                         if response.clicked() {
                                             pending_play_index = Some(track_index);

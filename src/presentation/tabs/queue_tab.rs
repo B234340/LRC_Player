@@ -141,7 +141,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let mut pending_next_path: Option<String> = None;
     let mut pending_enqueue_path: Option<String> = None;
     let mut pending_add_to_playlist: Option<(usize, Vec<String>)> = None;
-    let mut pending_add_to_favorite: Option<Vec<String>> = None;
     let mut pending_show_details_path: Option<String> = None;
     let playlist_targets: Vec<(usize, String)> = app
         .playlists
@@ -299,79 +298,77 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                         }
 
                         ui.vertical(|ui| {
-                            let title_text = if is_playing {
-                                format!("{}: {} [Playing]", index + 1, title)
-                            } else {
-                                format!("{}: {}", index + 1, title)
-                            };
-
-                            let response = ui.selectable_label(is_selected, title_text).on_hover_text(
-                                "Left click: play now (queue order unchanged). Right click: common actions.",
-                            );
-
-                            let selected_track_paths: Vec<String> = if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
-                                app.selected_queue_indices
-                                    .iter()
-                                    .filter_map(|&selected_index| tracks.get(selected_index).cloned())
-                                    .collect()
-                            } else {
-                                vec![track.clone()]
-                            };
-
-                            if response.clicked() {
-                                if let Some(source) = app.queue_drag_source_index {
-                                    if source == index {
-                                        app.cancel_queue_drag();
-                                    } else {
-                                        app.move_queue_item_to(source, index);
-                                        app.cancel_queue_drag();
-                                    }
+                            let response = ui.horizontal(|ui| {
+                                let title_text = if is_playing {
+                                    format!("{}: {} [Playing]", index + 1, title)
                                 } else {
-                                    app.select_queue_item_single(index);
-                                    app.play_selected_queue_item();
+                                    format!("{}: {}", index + 1, title)
+                                };
+                                let response = ui.selectable_label(is_selected, title_text).on_hover_text(
+                                    "Left click: play now (queue order unchanged). Right click: common actions.",
+                                );
+
+                                let selected_track_paths: Vec<String> = if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
+                                    app.selected_queue_indices
+                                        .iter()
+                                        .filter_map(|&selected_index| tracks.get(selected_index).cloned())
+                                        .collect()
+                                } else {
+                                    vec![track.clone()]
+                                };
+
+                                if response.clicked() {
+                                    if let Some(source) = app.queue_drag_source_index {
+                                        if source == index {
+                                            app.cancel_queue_drag();
+                                        } else {
+                                            app.move_queue_item_to(source, index);
+                                            app.cancel_queue_drag();
+                                        }
+                                    } else {
+                                        app.select_queue_item_single(index);
+                                        app.play_selected_queue_item();
+                                    }
                                 }
-                            }
-                            response.clone().context_menu(|ui| {
-                                if ui.button("Play now").clicked() {
-                                    pending_play = Some(index);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Play next").clicked() {
-                                    pending_next_path = Some(track.clone());
-                                    ui.close_menu();
-                                }
-                                if ui.button("Add to queue tail").clicked() {
-                                    pending_enqueue_path = Some(track.clone());
-                                    ui.close_menu();
-                                }
-                                ui.separator();
-                                if ui.button("Add to favorite").clicked() {
-                                    pending_add_to_favorite = Some(selected_track_paths.clone());
-                                    ui.close_menu();
-                                }
-                                ui.separator();
-                                ui.label("Add to playlist");
-                                for (target_index, target_name) in &playlist_targets {
-                                    if ui.button(target_name).clicked() {
-                                        pending_add_to_playlist = Some((*target_index, selected_track_paths.clone()));
+                                let response = response.context_menu(|ui| {
+                                    if ui.button("Play now").clicked() {
+                                        pending_play = Some(index);
                                         ui.close_menu();
                                     }
-                                }
-                                ui.separator();
-                                if ui.button("Show details").clicked() {
-                                    pending_show_details_path = Some(track.clone());
-                                    ui.close_menu();
-                                }
-                                ui.separator();
-                                if ui.button("Remove from queue").clicked() {
-                                    if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
-                                        pending_remove_indices = Some(app.selected_queue_indices.clone());
-                                    } else {
-                                        pending_remove_indices = Some(vec![index]);
+                                    if ui.button("Play next").clicked() {
+                                        pending_next_path = Some(track.clone());
+                                        ui.close_menu();
                                     }
-                                    ui.close_menu();
-                                }
-                            });
+                                    if ui.button("Add to queue tail").clicked() {
+                                        pending_enqueue_path = Some(track.clone());
+                                        ui.close_menu();
+                                    }
+                                    ui.separator();
+                                    ui.label("Add to playlist");
+                                    for (target_index, target_name) in &playlist_targets {
+                                        if ui.button(target_name).clicked() {
+                                            pending_add_to_playlist = Some((*target_index, selected_track_paths.clone()));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                    ui.separator();
+                                    if ui.button("Show details").clicked() {
+                                        pending_show_details_path = Some(track.clone());
+                                        ui.close_menu();
+                                    }
+                                    ui.separator();
+                                    if ui.button("Remove from queue").clicked() {
+                                        if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
+                                            pending_remove_indices = Some(app.selected_queue_indices.clone());
+                                        } else {
+                                            pending_remove_indices = Some(vec![index]);
+                                        }
+                                        ui.close_menu();
+                                    }
+                                });
+                                response
+                            })
+                            .inner;
 
                             ui.label(format!("Artist: {}", artist));
                             ui.label(format!("Album: {}", album));
@@ -436,9 +433,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         for track in tracks_to_add {
             app.add_track_to_playlist(target_index, &track);
         }
-    }
-    if let Some(tracks_to_favorite) = pending_add_to_favorite {
-        app.add_tracks_to_favorite_playlist(&tracks_to_favorite);
     }
     if let Some(path) = pending_show_details_path {
         app.open_track_details(&path);

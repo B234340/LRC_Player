@@ -18,7 +18,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         .map(|(idx, p)| (idx, p.name.clone()))
         .collect();
 
-    let library = &app.app_vm.library;
+    let library = app.app_vm.library.clone();
     let selected_directory = library.selected_directory.as_deref();
 
     ui.heading("Library");
@@ -89,41 +89,57 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             ui.group(|ui| {
                 ui.label("Left click: create queue from this list and play. Right click: common actions.");
                 for (index, track) in library.selected_directory_tracks.iter().enumerate() {
-                    let response = ui.selectable_label(false, &track.title);
-                    if response.clicked() {
-                        pending_play_index = Some(index);
-                        pending_play_list = library
-                            .selected_directory_tracks
-                            .iter()
-                            .map(|row| row.title.clone())
-                            .collect();
-                    }
-                    response.context_menu(|ui| {
-                        if ui.button("Play now").clicked() {
-                            pending_play_now_path = Some(track.title.clone());
-                            ui.close_menu();
-                        }
-                        if ui.button("Play next").clicked() {
-                            pending_next_path = Some(track.title.clone());
-                            ui.close_menu();
-                        }
-                        if ui.button("Add to queue").clicked() {
-                            pending_enqueue_path = Some(track.title.clone());
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        ui.label("Add to playlist");
-                        for (target_index, target_name) in &playlist_targets {
-                            if ui.button(target_name).clicked() {
-                                pending_add_to_playlist = Some((*target_index, track.title.clone()));
-                                ui.close_menu();
+                    ui.horizontal(|ui| {
+                        ui.vertical_centered(|ui| {
+                            let is_favorite = app.is_track_favorite(&track.title);
+                            let star_label = if is_favorite { "★" } else { "☆" };
+                            if ui
+                                .add_sized([22.0, 22.0], egui::Button::new(star_label))
+                                .on_hover_text("Toggle favorite")
+                                .clicked()
+                            {
+                                app.toggle_favorite_track(&track.title);
                             }
-                        }
-                        ui.separator();
-                        if ui.button("Show details").clicked() {
-                            pending_show_details_path = Some(track.title.clone());
-                            ui.close_menu();
-                        }
+                        });
+                        ui.add_space(4.0);
+                        ui.vertical(|ui| {
+                            let response = ui.selectable_label(false, &track.title);
+                            if response.clicked() {
+                                pending_play_index = Some(index);
+                                pending_play_list = library
+                                    .selected_directory_tracks
+                                    .iter()
+                                    .map(|row| row.title.clone())
+                                    .collect();
+                            }
+                            response.context_menu(|ui| {
+                                if ui.button("Play now").clicked() {
+                                    pending_play_now_path = Some(track.title.clone());
+                                    ui.close_menu();
+                                }
+                                if ui.button("Play next").clicked() {
+                                    pending_next_path = Some(track.title.clone());
+                                    ui.close_menu();
+                                }
+                                if ui.button("Add to queue").clicked() {
+                                    pending_enqueue_path = Some(track.title.clone());
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                ui.label("Add to playlist");
+                                for (target_index, target_name) in &playlist_targets {
+                                    if ui.button(target_name).clicked() {
+                                        pending_add_to_playlist = Some((*target_index, track.title.clone()));
+                                        ui.close_menu();
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("Show details").clicked() {
+                                    pending_show_details_path = Some(track.title.clone());
+                                    ui.close_menu();
+                                }
+                            });
+                        });
                     });
                 }
             });
