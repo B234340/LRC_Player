@@ -73,6 +73,10 @@ fn wrap_album_title(title: &str, max_chars_per_line: usize, max_lines: usize) ->
     }
 }
 
+fn decode_album_id(album_id: &str) -> (&str, &str) {
+    album_id.split_once('\0').unwrap_or((album_id, ""))
+}
+
 pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let albums = app.app_vm.library.albums.clone();
     let selected_album = app.app_vm.library.selected_album.clone();
@@ -136,7 +140,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
                             let album = &albums[index];
                             visible_album_titles.push(album.title.clone());
-                            let is_selected = selected_album.as_deref() == Some(album.title.as_str());
+                            let is_selected = selected_album.as_deref() == Some(album.id.as_str());
 
                             let frame = if is_selected {
                                 egui::Frame::group(ui.style())
@@ -186,7 +190,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                         if is_selected {
                                             action = Some(None);
                                         } else {
-                                            action = Some(Some(album.title.clone()));
+                                            action = Some(Some(album.id.clone()));
                                         }
                                     }
                                 });
@@ -310,7 +314,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                             ui.set_min_height(panel_height);
                             ui.heading("Album Details");
                             ui.separator();
-                            ui.label(format!("Album: {}", selected));
+                            let (album_title, album_owner) = decode_album_id(selected);
+                            if album_owner.is_empty() {
+                                ui.label(format!("Album: {}", album_title));
+                            } else {
+                                ui.label(format!("Album: {}", album_title));
+                                ui.label(format!("Album artist: {}", album_owner));
+                            }
                             ui.add_space(4.0);
 
                             if selected_album_tracks.is_empty() {

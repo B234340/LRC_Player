@@ -34,6 +34,10 @@ impl From<&LibraryDirectoryDto> for LibraryDirectoryVm {
     }
 }
 
+fn split_album_id(album_id: &str) -> (&str, &str) {
+    album_id.split_once('\0').unwrap_or((album_id, ""))
+}
+
 impl From<&LibraryDto> for LibraryVm {
     fn from(dto: &LibraryDto) -> Self {
         Self {
@@ -50,9 +54,12 @@ impl From<&LibraryDto> for LibraryVm {
             albums: dto
                 .albums
                 .iter()
-                .map(|title| AlbumVm {
-                    id: title.clone(),
-                    title: title.clone(),
+                .map(|album_id| {
+                    let (title, _owner) = split_album_id(album_id);
+                    AlbumVm {
+                        id: album_id.clone(),
+                        title: title.to_string(),
+                    }
                 })
                 .collect(),
             selected_album: dto.selected_album.clone(),

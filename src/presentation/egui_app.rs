@@ -1371,7 +1371,7 @@ impl GuiApp {
                 library.artists = artists;
             }
             if let Some(album) = self.selected_album.as_deref() {
-                if let Ok(tracks) = cache.library_tracks_by_album(album) {
+                if let Ok(tracks) = cache.library_tracks_by_album_id(album) {
                     library.selected_album_tracks = tracks;
                 }
             }

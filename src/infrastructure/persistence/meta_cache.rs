@@ -598,12 +598,29 @@ COMMIT;
         Ok(dirs)
     }
 
-    /// Return distinct album names in the library.
+    fn encode_album_identifier(album: &str, album_artist: &str) -> String {
+        let mut id = String::with_capacity(album.len() + 1 + album_artist.len());
+        id.push_str(album);
+        id.push('\0');
+        id.push_str(album_artist);
+        id
+    }
+
+    fn decode_album_identifier(album_id: &str) -> (&str, &str) {
+        album_id.split_once('\0').unwrap_or((album_id, ""))
+    }
+
+    /// Return distinct album identifiers in the library.
     pub fn library_albums(&self) -> anyhow::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT album FROM tracks WHERE album IS NOT NULL AND album <> '' ORDER BY album COLLATE NOCASE",
+            "SELECT DISTINCT album, COALESCE(NULLIF(album_artist, ''), NULLIF(artist, ''), '') AS album_owner
+             FROM tracks
+             WHERE album IS NOT NULL AND album <> ''
+             ORDER BY album COLLATE NOCASE, album_owner COLLATE NOCASE",
         )?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Self::encode_album_identifier(&row.get::<_, String>(0)?, &row.get::<_, String>(1)?))
+        })?;
         let mut albums = Vec::new();
         for album in rows {
             albums.push(album?);
@@ -648,6 +665,43 @@ COMMIT;
              WHERE t.album = ?1",
         )?;
         let rows = stmt.query_map(params![album], |row| row.get::<_, String>(0))?;
+        let mut paths = Vec::new();
+        for path in rows {
+            paths.push(path?);
+        }
+
+        paths.sort_by(|a, b| {
+            let a_name = Path::new(a)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(a)
+                .to_ascii_lowercase();
+            let b_name = Path::new(b)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(b)
+                .to_ascii_lowercase();
+            a_name.cmp(&b_name)
+        });
+
+        Ok(paths)
+    }
+
+    /// Return playable location paths grouped by a unique album identifier.
+    pub fn library_tracks_by_album_id(&self, album_id: &str) -> anyhow::Result<Vec<String>> {
+        let (album, album_owner) = Self::decode_album_identifier(album_id);
+        if album_owner.is_empty() {
+            return self.library_tracks_by_album(album);
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT l.path
+             FROM tracks t
+             JOIN locations l ON l.content_id = t.content_id
+             WHERE t.album = ?1
+               AND COALESCE(NULLIF(t.album_artist, ''), NULLIF(t.artist, ''), '') = ?2",
+        )?;
+        let rows = stmt.query_map(params![album, album_owner], |row| row.get::<_, String>(0))?;
         let mut paths = Vec::new();
         for path in rows {
             paths.push(path?);

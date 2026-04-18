@@ -442,9 +442,10 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                 .duration_since(std::time::UNIX_EPOCH)
                                                 .map(|d| d.as_secs() as i64)
                                                 .unwrap_or(0);
+                                            let content_id = file_path.to_string_lossy().to_string();
                                             let _ = db_sender
                                                 .send(DBCommand::UpsertTrack {
-                                                    content_id: partial.clone(),
+                                                    content_id: content_id.clone(),
                                                     title,
                                                     artist,
                                                     album_artist,
@@ -457,7 +458,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
 
                                             let _ = db_sender
                                                 .send(DBCommand::UpsertLocation {
-                                                    content_id: partial.clone(),
+                                                    content_id: content_id.clone(),
                                                     path: file_path.to_string_lossy().to_string(),
                                                     device: None,
                                                     inode: None,
@@ -471,7 +472,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
 
                                             let _ = db_sender
                                                 .send(DBCommand::UpsertHash {
-                                                    content_id: partial.clone(),
+                                                    content_id: content_id.clone(),
                                                     algo: "blake3-partial".to_string(),
                                                     full_hash: None,
                                                     partial_hash: Some(partial.clone()),
