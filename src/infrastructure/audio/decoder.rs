@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,7 +14,9 @@ pub fn spawn_decode_to_producer(
     producer_tx: Sender<Arc<Vec<f32>>>,
     pool: Option<Arc<crate::infrastructure::audio::cpal_backend::BufferPool>>,
     taps: usize,
-) -> std::thread::JoinHandle<()> {
+    start_ms: Option<u64>,
+    stop_rx: Receiver<()>,
+) -> std::thread::JoinHandle<anyhow::Result<()>> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
@@ -68,7 +70,45 @@ pub fn spawn_decode_to_producer(
             let mut read_idx: usize = 0;
             let src_target_len = chunk_frames.saturating_mul(channels as usize);
 
+            let mut samples_skipped = 0usize;
+            if let Some(start_ms) = start_ms {
+                let target_frames = (start_ms as u64).saturating_mul(sample_rate as u64) / 1000;
+                let target_samples = target_frames.saturating_mul(channels as u64) as usize;
+                while samples_skipped < target_samples {
+                    if stop_rx.try_recv().is_ok() {
+                        break;
+                    }
+                    match format.next_packet() {
+                        Ok(packet) => match decoder.decode(&packet) {
+                            Ok(audio_buf) => {
+                                let frames = audio_buf.frames();
+                                let mut sb = SampleBuffer::<f32>::new(
+                                    frames as symphonia::core::units::Duration,
+                                    *audio_buf.spec(),
+                                );
+                                sb.copy_interleaved_ref(audio_buf);
+                                let samples = sb.samples();
+                                let to_skip = (target_samples - samples_skipped).min(samples.len());
+                                samples_skipped += to_skip;
+                                if samples_skipped >= target_samples {
+                                    break;
+                                }
+                            }
+                            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+                            Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+                        },
+                        Err(symphonia::core::errors::Error::IoError(_)) => break,
+                        Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+                    }
+                }
+            }
+
+            let mut stop_requested = false;
             loop {
+                if stop_rx.try_recv().is_ok() {
+                    stop_requested = true;
+                    break;
+                }
                 match format.next_packet() {
                     Ok(packet) => match decoder.decode(&packet) {
                         Ok(audio_buf) => {
@@ -96,7 +136,14 @@ pub fn spawn_decode_to_producer(
                                 conv.process(chunk, channels, sample_rate, &mut out_buf);
 
                                 // send to producer (blocking send to apply backpressure)
-                                let _ = producer_tx.send(Arc::new(out_buf));
+                                if producer_tx.send(Arc::new(out_buf)).is_err() {
+                                    stop_requested = true;
+                                    break;
+                                }
+                            }
+
+                            if stop_requested {
+                                break;
                             }
 
                             // Compact periodically to avoid O(n) drain for every chunk.
@@ -114,8 +161,8 @@ pub fn spawn_decode_to_producer(
                 }
             }
 
-            // send remaining samples if any
-            if read_idx < acc.len() {
+            // send remaining samples only when finishing naturally.
+            if !stop_requested && read_idx < acc.len() {
                 let chunk = &acc[read_idx..];
                 let mut out_buf = if let Some(p) = &pool {
                     p.get((chunk.len() / channels as usize) * target_channels as usize)
@@ -128,10 +175,7 @@ pub fn spawn_decode_to_producer(
 
             Ok(())
         })();
-
-        if let Err(e) = res {
-            tracing::error!("decode thread error: {}", e);
-        }
+        res
     })
 }
 

@@ -154,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 // spawn decoder that decodes -> converts to eff_fmt -> sends Arc<Vec<f32>> to producer
+                let (_stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
                 let _dec_handle =
                     lrc_player::infrastructure::audio::decoder::spawn_decode_to_producer(
                         play_path.clone(),
@@ -163,6 +164,8 @@ async fn main() -> anyhow::Result<()> {
                         producer_tx,
                         pool,
                         taps,
+                        Some(0),
+                        stop_rx,
                     );
 
                 // In this demo we leave playback running until user exits; decoder/writer handle lifecycle

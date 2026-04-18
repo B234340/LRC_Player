@@ -2,20 +2,24 @@ use crate::application::dto::{LibraryDto, PlaylistDto, SettingsDto, StateDto};
 use crate::application::usecases::build_app_vm::build_app_vm;
 use crate::application::view_model::{AppVm, QueueVm};
 use crate::config::{Config, Language, LogLevel, Theme};
+use crate::domain::model::{PlaybackMode, PlaybackState};
 use crate::infrastructure::audio;
 use crate::infrastructure::decode::SymphoniaDecoder;
 use crate::ports::audio_output::{AudioFormat, AudioOutput, SampleFormat};
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use crate::infrastructure::lyrics::Lyrics;
 use crate::infrastructure::persistence::{MetaCache, PlaylistsFile, StateFile};
 use image::io::Reader as ImageReader;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use crate::localization::{language_name, supported_languages, translate};
 use crate::presentation::tabs;
 use crate::shared::ipc as ipc_mod;
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::{egui, App, CreationContext};
 use fontdb::{Database, Family, Source, Style};
+use rand::seq::IteratorRandom;
+use rand::thread_rng;
 use std::collections::HashSet;
 use std::fs;
 
@@ -70,7 +74,23 @@ pub struct GuiApp {
     pub(crate) lyrics_files: Vec<std::path::PathBuf>,
     pub(crate) selected_lyrics_index: Option<usize>,
     pub(crate) loaded_lyrics: Option<Lyrics>,
+    pub(crate) playback_state: PlaybackState,
+    pub(crate) playback_mode: crate::domain::model::PlaybackMode,
+    pub(crate) current_queue_index: Option<usize>,
     playback_status_receiver: Option<Receiver<String>>,
+    playback_cancel_sender: Option<Sender<()>>,
+    playback_thread_handle: Option<std::thread::JoinHandle<()>>,
+    playback_start_instant: Option<Instant>,
+    playback_start_ms: u64,
+    pending_play_request: bool,
+    playback_state_before_seek: Option<PlaybackState>,
+    pending_seek_ms: Option<u64>,
+    seek_last_change_at: Option<Instant>,
+    seek_interacting: bool,
+    seek_long_press_start: Option<Instant>,
+    seek_key_hold_direction: i8,
+    seek_key_hold_started_at: Option<Instant>,
+    seek_key_last_step_at: Option<Instant>,
     pub(crate) play_position_ms: u64,
     pub(crate) play_duration_ms: Option<u64>,
     pub(crate) play_title: Option<String>,
@@ -94,7 +114,7 @@ pub struct GuiApp {
     pub(crate) selected_playlist: Option<usize>,
     pub(crate) playlist_track_input: String,
     queue: QueueVm,
-    queue_item_input: String,
+    pub(crate) queue_item_input: String,
     pub(crate) selected_queue_index: Option<usize>,
     pub(crate) taps: usize,
     pub(crate) theme: Theme,
@@ -130,6 +150,7 @@ impl GuiApp {
             scan_excludes,
             queue_tracks: Vec::new(),
             selected_queue_index: None,
+            queue_playback_mode: PlaybackMode::Sequential,
             favorite_directories: Vec::new(),
         };
 
@@ -150,6 +171,7 @@ impl GuiApp {
                 scan_excludes: Vec::new(),
                 queue_tracks: Vec::new(),
                 selected_queue_index: None,
+                queue_playback_mode: PlaybackMode::Sequential,
                 last_play_position_ms: None,
                 favorite_directories: Vec::new(),
             })
@@ -172,6 +194,7 @@ impl GuiApp {
             scan_excludes: self.scan_excludes.clone(),
             queue_tracks: self.queue.tracks.clone(),
             selected_queue_index: self.selected_queue_index,
+            queue_playback_mode: self.playback_mode,
             favorite_directories: self.favorite_directories.clone(),
         };
         if let Ok(store) = StateFile::open() {
@@ -233,7 +256,7 @@ impl GuiApp {
         }
     }
 
-    fn add_queue_item(&mut self) {
+    pub(crate) fn add_queue_item(&mut self) {
         let item = self.queue_item_input.trim().to_string();
         if item.is_empty() {
             return;
@@ -268,6 +291,13 @@ impl GuiApp {
         }
         self.queue.tracks.swap(index, index + 1);
         self.selected_queue_index = Some(index + 1);
+        self.update_app_vm();
+    }
+
+    pub(crate) fn clear_queue(&mut self) {
+        self.queue.tracks.clear();
+        self.selected_queue_index = None;
+        self.current_queue_index = None;
         self.update_app_vm();
     }
 
@@ -341,12 +371,323 @@ impl GuiApp {
         }
     }
 
+    fn signal_playback_stop(&mut self) {
+        if let Some(tx) = self.playback_cancel_sender.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    fn detach_playback_thread(&mut self) {
+        // Dropping JoinHandle detaches the thread, avoiding UI stalls on stop/resume.
+        let _ = self.playback_thread_handle.take();
+    }
+
+    fn update_playback_position_from_clock(&mut self) {
+        if let Some(start_instant) = self.playback_start_instant {
+            let elapsed = start_instant.elapsed();
+            let elapsed_ms = elapsed.as_millis() as u64;
+            let position = self.playback_start_ms.saturating_add(elapsed_ms);
+            if let Some(duration) = self.play_duration_ms {
+                self.play_position_ms = position.min(duration);
+            } else {
+                self.play_position_ms = position;
+            }
+        }
+    }
+
+    fn pause_playback(&mut self) {
+        self.update_playback_position_from_clock();
+        self.signal_playback_stop();
+        self.playback_state = PlaybackState::Paused;
+        self.play_status = Some("Paused".to_string());
+        self.playback_start_instant = None;
+        self.pending_play_request = false;
+    }
+
+    pub(crate) fn set_seek_interacting(&mut self, interacting: bool) {
+        self.seek_interacting = interacting;
+    }
+
+    pub(crate) fn is_seek_interacting(&self) -> bool {
+        self.seek_interacting
+    }
+
+    pub(crate) fn set_seek_long_press_start(&mut self, start: Option<Instant>) {
+        self.seek_long_press_start = start;
+    }
+
+    pub(crate) fn seek_long_press_elapsed(&self) -> Option<Duration> {
+        self.seek_long_press_start.map(|start| start.elapsed())
+    }
+
+    fn step_seek_by(&mut self, direction: i8, step_ms: u64, duration_ms: u64) {
+        let next = if direction < 0 {
+            self.play_position_ms.saturating_sub(step_ms)
+        } else {
+            self.play_position_ms.saturating_add(step_ms).min(duration_ms)
+        };
+        if next != self.play_position_ms {
+            self.queue_seek_position(next);
+        }
+    }
+
+    pub(crate) fn handle_play_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        let (space_pressed, left_pressed, right_pressed, left_down, right_down) =
+            ctx.input(|input| {
+                (
+                    input.key_pressed(egui::Key::Space),
+                    input.key_pressed(egui::Key::ArrowLeft),
+                    input.key_pressed(egui::Key::ArrowRight),
+                    input.key_down(egui::Key::ArrowLeft),
+                    input.key_down(egui::Key::ArrowRight),
+                )
+            });
+
+        if space_pressed {
+            self.toggle_play_pause();
+        }
+
+        let now = Instant::now();
+        let Some(duration_ms) = self.play_duration_ms else {
+            self.set_seek_interacting(false);
+            self.seek_key_hold_direction = 0;
+            self.seek_key_hold_started_at = None;
+            self.seek_key_last_step_at = None;
+            return;
+        };
+
+        if left_pressed && !right_pressed {
+            self.step_seek_by(-1, 10_000, duration_ms);
+            self.seek_key_hold_direction = -1;
+            self.seek_key_hold_started_at = Some(now);
+            self.seek_key_last_step_at = Some(now);
+            self.set_seek_interacting(false);
+        } else if right_pressed && !left_pressed {
+            self.step_seek_by(1, 10_000, duration_ms);
+            self.seek_key_hold_direction = 1;
+            self.seek_key_hold_started_at = Some(now);
+            self.seek_key_last_step_at = Some(now);
+            self.set_seek_interacting(false);
+        }
+
+        let hold_direction = match (left_down, right_down) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        };
+
+        if hold_direction == 0 {
+            self.set_seek_interacting(false);
+            self.seek_key_hold_direction = 0;
+            self.seek_key_hold_started_at = None;
+            self.seek_key_last_step_at = None;
+            return;
+        }
+
+        if self.seek_key_hold_direction != hold_direction {
+            self.seek_key_hold_direction = hold_direction;
+            self.seek_key_hold_started_at = Some(now);
+            self.seek_key_last_step_at = Some(now);
+            self.set_seek_interacting(false);
+        }
+
+        let hold_delay = Duration::from_millis(350);
+        let repeat_every = Duration::from_millis(120);
+        let started_at = self.seek_key_hold_started_at.unwrap_or(now);
+        let hold_elapsed = now.duration_since(started_at);
+        if hold_elapsed < hold_delay {
+            ctx.request_repaint_after(hold_delay - hold_elapsed);
+            return;
+        }
+
+        self.set_seek_interacting(true);
+        let can_step = self
+            .seek_key_last_step_at
+            .map(|last| now.duration_since(last) >= repeat_every)
+            .unwrap_or(true);
+        if can_step {
+            self.step_seek_by(hold_direction, 1_000, duration_ms);
+            self.seek_key_last_step_at = Some(now);
+        }
+
+        ctx.request_repaint_after(repeat_every);
+    }
+
+    pub(crate) fn queue_seek_position(&mut self, position_ms: u64) {
+        self.play_position_ms = position_ms;
+        self.pending_seek_ms = Some(position_ms);
+        self.seek_last_change_at = Some(Instant::now());
+    }
+
+    fn flush_pending_seek(&mut self) {
+        let Some(target_ms) = self.pending_seek_ms else {
+            return;
+        };
+        if self.seek_interacting {
+            return;
+        }
+
+        let debounce = Duration::from_millis(150);
+        if let Some(last_change) = self.seek_last_change_at {
+            if last_change.elapsed() < debounce {
+                return;
+            }
+        }
+
+        self.pending_seek_ms = None;
+        self.seek_last_change_at = None;
+        self.play_position_ms = target_ms;
+
+        // Avoid restarting playback when already stopped; keep the chosen position only.
+        if self.playback_state != PlaybackState::Stopped {
+            self.seek_to_position();
+        }
+    }
+
     pub(crate) fn play_selected_queue_item(&mut self) {
         if let Some(index) = self.selected_queue_index {
-            if let Some(path) = self.queue.tracks.get(index) {
-                self.play_path = path.clone();
+            if let Some(path) = self.queue.tracks.get(index).cloned() {
+                self.current_queue_index = Some(index);
+                self.play_path = path;
+                self.play_position_ms = 0;
+                self.playback_state = PlaybackState::Buffering;
                 self.discover_lyrics_for_current_play_path();
                 self.refresh_play_metadata();
+                self.request_play();
+            }
+        }
+    }
+
+    pub(crate) fn seek_to_position(&mut self) {
+        if self.play_path.trim().is_empty() {
+            return;
+        }
+        if self.play_duration_ms.is_none() {
+            self.refresh_play_metadata();
+        }
+
+        let target_ms = self.play_position_ms;
+        match self.playback_state {
+            PlaybackState::Stopped | PlaybackState::Paused => {
+                self.play_status = Some(format!("Seek position updated: {} ms", target_ms));
+            }
+            _ => {
+                self.playback_state_before_seek = Some(self.playback_state);
+                self.playback_state = PlaybackState::Seeking;
+                self.play_status = Some(format!("Seeking to {} ms", target_ms));
+                self.request_play();
+            }
+        }
+    }
+
+    pub(crate) fn play_current_queue_item(&mut self) {
+        let index = self
+            .current_queue_index
+            .or(self.selected_queue_index)
+            .or_else(|| if self.queue.tracks.is_empty() { None } else { Some(0) });
+        if let Some(index) = index {
+            if let Some(path) = self.queue.tracks.get(index).cloned() {
+                self.selected_queue_index = Some(index);
+                self.current_queue_index = Some(index);
+                self.play_path = path;
+                self.playback_state = PlaybackState::Buffering;
+                self.discover_lyrics_for_current_play_path();
+                self.refresh_play_metadata();
+                self.request_play();
+            }
+        }
+    }
+
+    pub(crate) fn play_next(&mut self) {
+        let len = self.queue.tracks.len();
+        if len == 0 {
+            return;
+        }
+        let current = self
+            .current_queue_index
+            .or(self.selected_queue_index)
+            .unwrap_or(0);
+
+        let next_index = match self.playback_mode {
+            PlaybackMode::Sequential => current.checked_add(1).filter(|&index| index < len),
+            PlaybackMode::RepeatOne => Some(current),
+            PlaybackMode::RepeatAll => {
+                if current + 1 < len {
+                    Some(current + 1)
+                } else {
+                    Some(0)
+                }
+            }
+            PlaybackMode::Shuffle => {
+                let mut rng = thread_rng();
+                let choices: Vec<usize> = (0..len).filter(|&i| i != current).collect();
+                if choices.is_empty() {
+                    Some(current)
+                } else {
+                    choices.into_iter().choose(&mut rng)
+                }
+            }
+        };
+
+        if let Some(index) = next_index {
+            self.selected_queue_index = Some(index);
+            self.play_selected_queue_item();
+        }
+    }
+
+    pub(crate) fn play_previous(&mut self) {
+        let len = self.queue.tracks.len();
+        if len == 0 {
+            return;
+        }
+        let current = self
+            .current_queue_index
+            .or(self.selected_queue_index)
+            .unwrap_or(0);
+
+        let prev_index = match self.playback_mode {
+            PlaybackMode::Sequential => current.checked_sub(1),
+            PlaybackMode::RepeatOne => Some(current),
+            PlaybackMode::RepeatAll => {
+                if current == 0 {
+                    Some(len - 1)
+                } else {
+                    Some(current - 1)
+                }
+            }
+            PlaybackMode::Shuffle => {
+                let mut rng = thread_rng();
+                let choices: Vec<usize> = (0..len).filter(|&i| i != current).collect();
+                if choices.is_empty() {
+                    Some(current)
+                } else {
+                    choices.into_iter().choose(&mut rng)
+                }
+            }
+        };
+
+        if let Some(index) = prev_index {
+            self.selected_queue_index = Some(index);
+            self.play_selected_queue_item();
+        }
+    }
+
+    pub(crate) fn toggle_play_pause(&mut self) {
+        match self.playback_state {
+            PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
+                self.pause_playback();
+            }
+            PlaybackState::Paused | PlaybackState::Stopped => {
+                if self.play_path.trim().is_empty() {
+                    if !self.queue.tracks.is_empty() {
+                        self.play_current_queue_item();
+                        return;
+                    }
+                    self.play_status = Some("No track loaded".to_string());
+                    return;
+                }
+                self.playback_state = PlaybackState::Buffering;
+                self.play_status = Some("Resuming playback".to_string());
                 self.request_play();
             }
         }
@@ -593,18 +934,37 @@ impl GuiApp {
             return;
         }
 
-        self.discover_lyrics_for_current_play_path();
+        let is_seeking = self.playback_state == PlaybackState::Seeking;
+        if self.playback_thread_handle.is_some() {
+            self.signal_playback_stop();
+            self.pending_play_request = true;
+            if !is_seeking {
+                self.playback_state = PlaybackState::Buffering;
+            }
+            self.play_status = Some("Stopping previous playback...".to_string());
+            return;
+        }
+
+        self.pending_play_request = false;
+        if !is_seeking {
+            self.playback_state = PlaybackState::Buffering;
+        }
         self.play_status = Some(format!("Starting playback: {}", path.display()));
+        self.playback_start_instant = Some(Instant::now());
+        self.playback_start_ms = self.play_position_ms;
         self.save_state();
 
+        let start_ms = Some(self.play_position_ms);
         let (status_tx, status_rx) = crossbeam_channel::unbounded();
+        let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
         self.playback_status_receiver = Some(status_rx);
+        self.playback_cancel_sender = Some(stop_tx);
         let preferred_device = self
             .selected
             .and_then(|idx| self.device_names.get(idx).cloned());
         let taps = self.taps;
 
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let mut output = audio::CpalOutput::new();
 
             let requested = AudioFormat {
@@ -646,16 +1006,47 @@ impl GuiApp {
                 producer_tx,
                 pool,
                 taps,
+                start_ms,
+                stop_rx.clone(),
             );
 
-            if decode_handle.join().is_err() {
-                let _ = status_tx.send("Playback failed: decode thread panicked".to_string());
-                let _ = output.stop();
-                return;
+            loop {
+                if stop_rx.try_recv().is_ok() {
+                    let _ = status_tx.send("Playback stopped".to_string());
+                    let _ = output.stop();
+                    return;
+                }
+
+                if decode_handle.is_finished() {
+                    match decode_handle.join() {
+                        Ok(Ok(())) => {
+                            break;
+                        }
+                        Ok(Err(e)) => {
+                            let _ = status_tx.send(format!("Playback failed: {}", e));
+                            let _ = output.stop();
+                            return;
+                        }
+                        Err(_) => {
+                            let _ = status_tx.send("Playback failed: decode thread panicked".to_string());
+                            let _ = output.stop();
+                            return;
+                        }
+                    }
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
 
-            // Keep output alive long enough to drain buffered samples.
-            std::thread::sleep(std::time::Duration::from_millis(1500));
+            // Keep output alive long enough to drain buffered samples, but remain interruptible.
+            for _ in 0..150 {
+                if stop_rx.try_recv().is_ok() {
+                    let _ = status_tx.send("Playback stopped".to_string());
+                    let _ = output.stop();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
 
             if let Err(e) = output.stop() {
                 let _ = status_tx.send(format!("Playback stop warning: {}", e));
@@ -663,14 +1054,71 @@ impl GuiApp {
 
             let _ = status_tx.send("Playback finished".to_string());
         });
+        self.playback_thread_handle = Some(handle);
+        // Reflect user action immediately; runtime status updates can still override this.
+        self.playback_state = PlaybackState::Playing;
+        self.play_status = Some("Playback starting...".to_string());
     }
 
     fn poll_playback_status(&mut self) {
         if let Some(rx) = &self.playback_status_receiver {
+            let mut playback_ended = false;
+            let mut playback_failed = false;
+            let mut playback_finished = false;
             while let Ok(status) = rx.try_recv() {
+                if status.starts_with("Playback running") {
+                    self.playback_state = PlaybackState::Playing;
+                } else if status == "Playback finished" {
+                    self.playback_state = PlaybackState::Stopped;
+                    self.playback_start_instant = None;
+                    playback_ended = true;
+                    playback_finished = true;
+                } else if status == "Playback stopped" {
+                    if self.playback_state != PlaybackState::Paused {
+                        self.playback_state = PlaybackState::Stopped;
+                    }
+                    self.playback_start_instant = None;
+                    playback_ended = true;
+                } else if status.starts_with("Playback failed") {
+                    self.playback_state = PlaybackState::Stopped;
+                    self.playback_start_instant = None;
+                    playback_ended = true;
+                    playback_failed = true;
+                }
                 self.play_status = Some(status);
             }
+            if playback_ended {
+                self.detach_playback_thread();
+                self.playback_cancel_sender = None;
+                self.playback_status_receiver = None;
+                if self.pending_play_request {
+                    self.pending_play_request = false;
+                    self.request_play();
+                    return;
+                }
+                if playback_failed {
+                    if self.current_queue_index.is_some() || self.selected_queue_index.is_some() {
+                        self.play_status = Some("Playback failed, skipping to next queued track".to_string());
+                        self.play_next();
+                        return;
+                    }
+                }
+                if playback_finished {
+                    if self.current_queue_index.is_some() || self.selected_queue_index.is_some() {
+                        self.play_status = Some("Track finished, advancing to next queued track".to_string());
+                        self.play_next();
+                        return;
+                    }
+                }
+            }
         }
+        if self.playback_state == PlaybackState::Playing
+            && !self.seek_interacting
+            && self.pending_seek_ms.is_none()
+        {
+            self.update_playback_position_from_clock();
+        }
+        self.flush_pending_seek();
     }
 
     fn request_cancel(&mut self) {
@@ -886,7 +1334,23 @@ impl GuiApp {
             play_artwork_source: None,
             lyrics_offset_ms: 0,
             play_status: None,
+            playback_state: PlaybackState::Stopped,
+            playback_mode: state.queue_playback_mode,
+            current_queue_index: selected_queue_index,
             playback_status_receiver: None,
+            playback_cancel_sender: None,
+            playback_thread_handle: None,
+            playback_start_instant: None,
+            playback_start_ms: state.last_play_position_ms.unwrap_or(0),
+            pending_play_request: false,
+            playback_state_before_seek: None,
+            pending_seek_ms: None,
+            seek_last_change_at: None,
+            seek_interacting: false,
+            seek_long_press_start: None,
+            seek_key_hold_direction: 0,
+            seek_key_hold_started_at: None,
+            seek_key_last_step_at: None,
             scan_target_input: String::new(),
             scan_exclude_input: String::new(),
             scan_targets: state.scan_targets,
@@ -923,6 +1387,17 @@ impl App for GuiApp {
             self.refresh_scan_status();
         }
         self.poll_playback_status();
+
+        // eframe is mostly event-driven; request periodic repaint while playback is active
+        // so seek bar/time visualization does not stall for long intervals.
+        if matches!(
+            self.playback_state,
+            PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking
+        ) || self.pending_seek_ms.is_some()
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.heading(translate("title", self.language));
             ui.horizontal(|ui| {
@@ -1124,48 +1599,6 @@ impl App for GuiApp {
                 });
             }
 
-            if self.active_tab == Tab::Queue {
-                ui.separator();
-                ui.heading("Queue Controls");
-                ui.label("Add a track path to the queue and play selected items.");
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.queue_item_input);
-                    if ui.button("Add to queue").clicked() {
-                        self.add_queue_item();
-                    }
-                });
-
-                if self.queue.tracks.is_empty() {
-                    ui.label("Queue is empty.");
-                } else {
-                    let tracks = self.queue.tracks.clone();
-                    for (index, track) in tracks.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(self.selected_queue_index == Some(index),
-                                    track)
-                                .clicked()
-                            {
-                                self.selected_queue_index = Some(index);
-                            }
-                            if ui.button("Remove").clicked() {
-                                self.remove_queue_item(index);
-                            }
-                        });
-                    }
-                }
-
-                ui.horizontal(|ui| {
-                    if ui.button("Play selected").clicked() {
-                        self.play_selected_queue_item();
-                    }
-                    if ui.button("Remove selected").clicked() {
-                        if let Some(index) = self.selected_queue_index {
-                            self.remove_queue_item(index);
-                        }
-                    }
-                });
-            }
 
             if self.active_tab == Tab::Library {
                 ui.separator();

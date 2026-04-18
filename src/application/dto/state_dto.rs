@@ -1,3 +1,4 @@
+use crate::domain::model::PlaybackMode;
 use serde::{Deserialize, Deserializer, Serialize};
 
 fn deserialize_last_scan_status<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -49,6 +50,8 @@ pub struct StateDto {
     pub queue_tracks: Vec<String>,
     #[serde(default)]
     pub selected_queue_index: Option<usize>,
+    #[serde(default)]
+    pub queue_playback_mode: PlaybackMode,
     #[serde(default)]
     pub favorite_directories: Vec<String>,
 }

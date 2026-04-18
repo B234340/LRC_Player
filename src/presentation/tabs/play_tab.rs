@@ -1,15 +1,39 @@
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.heading("Play");
     ui.label("Enter a file path or select a queued track, then press Play.");
+    ui.add_space(4.0);
+    app.handle_play_keyboard_shortcuts(ui.ctx());
+    ui.label("Space: play/pause, ←/→: seek 10s (hold for continuous seek)");
     ui.separator();
+
+    ui.horizontal(|ui| {
+        if ui.button("Previous").clicked() {
+            app.play_previous();
+        }
+        let play_label = match app.playback_state {
+            crate::domain::model::PlaybackState::Playing => "Pause",
+            crate::domain::model::PlaybackState::Paused => "Resume",
+            _ => "Play",
+        };
+        if ui.button(play_label).clicked() {
+            app.toggle_play_pause();
+        }
+        if ui.button("Next").clicked() {
+            app.play_next();
+        }
+    });
 
     ui.horizontal(|ui| {
         ui.text_edit_singleline(&mut app.play_path);
         if ui.button("Play path").clicked() {
+            app.play_position_ms = 0;
+            app.playback_state = crate::domain::model::PlaybackState::Buffering;
+            app.discover_lyrics_for_current_play_path();
             app.request_play();
         }
         if ui.button("Discover metadata").clicked() {
@@ -18,20 +42,41 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         }
     });
 
+    ui.label(format!("Playback state: {}", app.playback_state));
     if let Some(status) = &app.play_status {
         ui.label(format!("Status: {}", status));
+    }
+
+    let mut mode_changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Playback mode:");
+        mode_changed |= ui
+            .selectable_value(&mut app.playback_mode, crate::domain::model::PlaybackMode::Sequential, "Sequential")
+            .changed();
+        mode_changed |= ui
+            .selectable_value(&mut app.playback_mode, crate::domain::model::PlaybackMode::RepeatOne, "Repeat One")
+            .changed();
+        mode_changed |= ui
+            .selectable_value(&mut app.playback_mode, crate::domain::model::PlaybackMode::RepeatAll, "Repeat All")
+            .changed();
+        mode_changed |= ui
+            .selectable_value(&mut app.playback_mode, crate::domain::model::PlaybackMode::Shuffle, "Shuffle")
+            .changed();
+    });
+    if mode_changed {
+        app.save_state();
     }
 
     if !app.play_path.trim().is_empty() {
         app.ensure_play_artwork(ui.ctx());
         if let Some(texture) = &app.play_artwork_handle {
+            let available = ui.available_size();
+            let max_side = (available.x.min(available.y) * 0.45).clamp(128.0, 320.0);
             let mut image_size = texture.size_vec2();
-            let max_size = egui::Vec2::splat(256.0);
-            if image_size.x > max_size.x || image_size.y > max_size.y {
-                let scale = (max_size.x / image_size.x).min(max_size.y / image_size.y);
-                image_size *= scale;
-            }
+            let scale = (max_side / image_size.x).min(max_side / image_size.y).min(1.0);
+            image_size *= scale;
             ui.image(texture, image_size);
+            ui.add_space(8.0);
         }
 
         let path = Path::new(&app.play_path);
@@ -60,11 +105,33 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 ui.label(format!("({:+} ms)", app.lyrics_offset_ms));
             });
 
-            let slider = egui::Slider::new(&mut app.play_position_ms, 0..=duration_ms)
-                .text("Position ms");
-            if ui.add(slider).changed() {
+            let slider = egui::Slider::new(&mut app.play_position_ms, 0..=duration_ms).text("Position ms");
+            let response = ui
+                .scope(|ui| {
+                    ui.spacing_mut().slider_width = ui.available_width();
+                    ui.add(slider)
+                })
+                .inner;
+            if response.changed() {
+                app.queue_seek_position(app.play_position_ms);
                 app.save_state();
             }
+
+            let pointer_down = response.is_pointer_button_down_on();
+            let mut slider_interacting = response.dragged() || response.has_focus();
+            if pointer_down {
+                if app.seek_long_press_elapsed().is_none() {
+                    app.set_seek_long_press_start(Some(Instant::now()));
+                } else if !app.is_seek_interacting()
+                    && app.seek_long_press_elapsed().unwrap() >= Duration::from_millis(350)
+                {
+                    slider_interacting = true;
+                }
+            } else {
+                app.set_seek_long_press_start(None);
+            }
+
+            app.set_seek_interacting(slider_interacting);
 
             let pos = app.play_position_ms.min(duration_ms);
             let mins = pos / 60000;

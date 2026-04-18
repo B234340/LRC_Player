@@ -29,6 +29,7 @@ fn update_scan_status(
             scan_excludes: Vec::new(),
             queue_tracks: Vec::new(),
             selected_queue_index: None,
+            queue_playback_mode: lrc_player::domain::model::PlaybackMode::Sequential,
             favorite_directories: Vec::new(),
         });
     state.last_scan_status = Some(status.to_string());
