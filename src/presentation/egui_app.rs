@@ -91,6 +91,7 @@ pub struct GuiApp {
     seek_key_hold_direction: i8,
     seek_key_hold_started_at: Option<Instant>,
     seek_key_last_step_at: Option<Instant>,
+    pub(crate) queue_scroll_to_playing: bool,
     pub(crate) play_position_ms: u64,
     pub(crate) play_duration_ms: Option<u64>,
     pub(crate) play_title: Option<String>,
@@ -116,6 +117,11 @@ pub struct GuiApp {
     queue: QueueVm,
     pub(crate) queue_item_input: String,
     pub(crate) selected_queue_index: Option<usize>,
+    pub(crate) selected_queue_indices: Vec<usize>,
+    queue_selection_anchor: Option<usize>,
+    pub(crate) queue_handle_hold_index: Option<usize>,
+    pub(crate) queue_handle_hold_started_at: Option<Instant>,
+    pub(crate) queue_drag_source_index: Option<usize>,
     pub(crate) taps: usize,
     pub(crate) theme: Theme,
     pub(crate) log_level: LogLevel,
@@ -266,11 +272,159 @@ impl GuiApp {
         self.update_app_vm();
     }
 
+    pub(crate) fn is_queue_item_selected(&self, index: usize) -> bool {
+        self.selected_queue_indices.contains(&index)
+    }
+
+    pub(crate) fn clear_queue_selection(&mut self) {
+        self.selected_queue_index = None;
+        self.selected_queue_indices.clear();
+        self.queue_selection_anchor = None;
+    }
+
+    pub(crate) fn select_queue_item_single(&mut self, index: usize) {
+        self.selected_queue_index = Some(index);
+        self.selected_queue_indices.clear();
+        self.selected_queue_indices.push(index);
+        self.queue_selection_anchor = Some(index);
+    }
+
+    pub(crate) fn toggle_queue_item_selection(&mut self, index: usize) {
+        if let Some(pos) = self.selected_queue_indices.iter().position(|&i| i == index) {
+            self.selected_queue_indices.remove(pos);
+            self.selected_queue_index = self.selected_queue_indices.last().copied();
+            if self.selected_queue_indices.is_empty() {
+                self.queue_selection_anchor = None;
+            }
+        } else {
+            self.selected_queue_indices.push(index);
+            self.selected_queue_index = Some(index);
+            if self.queue_selection_anchor.is_none() {
+                self.queue_selection_anchor = Some(index);
+            }
+        }
+    }
+
+    pub(crate) fn select_queue_item_range_to(&mut self, index: usize) {
+        let anchor = self.queue_selection_anchor.or(self.selected_queue_index).unwrap_or(index);
+        let (start, end) = if anchor <= index {
+            (anchor, index)
+        } else {
+            (index, anchor)
+        };
+        self.selected_queue_indices = (start..=end).collect();
+        self.selected_queue_index = Some(index);
+        self.queue_selection_anchor = Some(anchor);
+    }
+
+    pub(crate) fn remove_selected_queue_items(&mut self) {
+        if self.selected_queue_indices.is_empty() {
+            if let Some(index) = self.selected_queue_index {
+                self.remove_queue_item(index);
+            }
+            return;
+        }
+
+        let mut indices = self.selected_queue_indices.clone();
+        indices.sort_unstable();
+        indices.dedup();
+        indices.reverse();
+        for index in indices {
+            if index < self.queue.tracks.len() {
+                self.queue.tracks.remove(index);
+            }
+        }
+        self.clear_queue_selection();
+        self.update_app_vm();
+    }
+
+    pub(crate) fn clear_queue_handle_hold(&mut self) {
+        self.queue_handle_hold_index = None;
+        self.queue_handle_hold_started_at = None;
+    }
+
+    pub(crate) fn cancel_queue_drag(&mut self) {
+        self.queue_drag_source_index = None;
+        self.clear_queue_handle_hold();
+    }
+
+    pub(crate) fn move_queue_item_to(&mut self, from: usize, to: usize) {
+        if from >= self.queue.tracks.len() || to >= self.queue.tracks.len() || from == to {
+            return;
+        }
+
+        let item = self.queue.tracks.remove(from);
+        let insert_at = if to > from { to - 1 } else { to };
+        self.queue.tracks.insert(insert_at, item);
+
+        let remap_index = |idx: usize| {
+            if idx == from {
+                insert_at
+            } else if from < insert_at {
+                if idx > from && idx <= insert_at {
+                    idx - 1
+                } else {
+                    idx
+                }
+            } else if insert_at < from {
+                if idx >= insert_at && idx < from {
+                    idx + 1
+                } else {
+                    idx
+                }
+            } else {
+                idx
+            }
+        };
+
+        self.selected_queue_indices = self
+            .selected_queue_indices
+            .iter()
+            .copied()
+            .map(remap_index)
+            .collect();
+        self.selected_queue_indices.sort_unstable();
+        self.selected_queue_indices.dedup();
+
+        self.selected_queue_index = self.selected_queue_index.map(remap_index);
+        self.queue_selection_anchor = self.queue_selection_anchor.map(remap_index);
+        self.current_queue_index = self.current_queue_index.map(remap_index);
+
+        self.clear_queue_selection();
+        self.update_app_vm();
+    }
+
     pub(crate) fn remove_queue_item(&mut self, index: usize) {
         if index < self.queue.tracks.len() {
             self.queue.tracks.remove(index);
+            self.selected_queue_indices = self
+                .selected_queue_indices
+                .iter()
+                .filter_map(|&i| {
+                    if i == index {
+                        None
+                    } else if i > index {
+                        Some(i - 1)
+                    } else {
+                        Some(i)
+                    }
+                })
+                .collect();
             if self.selected_queue_index == Some(index) {
-                self.selected_queue_index = None;
+                self.selected_queue_index = self.selected_queue_indices.last().copied();
+            } else if let Some(selected) = self.selected_queue_index {
+                if selected > index {
+                    self.selected_queue_index = Some(selected - 1);
+                }
+            }
+            if let Some(anchor) = self.queue_selection_anchor {
+                self.queue_selection_anchor = if anchor == index {
+                    self.selected_queue_index
+                } else if anchor > index {
+                    Some(anchor - 1)
+                } else {
+                    Some(anchor)
+                };
             }
             self.update_app_vm();
         }
@@ -281,7 +435,7 @@ impl GuiApp {
             return;
         }
         self.queue.tracks.swap(index, index - 1);
-        self.selected_queue_index = Some(index - 1);
+        self.select_queue_item_single(index - 1);
         self.update_app_vm();
     }
 
@@ -290,13 +444,14 @@ impl GuiApp {
             return;
         }
         self.queue.tracks.swap(index, index + 1);
-        self.selected_queue_index = Some(index + 1);
+        self.select_queue_item_single(index + 1);
         self.update_app_vm();
     }
 
     pub(crate) fn clear_queue(&mut self) {
         self.queue.tracks.clear();
-        self.selected_queue_index = None;
+        self.clear_queue_selection();
+        self.cancel_queue_drag();
         self.current_queue_index = None;
         self.update_app_vm();
     }
@@ -1351,6 +1506,7 @@ impl GuiApp {
             seek_key_hold_direction: 0,
             seek_key_hold_started_at: None,
             seek_key_last_step_at: None,
+            queue_scroll_to_playing: active_tab == Tab::Queue,
             scan_target_input: String::new(),
             scan_exclude_input: String::new(),
             scan_targets: state.scan_targets,
@@ -1367,6 +1523,11 @@ impl GuiApp {
             queue,
             queue_item_input: String::new(),
             selected_queue_index,
+            selected_queue_indices: selected_queue_index.into_iter().collect(),
+            queue_selection_anchor: selected_queue_index,
+            queue_handle_hold_index: None,
+            queue_handle_hold_started_at: None,
+            queue_drag_source_index: None,
             taps: cfg.taps_for_device(cfg.preferred_output_device.as_ref()),
             theme: cfg.theme,
             log_level: cfg.log_level,
@@ -1416,6 +1577,9 @@ impl App for GuiApp {
                         .clicked()
                     {
                         self.active_tab = tab;
+                        if tab == Tab::Queue {
+                            self.queue_scroll_to_playing = true;
+                        }
                         self.update_app_vm();
                     }
                 }
