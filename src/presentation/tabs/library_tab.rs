@@ -4,6 +4,19 @@ use eframe::egui;
 
 pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let mut pending_select_directory: Option<String> = None;
+    let mut pending_play_index: Option<usize> = None;
+    let mut pending_play_list: Vec<String> = Vec::new();
+    let mut pending_play_now_path: Option<String> = None;
+    let mut pending_next_path: Option<String> = None;
+    let mut pending_enqueue_path: Option<String> = None;
+    let mut pending_add_to_playlist: Option<(usize, String)> = None;
+    let mut pending_show_details_path: Option<String> = None;
+    let playlist_targets: Vec<(usize, String)> = app
+        .playlists
+        .iter()
+        .enumerate()
+        .map(|(idx, p)| (idx, p.name.clone()))
+        .collect();
 
     let library = &app.app_vm.library;
     let selected_directory = library.selected_directory.as_deref();
@@ -74,8 +87,44 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             ui.label("No tracks found for this directory.");
         } else {
             ui.group(|ui| {
-                for track in library.selected_directory_tracks.iter() {
-                    ui.label(&track.title);
+                ui.label("Left click: create queue from this list and play. Right click: common actions.");
+                for (index, track) in library.selected_directory_tracks.iter().enumerate() {
+                    let response = ui.selectable_label(false, &track.title);
+                    if response.clicked() {
+                        pending_play_index = Some(index);
+                        pending_play_list = library
+                            .selected_directory_tracks
+                            .iter()
+                            .map(|row| row.title.clone())
+                            .collect();
+                    }
+                    response.context_menu(|ui| {
+                        if ui.button("Play now").clicked() {
+                            pending_play_now_path = Some(track.title.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Play next").clicked() {
+                            pending_next_path = Some(track.title.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Add to queue").clicked() {
+                            pending_enqueue_path = Some(track.title.clone());
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.label("Add to playlist");
+                        for (target_index, target_name) in &playlist_targets {
+                            if ui.button(target_name).clicked() {
+                                pending_add_to_playlist = Some((*target_index, track.title.clone()));
+                                ui.close_menu();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Show details").clicked() {
+                            pending_show_details_path = Some(track.title.clone());
+                            ui.close_menu();
+                        }
+                    });
                 }
             });
         }
@@ -95,6 +144,24 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
     if let Some(path) = pending_select_directory {
         app.select_directory(Some(path));
+    }
+    if let Some(index) = pending_play_index {
+        app.play_from_displayed_list(&pending_play_list, index);
+    }
+    if let Some(path) = pending_play_now_path {
+        app.play_track_now(&path);
+    }
+    if let Some(path) = pending_next_path {
+        app.add_track_next_in_queue(&path);
+    }
+    if let Some(path) = pending_enqueue_path {
+        app.enqueue_track_path(&path);
+    }
+    if let Some((target_index, track)) = pending_add_to_playlist {
+        app.add_track_to_playlist(target_index, &track);
+    }
+    if let Some(path) = pending_show_details_path {
+        app.open_track_details(&path);
     }
 }
 

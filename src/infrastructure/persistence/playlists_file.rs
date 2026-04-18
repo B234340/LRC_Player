@@ -1,7 +1,6 @@
 use crate::application::dto::PlaylistDto;
 use crate::infrastructure::persistence::json_store::JsonStore;
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 
 pub struct PlaylistsFile {
@@ -10,9 +9,14 @@ pub struct PlaylistsFile {
 
 impl PlaylistsFile {
     fn default_path() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("com", "example", "lrc_player")
-            .context("unable to determine project directories")?;
-        Ok(dirs.data_dir().join("playlists.json"))
+        let exe_path = std::env::current_exe().context("unable to determine current executable path")?;
+        let exe_dir = exe_path
+            .parent()
+            .context("current executable has no parent directory")?;
+        let data_dir = exe_dir.join("data");
+        std::fs::create_dir_all(&data_dir)
+            .with_context(|| format!("creating data directory {}", data_dir.display()))?;
+        Ok(data_dir.join("playlists.json"))
     }
 
     pub fn open() -> Result<Self> {

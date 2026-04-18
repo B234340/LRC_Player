@@ -206,6 +206,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         ui.separator();
         ui.label("Lyrics preview:");
         egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
             .max_height(300.0)
             .show(ui, |ui| {
                 for line in lyrics.lines.iter() {

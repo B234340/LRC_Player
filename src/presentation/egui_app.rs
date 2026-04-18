@@ -20,7 +20,7 @@ use eframe::{egui, App, CreationContext};
 use fontdb::{Database, Family, Source, Style};
 use rand::seq::IteratorRandom;
 use rand::thread_rng;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +33,31 @@ pub enum Tab {
     Queue,
     Scan,
     Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtistViewMode {
+    Artist,
+    AlbumArtist,
+    Composer,
+}
+
+impl ArtistViewMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ArtistViewMode::Artist => "Artist",
+            ArtistViewMode::AlbumArtist => "Album Artist",
+            ArtistViewMode::Composer => "Composer",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            ArtistViewMode::Artist => "artist",
+            ArtistViewMode::AlbumArtist => "album_artist",
+            ArtistViewMode::Composer => "composer",
+        }
+    }
 }
 
 impl Tab {
@@ -92,6 +117,7 @@ pub struct GuiApp {
     seek_key_hold_started_at: Option<Instant>,
     seek_key_last_step_at: Option<Instant>,
     pub(crate) queue_scroll_to_playing: bool,
+    pub(crate) artist_view_mode: ArtistViewMode,
     pub(crate) play_position_ms: u64,
     pub(crate) play_duration_ms: Option<u64>,
     pub(crate) play_title: Option<String>,
@@ -127,6 +153,21 @@ pub struct GuiApp {
     pub(crate) log_level: LogLevel,
     pub(crate) language: Language,
     last_scan_status: Option<String>,
+    album_meta_cache: Option<MetaCache>,
+    album_artwork_path_cache: HashMap<String, Option<PathBuf>>,
+    album_artwork_texture_cache: HashMap<String, egui::TextureHandle>,
+    album_artwork_pending: VecDeque<String>,
+    album_artwork_queued: HashSet<String>,
+    album_artwork_album_titles: Vec<String>,
+    track_details_dialog: Option<TrackDetailsDialog>,
+}
+
+#[derive(Debug, Clone)]
+struct TrackDetailsDialog {
+    path: String,
+    title: String,
+    artist: String,
+    album: String,
 }
 
 impl GuiApp {
@@ -219,10 +260,44 @@ impl GuiApp {
 
     fn load_playlists() -> Vec<PlaylistDto> {
         if let Ok(file) = PlaylistsFile::open() {
-            file.load().unwrap_or_default()
+            let playlists = file.load().unwrap_or_default();
+            Self::normalize_playlists(playlists)
         } else {
-            Vec::new()
+            Self::normalize_playlists(Vec::new())
         }
+    }
+
+    fn normalize_playlists(playlists: Vec<PlaylistDto>) -> Vec<PlaylistDto> {
+        let mut favorite_tracks: Vec<String> = Vec::new();
+        let mut seen_tracks: HashSet<String> = HashSet::new();
+        let mut favorite_id: Option<String> = None;
+        let mut others: Vec<PlaylistDto> = Vec::new();
+
+        for playlist in playlists {
+            if playlist.name.eq_ignore_ascii_case("favorite") {
+                if favorite_id.is_none() {
+                    favorite_id = Some(playlist.id.clone());
+                }
+                for track in playlist.tracks {
+                    if seen_tracks.insert(track.clone()) {
+                        favorite_tracks.push(track);
+                    }
+                }
+            } else {
+                others.push(playlist);
+            }
+        }
+
+        let favorite = PlaylistDto {
+            id: favorite_id.unwrap_or_else(|| "playlist-favorite".to_string()),
+            name: "favorite".to_string(),
+            tracks: favorite_tracks,
+        };
+
+        let mut normalized = Vec::with_capacity(others.len() + 1);
+        normalized.push(favorite);
+        normalized.extend(others);
+        normalized
     }
 
     fn save_playlists(&self) {
@@ -234,6 +309,16 @@ impl GuiApp {
     pub(crate) fn add_playlist(&mut self) {
         let name = self.new_playlist_name.trim().to_string();
         if name.is_empty() {
+            return;
+        }
+        if name.eq_ignore_ascii_case("favorite") {
+            return;
+        }
+        if self
+            .playlists
+            .iter()
+            .any(|playlist| playlist.name.eq_ignore_ascii_case(&name))
+        {
             return;
         }
 
@@ -252,7 +337,9 @@ impl GuiApp {
     }
 
     pub(crate) fn remove_playlist(&mut self, index: usize) {
-        if index < self.playlists.len() {
+        if index < self.playlists.len()
+            && !self.playlists[index].name.eq_ignore_ascii_case("favorite")
+        {
             self.playlists.remove(index);
             if self.selected_playlist == Some(index) {
                 self.selected_playlist = None;
@@ -280,6 +367,18 @@ impl GuiApp {
         self.selected_queue_index = None;
         self.selected_queue_indices.clear();
         self.queue_selection_anchor = None;
+    }
+
+    pub(crate) fn clear_library(&mut self) {
+        if let Ok(cache) = MetaCache::open_default() {
+            let _ = cache.clear_library();
+        }
+        self.clear_album_artwork_cache();
+        self.selected_album = None;
+        self.selected_artist = None;
+        self.selected_directory = None;
+        self.last_scan_status = Some("Library cleared".to_string());
+        self.update_app_vm();
     }
 
     pub(crate) fn select_queue_item_single(&mut self, index: usize) {
@@ -473,6 +572,96 @@ impl GuiApp {
         }
     }
 
+    pub(crate) fn add_track_to_playlist(&mut self, playlist_index: usize, track: &str) {
+        let item = track.trim();
+        if item.is_empty() {
+            return;
+        }
+        if let Some(playlist) = self.playlists.get_mut(playlist_index) {
+            if !playlist.tracks.iter().any(|existing| existing == item) {
+                playlist.tracks.push(item.to_string());
+                self.save_playlists();
+                self.update_app_vm();
+            }
+        }
+    }
+
+    pub(crate) fn add_track_next_in_queue(&mut self, track: &str) {
+        let item = track.trim();
+        if item.is_empty() {
+            return;
+        }
+
+        let insert_at = self
+            .current_queue_index
+            .or(self.selected_queue_index)
+            .map(|index| (index + 1).min(self.queue.tracks.len()))
+            .unwrap_or(self.queue.tracks.len());
+
+        self.queue.tracks.insert(insert_at, item.to_string());
+        self.update_app_vm();
+    }
+
+    pub(crate) fn play_from_displayed_list(&mut self, displayed_tracks: &[String], clicked_index: usize) {
+        if displayed_tracks.is_empty() || clicked_index >= displayed_tracks.len() {
+            return;
+        }
+
+        self.queue.tracks = displayed_tracks.to_vec();
+        self.current_queue_index = None;
+        self.clear_queue_selection();
+        self.select_queue_item_single(clicked_index);
+        self.update_app_vm();
+        self.play_selected_queue_item();
+    }
+
+    pub(crate) fn open_track_details(&mut self, path: &str) {
+        let item = path.trim();
+        if item.is_empty() {
+            return;
+        }
+
+        let fallback_title = Path::new(item)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(item)
+            .to_string();
+
+        let (title, artist, album) = MetaCache::open_default()
+            .ok()
+            .and_then(|cache| cache.track_metadata_by_location(item).ok().flatten())
+            .map(|(title, artist, album)| {
+                let title = if title.trim().is_empty() {
+                    fallback_title.clone()
+                } else {
+                    title
+                };
+                let artist = if artist.trim().is_empty() {
+                    "Unknown artist".to_string()
+                } else {
+                    artist
+                };
+                let album = if album.trim().is_empty() {
+                    "Unknown album".to_string()
+                } else {
+                    album
+                };
+                (title, artist, album)
+            })
+            .unwrap_or((
+                fallback_title,
+                "Unknown artist".to_string(),
+                "Unknown album".to_string(),
+            ));
+
+        self.track_details_dialog = Some(TrackDetailsDialog {
+            path: item.to_string(),
+            title,
+            artist,
+            album,
+        });
+    }
+
     pub(crate) fn remove_track_from_selected_playlist(&mut self, track_index: usize) {
         if let Some(index) = self.selected_playlist {
             if let Some(playlist) = self.playlists.get_mut(index) {
@@ -497,6 +686,62 @@ impl GuiApp {
         self.selected_album = None;
         self.selected_directory = None;
         self.update_app_vm();
+    }
+
+    pub(crate) fn set_artist_view_mode(&mut self, mode: ArtistViewMode) {
+        if self.artist_view_mode == mode {
+            return;
+        }
+        self.artist_view_mode = mode;
+        self.selected_artist = None;
+        self.update_app_vm();
+    }
+
+    pub(crate) fn play_track_now(&mut self, path: &str) {
+        if path.trim().is_empty() {
+            return;
+        }
+        self.play_path = path.to_string();
+        self.play_position_ms = 0;
+        self.playback_state = PlaybackState::Buffering;
+        self.discover_lyrics_for_current_play_path();
+        self.refresh_play_metadata();
+        self.request_play();
+    }
+
+    pub(crate) fn enqueue_track_path(&mut self, path: &str) {
+        let item = path.trim();
+        if item.is_empty() {
+            return;
+        }
+        self.queue.tracks.push(item.to_string());
+        self.update_app_vm();
+    }
+
+    pub(crate) fn add_tracks_to_favorite_playlist(&mut self, tracks: &[String]) {
+        if tracks.is_empty() {
+            return;
+        }
+
+        if self.playlists.is_empty() || !self.playlists[0].name.eq_ignore_ascii_case("favorite") {
+            self.playlists = Self::normalize_playlists(std::mem::take(&mut self.playlists));
+        }
+        let favorite_index = 0;
+
+        let mut changed = false;
+        if let Some(playlist) = self.playlists.get_mut(favorite_index) {
+            for track in tracks {
+                if !playlist.tracks.contains(track) {
+                    playlist.tracks.push(track.clone());
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            self.save_playlists();
+            self.update_app_vm();
+        }
     }
 
     pub(crate) fn select_directory(&mut self, directory: Option<String>) {
@@ -702,6 +947,7 @@ impl GuiApp {
     pub(crate) fn play_selected_queue_item(&mut self) {
         if let Some(index) = self.selected_queue_index {
             if let Some(path) = self.queue.tracks.get(index).cloned() {
+                self.select_queue_item_single(index);
                 self.current_queue_index = Some(index);
                 self.play_path = path;
                 self.play_position_ms = 0;
@@ -742,7 +988,7 @@ impl GuiApp {
             .or_else(|| if self.queue.tracks.is_empty() { None } else { Some(0) });
         if let Some(index) = index {
             if let Some(path) = self.queue.tracks.get(index).cloned() {
-                self.selected_queue_index = Some(index);
+                self.select_queue_item_single(index);
                 self.current_queue_index = Some(index);
                 self.play_path = path;
                 self.playback_state = PlaybackState::Buffering;
@@ -785,7 +1031,7 @@ impl GuiApp {
         };
 
         if let Some(index) = next_index {
-            self.selected_queue_index = Some(index);
+            self.select_queue_item_single(index);
             self.play_selected_queue_item();
         }
     }
@@ -822,7 +1068,7 @@ impl GuiApp {
         };
 
         if let Some(index) = prev_index {
-            self.selected_queue_index = Some(index);
+            self.select_queue_item_single(index);
             self.play_selected_queue_item();
         }
     }
@@ -920,6 +1166,120 @@ impl GuiApp {
         }
     }
 
+    fn clear_album_artwork_cache(&mut self) {
+        self.album_artwork_path_cache.clear();
+        self.album_artwork_texture_cache.clear();
+        self.album_artwork_pending.clear();
+        self.album_artwork_queued.clear();
+        self.album_artwork_album_titles.clear();
+        self.album_meta_cache = None;
+    }
+
+    fn sync_album_artwork_cache_with_library(&mut self) {
+        let current_titles: Vec<String> = self
+            .app_vm
+            .library
+            .albums
+            .iter()
+            .map(|album| album.title.clone())
+            .collect();
+
+        if current_titles == self.album_artwork_album_titles {
+            return;
+        }
+
+        let keep: HashSet<String> = current_titles.iter().cloned().collect();
+        self.album_artwork_path_cache
+            .retain(|title, _| keep.contains(title));
+        self.album_artwork_texture_cache
+            .retain(|title, _| keep.contains(title));
+        self.album_artwork_queued.retain(|title| keep.contains(title));
+        self.album_artwork_pending
+            .retain(|title| keep.contains(title));
+        self.album_artwork_album_titles = current_titles;
+    }
+
+    fn resolve_album_artwork_path(&mut self, album_title: &str) -> Option<PathBuf> {
+        if self.album_meta_cache.is_none() {
+            self.album_meta_cache = MetaCache::open_default().ok();
+        }
+
+        let cache = self.album_meta_cache.as_ref()?;
+        let candidates = cache.album_location_paths(album_title, 32).ok()?;
+        for location in candidates {
+            if let Some(path) = self.discover_artwork_for_track(Path::new(&location)) {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn queue_album_artwork_for_visible(&mut self, visible_album_titles: &[String]) {
+        for title in visible_album_titles {
+            if self.album_artwork_texture_cache.contains_key(title) {
+                continue;
+            }
+            if self.album_artwork_queued.insert(title.clone()) {
+                self.album_artwork_pending.push_back(title.clone());
+            }
+        }
+    }
+
+    pub(crate) fn process_album_artwork_queue(&mut self, ctx: &egui::Context, budget: usize) {
+        if budget == 0 {
+            return;
+        }
+
+        for _ in 0..budget {
+            let Some(title) = self.album_artwork_pending.pop_front() else {
+                break;
+            };
+            self.album_artwork_queued.remove(&title);
+
+            if self.album_artwork_texture_cache.contains_key(&title) {
+                continue;
+            }
+
+            let artwork_path = if let Some(cached) = self.album_artwork_path_cache.get(&title).cloned() {
+                cached
+            } else {
+                let resolved = self.resolve_album_artwork_path(&title);
+                self.album_artwork_path_cache
+                    .insert(title.clone(), resolved.clone());
+                resolved
+            };
+
+            let Some(path) = artwork_path else {
+                continue;
+            };
+
+            let image_result: Result<image::DynamicImage, image::ImageError> = (|| {
+                let reader = ImageReader::open(&path).map_err(image::ImageError::IoError)?;
+                let reader = reader.with_guessed_format().map_err(image::ImageError::IoError)?;
+                reader.decode()
+            })();
+
+            if let Ok(image) = image_result {
+                let size = [image.width() as usize, image.height() as usize];
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    size,
+                    &image.to_rgba8().into_vec(),
+                );
+                let texture_id = format!("album_artwork:{}", title);
+                let texture = ctx.load_texture(texture_id, color_image, egui::TextureOptions::default());
+                self.album_artwork_texture_cache.insert(title, texture);
+            }
+        }
+
+        if !self.album_artwork_pending.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
+    pub(crate) fn album_artwork_texture(&self, album_title: &str) -> Option<egui::TextureHandle> {
+        self.album_artwork_texture_cache.get(album_title).cloned()
+    }
+
     fn discover_artwork_for_track(&self, path: &Path) -> Option<PathBuf> {
         let parent = path.parent()?;
         let stem = path.file_stem()?.to_string_lossy();
@@ -1007,7 +1367,7 @@ impl GuiApp {
             if let Ok(albums) = cache.library_albums() {
                 library.albums = albums;
             }
-            if let Ok(artists) = cache.library_artists() {
+            if let Ok(artists) = cache.library_artists_by_kind(self.artist_view_mode.key()) {
                 library.artists = artists;
             }
             if let Some(album) = self.selected_album.as_deref() {
@@ -1016,7 +1376,10 @@ impl GuiApp {
                 }
             }
             if let Some(artist) = self.selected_artist.as_deref() {
-                if let Ok(tracks) = cache.library_tracks_by_artist(artist) {
+                if let Ok(tracks) = cache.library_track_locations_by_artist_kind(
+                    self.artist_view_mode.key(),
+                    artist,
+                ) {
                     library.selected_artist_tracks = tracks;
                 }
             }
@@ -1044,6 +1407,7 @@ impl GuiApp {
             &self.playlists,
             self.queue.clone(),
         );
+        self.sync_album_artwork_cache_with_library();
         self.save_state();
     }
 
@@ -1507,6 +1871,7 @@ impl GuiApp {
             seek_key_hold_started_at: None,
             seek_key_last_step_at: None,
             queue_scroll_to_playing: active_tab == Tab::Queue,
+            artist_view_mode: ArtistViewMode::Artist,
             scan_target_input: String::new(),
             scan_exclude_input: String::new(),
             scan_targets: state.scan_targets,
@@ -1533,6 +1898,13 @@ impl GuiApp {
             log_level: cfg.log_level,
             language: cfg.language,
             last_scan_status: state.last_scan_status,
+            album_meta_cache: MetaCache::open_default().ok(),
+            album_artwork_path_cache: HashMap::new(),
+            album_artwork_texture_cache: HashMap::new(),
+            album_artwork_pending: VecDeque::new(),
+            album_artwork_queued: HashSet::new(),
+            album_artwork_album_titles: Vec::new(),
+            track_details_dialog: None,
         };
 
         gui.discover_lyrics_for_current_play_path();
@@ -1699,7 +2071,7 @@ impl App for GuiApp {
                 Tab::Album => tabs::album_tab::ui(ui, self),
                 Tab::Artist => tabs::artist_tab::ui(ui, self),
                 Tab::Queue => tabs::queue_tab::ui(ui, self),
-                Tab::Scan => tabs::scan_tab::ui(ui, &self.app_vm),
+                Tab::Scan => tabs::scan_tab::ui(ui, self),
                 Tab::Settings => tabs::settings_tab::ui(ui, self),
             }
 
@@ -1774,6 +2146,23 @@ impl App for GuiApp {
                     }
                 });
 
+
+            if let Some(details) = self.track_details_dialog.clone() {
+                let mut open = true;
+                egui::Window::new("Track details")
+                    .open(&mut open)
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        ui.label(format!("Title: {}", details.title));
+                        ui.label(format!("Artist: {}", details.artist));
+                        ui.label(format!("Album: {}", details.album));
+                        ui.separator();
+                        ui.label(format!("File path: {}", details.path));
+                    });
+                if !open {
+                    self.track_details_dialog = None;
+                }
+            }
                 if self.favorite_directories.is_empty() {
                     ui.label("No favorite directories configured.");
                 } else {

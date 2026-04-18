@@ -4,6 +4,7 @@ use crate::infrastructure::scan::file_scanner::FileScanner;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 use symphonia::core::formats::FormatOptions;
@@ -55,6 +56,8 @@ enum DBCommand {
         content_id: String,
         title: Option<String>,
         artist: Option<String>,
+        album_artist: Option<String>,
+        composer: Option<String>,
         album: Option<String>,
         canonical_location_id: Option<i64>,
         created_at: i64,
@@ -65,6 +68,17 @@ enum DBCommand {
         full_hash: Option<String>,
         partial_hash: Option<String>,
         computed_at: i64,
+    },
+    UpsertLocation {
+        content_id: String,
+        path: String,
+        device: Option<i64>,
+        inode: Option<i64>,
+        size: i64,
+        mtime: i64,
+        last_seen: i64,
+        preferred: bool,
+        available: bool,
     },
     Checkpoint,
 }
@@ -78,10 +92,37 @@ pub struct IoWorkerHandle {
     _inner: Arc<Mutex<()>>, // placeholder for possible shared state
 }
 
-fn extract_audio_tags(path: &PathBuf) -> (Option<String>, Option<String>, Option<String>) {
+fn extract_audio_tags(
+    path: &PathBuf,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (None, None, None, None, None),
+    };
+
+    // Symphonia probe search has a hard 1 MiB limit. Large ID3v2 headers can exceed it,
+    // causing noisy "reached probe limit" logs for valid files. Skip probing in that case.
+    let mut header = [0_u8; 10];
+    if file.read_exact(&mut header).is_ok() && &header[0..3] == b"ID3" {
+        let id3_size = ((header[6] as u32 & 0x7F) << 21)
+            | ((header[7] as u32 & 0x7F) << 14)
+            | ((header[8] as u32 & 0x7F) << 7)
+            | (header[9] as u32 & 0x7F);
+        let total_id3_bytes = 10_u32.saturating_add(id3_size);
+        if total_id3_bytes > 1_048_576 {
+            return (None, None, None, None, None);
+        }
+    }
+
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(_) => return (None, None, None),
+        Err(_) => return (None, None, None, None, None),
     };
 
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -92,11 +133,13 @@ fn extract_audio_tags(path: &PathBuf) -> (Option<String>, Option<String>, Option
         &MetadataOptions::default(),
     ) {
         Ok(p) => p,
-        Err(_) => return (None, None, None),
+        Err(_) => return (None, None, None, None, None),
     };
 
     let mut title = None;
     let mut artist = None;
+    let mut album_artist = None;
+    let mut composer = None;
     let mut album = None;
 
     if let Some(metadata) = probe.format.metadata().current() {
@@ -106,8 +149,17 @@ fn extract_audio_tags(path: &PathBuf) -> (Option<String>, Option<String>, Option
                 "title" | "tracktitle" | "track title" => {
                     title.get_or_insert_with(|| tag.value.to_string());
                 }
-                "artist" | "performer" | "albumartist" => {
+                "artist" | "performer" => {
                     artist.get_or_insert_with(|| tag.value.to_string());
+                }
+                "album artist" => {
+                    album_artist.get_or_insert_with(|| tag.value.to_string());
+                }
+                "albumartist" => {
+                    album_artist.get_or_insert_with(|| tag.value.to_string());
+                }
+                "composer" => {
+                    composer.get_or_insert_with(|| tag.value.to_string());
                 }
                 "album" | "album title" => {
                     album.get_or_insert_with(|| tag.value.to_string());
@@ -117,7 +169,11 @@ fn extract_audio_tags(path: &PathBuf) -> (Option<String>, Option<String>, Option
         }
     }
 
-    (title, artist, album)
+    if album_artist.is_none() {
+        album_artist = artist.clone();
+    }
+
+    (title, artist, album_artist, composer, album)
 }
 
 impl IoWorkerHandle {
@@ -220,11 +276,22 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                         let _ = m.upsert_file_staging(&path, &norm_path, size, mtime, device, inode, stable_key.as_deref());
                                         staged_count += 1;
                                     }
-                                    DBCommand::UpsertTrack { content_id, title, artist, album, canonical_location_id, created_at } => {
+                                    DBCommand::UpsertTrack {
+                                        content_id,
+                                        title,
+                                        artist,
+                                        album_artist,
+                                        composer,
+                                        album,
+                                        canonical_location_id,
+                                        created_at,
+                                    } => {
                                         let _ = m.upsert_track_staging(
                                             &content_id,
                                             title.as_deref(),
                                             artist.as_deref(),
+                                            album_artist.as_deref(),
+                                            composer.as_deref(),
                                             album.as_deref(),
                                             canonical_location_id,
                                             created_at,
@@ -233,6 +300,20 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                     }
                                     DBCommand::UpsertHash { content_id, algo, full_hash, partial_hash, computed_at } => {
                                         let _ = m.upsert_hash_staging(&content_id, &algo, full_hash.as_deref(), partial_hash.as_deref(), computed_at);
+                                        staged_count += 1;
+                                    }
+                                    DBCommand::UpsertLocation { content_id, path, device, inode, size, mtime, last_seen, preferred, available } => {
+                                        let _ = m.upsert_location_staging(
+                                            &content_id,
+                                            &path,
+                                            device,
+                                            inode,
+                                            size,
+                                            mtime,
+                                            last_seen,
+                                            preferred,
+                                            available,
+                                        );
                                         staged_count += 1;
                                     }
                                     DBCommand::Checkpoint => {
@@ -355,7 +436,8 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                 })
                                                 .await;
 
-                                            let (title, artist, album) = extract_audio_tags(&file_path);
+                                            let (title, artist, album_artist, composer, album) =
+                                                extract_audio_tags(&file_path);
                                             let now_ts = std::time::SystemTime::now()
                                                 .duration_since(std::time::UNIX_EPOCH)
                                                 .map(|d| d.as_secs() as i64)
@@ -365,9 +447,25 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                     content_id: partial.clone(),
                                                     title,
                                                     artist,
+                                                    album_artist,
+                                                    composer,
                                                     album,
                                                     canonical_location_id: None,
                                                     created_at: now_ts,
+                                                })
+                                                .await;
+
+                                            let _ = db_sender
+                                                .send(DBCommand::UpsertLocation {
+                                                    content_id: partial.clone(),
+                                                    path: file_path.to_string_lossy().to_string(),
+                                                    device: None,
+                                                    inode: None,
+                                                    size,
+                                                    mtime,
+                                                    last_seen: now_ts,
+                                                    preferred: false,
+                                                    available: true,
                                                 })
                                                 .await;
 

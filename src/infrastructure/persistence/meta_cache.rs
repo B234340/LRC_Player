@@ -1,6 +1,5 @@
 use crate::application::dto::LibraryDirectoryDto;
 use anyhow::Context;
-use directories::ProjectDirs;
 use rusqlite::{params, Connection, OpenFlags};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
@@ -61,6 +60,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     content_id TEXT PRIMARY KEY,
     title TEXT,
     artist TEXT,
+    album_artist TEXT,
+    composer TEXT,
     album TEXT,
     canonical_location_id INTEGER,
     created_at INTEGER
@@ -110,6 +111,8 @@ CREATE TABLE IF NOT EXISTS tracks_staging (
     content_id TEXT PRIMARY KEY,
     title TEXT,
     artist TEXT,
+    album_artist TEXT,
+    composer TEXT,
     album TEXT,
     canonical_location_id INTEGER,
     created_at INTEGER
@@ -144,6 +147,31 @@ COMMIT;
             .execute_batch(DDL)
             .context("creating meta cache schema")?;
 
+        self.ensure_track_columns()?;
+
+        Ok(())
+    }
+
+    fn ensure_track_columns(&self) -> anyhow::Result<()> {
+        self.ensure_column("tracks", "album_artist", "TEXT")?;
+        self.ensure_column("tracks", "composer", "TEXT")?;
+        self.ensure_column("tracks_staging", "album_artist", "TEXT")?;
+        self.ensure_column("tracks_staging", "composer", "TEXT")?;
+        Ok(())
+    }
+
+    fn ensure_column(&self, table: &str, column: &str, column_def: &str) -> anyhow::Result<()> {
+        let pragma = format!("PRAGMA table_info({})", table);
+        let mut stmt = self.conn.prepare(&pragma)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for name in rows {
+            if name? == column {
+                return Ok(());
+            }
+        }
+
+        let alter = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_def);
+        self.conn.execute_batch(&alter)?;
         Ok(())
     }
 
@@ -152,9 +180,11 @@ COMMIT;
     }
 
     pub fn default_path() -> anyhow::Result<PathBuf> {
-        let dirs = ProjectDirs::from("com", "example", "lrc_player")
-            .context("unable to determine project directories")?;
-        let cache_dir = dirs.data_dir().join("cache");
+        let exe_path = std::env::current_exe().context("unable to determine current executable path")?;
+        let exe_dir = exe_path
+            .parent()
+            .context("current executable has no parent directory")?;
+        let cache_dir = exe_dir.join("data").join("cache");
         std::fs::create_dir_all(&cache_dir)
             .with_context(|| format!("creating cache directory {}", cache_dir.display()))?;
         Ok(cache_dir.join("meta_cache.db"))
@@ -255,16 +285,20 @@ COMMIT;
         content_id: &str,
         title: Option<&str>,
         artist: Option<&str>,
+        album_artist: Option<&str>,
+        composer: Option<&str>,
         album: Option<&str>,
         canonical_location_id: Option<i64>,
         created_at: i64,
     ) -> anyhow::Result<()> {
         self.conn.execute(
-            "INSERT INTO tracks (content_id,title,artist,album,canonical_location_id,created_at)
-             VALUES (?1,?2,?3,?4,?5,?6)
+            "INSERT INTO tracks (content_id,title,artist,album_artist,composer,album,canonical_location_id,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(content_id) DO UPDATE SET
                title=excluded.title,
                artist=excluded.artist,
+               album_artist=excluded.album_artist,
+               composer=excluded.composer,
                album=excluded.album,
                canonical_location_id=excluded.canonical_location_id,
                created_at=excluded.created_at
@@ -273,6 +307,8 @@ COMMIT;
                 content_id,
                 title,
                 artist,
+                album_artist,
+                composer,
                 album,
                 canonical_location_id,
                 created_at,
@@ -287,16 +323,20 @@ COMMIT;
         content_id: &str,
         title: Option<&str>,
         artist: Option<&str>,
+        album_artist: Option<&str>,
+        composer: Option<&str>,
         album: Option<&str>,
         canonical_location_id: Option<i64>,
         created_at: i64,
     ) -> anyhow::Result<()> {
         self.conn.execute(
-            "INSERT INTO tracks_staging (content_id,title,artist,album,canonical_location_id,created_at)
-             VALUES (?1,?2,?3,?4,?5,?6)
+            "INSERT INTO tracks_staging (content_id,title,artist,album_artist,composer,album,canonical_location_id,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(content_id) DO UPDATE SET
                title=excluded.title,
                artist=excluded.artist,
+               album_artist=excluded.album_artist,
+               composer=excluded.composer,
                album=excluded.album,
                canonical_location_id=excluded.canonical_location_id,
                created_at=excluded.created_at
@@ -305,6 +345,8 @@ COMMIT;
                 content_id,
                 title,
                 artist,
+                album_artist,
+                composer,
                 album,
                 canonical_location_id,
                 created_at,
@@ -438,8 +480,8 @@ COMMIT;
     SELECT path,norm_path,size,mtime,device,inode,stable_key,tag_title,tag_artist,tag_album,parsed_at,status FROM files_staging;
     DELETE FROM files_staging;
 
-    INSERT OR REPLACE INTO tracks (content_id,title,artist,album,canonical_location_id,created_at)
-    SELECT content_id,title,artist,album,canonical_location_id,created_at FROM tracks_staging;
+    INSERT OR REPLACE INTO tracks (content_id,title,artist,album_artist,composer,album,canonical_location_id,created_at)
+    SELECT content_id,title,artist,album_artist,composer,album,canonical_location_id,created_at FROM tracks_staging;
     DELETE FROM tracks_staging;
 
     INSERT OR REPLACE INTO locations (content_id,path,device,inode,size,mtime,last_seen,preferred,available)
@@ -571,8 +613,23 @@ COMMIT;
 
     /// Return distinct artist names in the library.
     pub fn library_artists(&self) -> anyhow::Result<Vec<String>> {
+        self.library_artists_by_kind("artist")
+    }
+
+    /// Return distinct names for the selected artist-like kind.
+    /// kind: "artist" | "album_artist" | "composer"
+    pub fn library_artists_by_kind(&self, kind: &str) -> anyhow::Result<Vec<String>> {
+        let col = match kind {
+            "artist" => "artist",
+            "album_artist" => "album_artist",
+            "composer" => "composer",
+            _ => "artist",
+        };
+        let sql = format!(
+            "SELECT DISTINCT {col} FROM tracks WHERE {col} IS NOT NULL AND {col} <> '' ORDER BY {col} COLLATE NOCASE"
+        );
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT artist FROM tracks WHERE artist IS NOT NULL AND artist <> '' ORDER BY artist COLLATE NOCASE",
+            &sql,
         )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         let mut artists = Vec::new();
@@ -582,21 +639,102 @@ COMMIT;
         Ok(artists)
     }
 
-    /// Return track titles grouped by album.
+    /// Return playable location paths grouped by album.
     pub fn library_tracks_by_album(&self, album: &str) -> anyhow::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT title FROM tracks WHERE album = ?1 ORDER BY title COLLATE NOCASE",
+            "SELECT l.path
+             FROM tracks t
+             JOIN locations l ON l.content_id = t.content_id
+             WHERE t.album = ?1",
         )?;
-        let rows = stmt.query_map(params![album], |row| row.get(0))?;
-        let mut titles = Vec::new();
-        for title in rows {
-            titles.push(title?);
+        let rows = stmt.query_map(params![album], |row| row.get::<_, String>(0))?;
+        let mut paths = Vec::new();
+        for path in rows {
+            paths.push(path?);
         }
-        Ok(titles)
+
+        paths.sort_by(|a, b| {
+            let a_name = Path::new(a)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(a)
+                .to_ascii_lowercase();
+            let b_name = Path::new(b)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(b)
+                .to_ascii_lowercase();
+            a_name.cmp(&b_name)
+        });
+
+        Ok(paths)
     }
 
     /// Return track titles grouped by artist.
     pub fn library_tracks_by_artist(&self, artist: &str) -> anyhow::Result<Vec<String>> {
+        let locations = self.library_track_locations_by_artist_kind("artist", artist)?;
+        let mut titles = Vec::new();
+        for path in locations {
+            if let Some((title, _, _)) = self.track_metadata_by_location(&path)? {
+                titles.push(title);
+            }
+        }
+        Ok(titles)
+    }
+
+    /// Return location paths grouped by selected artist-like kind, sorted by
+    /// album name then file name.
+    pub fn library_track_locations_by_artist_kind(
+        &self,
+        kind: &str,
+        artist_name: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let col = match kind {
+            "artist" => "artist",
+            "album_artist" => "album_artist",
+            "composer" => "composer",
+            _ => "artist",
+        };
+        let sql = format!(
+            "SELECT COALESCE(t.album, ''), l.path
+             FROM tracks t
+             JOIN locations l ON l.content_id = t.content_id
+             WHERE t.{col} = ?1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![artist_name], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut items: Vec<(String, String)> = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+
+        items.sort_by(|(album_a, path_a), (album_b, path_b)| {
+            let a_key = album_a.to_ascii_lowercase();
+            let b_key = album_b.to_ascii_lowercase();
+            let ord = a_key.cmp(&b_key);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+            let file_a = Path::new(path_a)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path_a)
+                .to_ascii_lowercase();
+            let file_b = Path::new(path_b)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path_b)
+                .to_ascii_lowercase();
+            file_a.cmp(&file_b)
+        });
+
+        Ok(items.into_iter().map(|(_, path)| path).collect())
+    }
+
+    /// Return track titles grouped by artist.
+    pub fn library_track_titles_by_artist(&self, artist: &str) -> anyhow::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT title FROM tracks WHERE artist = ?1 ORDER BY title COLLATE NOCASE",
         )?;
@@ -608,7 +746,80 @@ COMMIT;
         Ok(titles)
     }
 
-    /// Return a hierarchical tree of scanned library directories.
+    /// Return title/artist/album by an exact location path.
+    pub fn track_metadata_by_location(
+        &self,
+        location_path: &str,
+    ) -> anyhow::Result<Option<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(t.title, ''), COALESCE(t.artist, ''), COALESCE(t.album, '')
+             FROM locations l
+             JOIN tracks t ON t.content_id = l.content_id
+             WHERE l.path = ?1
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![location_path])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Return one representative location path for the given album.
+    pub fn album_representation_path(&self, album: &str) -> anyhow::Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.path
+             FROM locations l
+             JOIN tracks t ON t.content_id = l.content_id
+             WHERE t.album = ?1
+             ORDER BY l.last_seen DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![album])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Return candidate location paths for an album ordered by availability/recency.
+    pub fn album_location_paths(&self, album: &str, limit: usize) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.path
+             FROM locations l
+             JOIN tracks t ON t.content_id = l.content_id
+             WHERE t.album = ?1
+             ORDER BY l.available DESC, l.preferred DESC, l.last_seen DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![album, limit as i64], |row| row.get(0))?;
+        let mut paths = Vec::new();
+        for path in rows {
+            paths.push(path?);
+        }
+        Ok(paths)
+    }
+
+    /// Clear all cached library metadata and locations from the meta cache.
+    pub fn clear_library(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "BEGIN TRANSACTION;
+             DELETE FROM hashes;
+             DELETE FROM files;
+             DELETE FROM tracks;
+             DELETE FROM locations;
+             DELETE FROM hashes_staging;
+             DELETE FROM files_staging;
+             DELETE FROM tracks_staging;
+             DELETE FROM locations_staging;
+             COMMIT;",
+        )?;
+        Ok(())
+    }
+ 
+     /// Return a hierarchical tree of scanned library directories.
     pub fn library_directories(&self, limit: usize) -> anyhow::Result<Vec<LibraryDirectoryDto>> {
         let mut stmt = self.conn.prepare("SELECT DISTINCT path FROM locations")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -671,7 +882,7 @@ COMMIT;
         Ok(result)
     }
 
-    /// Return track titles under the given directory path.
+    /// Return playable location paths under the given directory path.
     pub fn library_tracks_by_directory(&self, directory: &str) -> anyhow::Result<Vec<String>> {
         let mut pattern = directory.to_string();
         if !pattern.ends_with(MAIN_SEPARATOR) {
@@ -680,14 +891,29 @@ COMMIT;
         pattern.push('%');
 
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT t.title FROM tracks t JOIN locations l ON l.content_id = t.content_id WHERE l.path = ?1 OR l.path LIKE ?2 ORDER BY t.title COLLATE NOCASE",
+            "SELECT DISTINCT l.path FROM tracks t JOIN locations l ON l.content_id = t.content_id WHERE l.path = ?1 OR l.path LIKE ?2",
         )?;
-        let rows = stmt.query_map(params![directory, pattern], |row| row.get(0))?;
-        let mut titles = Vec::new();
-        for title in rows {
-            titles.push(title?);
+        let rows = stmt.query_map(params![directory, pattern], |row| row.get::<_, String>(0))?;
+        let mut paths = Vec::new();
+        for path in rows {
+            paths.push(path?);
         }
-        Ok(titles)
+
+        paths.sort_by(|a, b| {
+            let a_name = Path::new(a)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(a)
+                .to_ascii_lowercase();
+            let b_name = Path::new(b)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(b)
+                .to_ascii_lowercase();
+            a_name.cmp(&b_name)
+        });
+
+        Ok(paths)
     }
 
     /// Expose a raw connection reference for advanced ops (use carefully)

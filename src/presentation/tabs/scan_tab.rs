@@ -1,7 +1,8 @@
-use crate::application::view_model::AppVm;
+use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
 
-pub fn ui(ui: &mut egui::Ui, vm: &AppVm) {
+pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
+    let vm = &app.app_vm;
     ui.heading("Scan");
     ui.label("Configure scan targets and exclude patterns, then start or cancel the scan.");
     ui.separator();
@@ -36,20 +37,27 @@ pub fn ui(ui: &mut egui::Ui, vm: &AppVm) {
         ui.label("No scan activity recorded yet.");
     }
 
-    if vm.scan.scan_scanned.is_some()
-        || vm.scan.scan_parsed.is_some()
-        || vm.scan.scan_registered.is_some()
+    if app.app_vm.scan.scan_scanned.is_some()
+        || app.app_vm.scan.scan_parsed.is_some()
+        || app.app_vm.scan.scan_registered.is_some()
     {
         ui.separator();
         ui.heading("Scan progress");
-        if let Some(scanned) = vm.scan.scan_scanned {
+        if let Some(scanned) = app.app_vm.scan.scan_scanned {
             ui.label(format!("Scanned: {}", scanned));
         }
-        if let Some(parsed) = vm.scan.scan_parsed {
+        if let Some(parsed) = app.app_vm.scan.scan_parsed {
             ui.label(format!("Parsed: {}", parsed));
         }
-        if let Some(registered) = vm.scan.scan_registered {
+        if let Some(registered) = app.app_vm.scan.scan_registered {
             ui.label(format!("Registered: {}", registered));
         }
     }
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button("Clear library").clicked() {
+            app.clear_library();
+        }
+    });
 }

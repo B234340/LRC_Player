@@ -1,4 +1,3 @@
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -100,8 +99,11 @@ impl Config {
     }
 
     fn path() -> Option<PathBuf> {
-        ProjectDirs::from("com", "example", "lrc_player")
-            .map(|pd| pd.config_dir().join("config.json"))
+        let exe_path = std::env::current_exe().ok()?;
+        let exe_dir = exe_path.parent()?;
+        let data_dir = exe_dir.join("data");
+        std::fs::create_dir_all(&data_dir).ok()?;
+        Some(data_dir.join("config.json"))
     }
 
     pub fn load() -> Self {
