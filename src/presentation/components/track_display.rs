@@ -2,6 +2,7 @@ use crate::infrastructure::persistence::MetaCache;
 use eframe::egui;
 use image::io::Reader as ImageReader;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -14,26 +15,63 @@ pub struct TrackDisplayInfo {
 
 fn discover_artwork_for_track(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
-    let stem = path.file_stem()?.to_string_lossy();
-    let candidates = [
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    let stem_patterns = [
         format!("{}.jpg", stem),
         format!("{}.jpeg", stem),
         format!("{}.png", stem),
         format!("{}.webp", stem),
-        "folder.jpg".to_string(),
-        "cover.jpg".to_string(),
-        "front.jpg".to_string(),
-        "folder.png".to_string(),
-        "cover.png".to_string(),
-        "front.png".to_string(),
     ];
-    for candidate in candidates.iter() {
-        let candidate_path = parent.join(candidate);
-        if candidate_path.exists() {
-            return Some(candidate_path);
+    let preferred_patterns = [
+        "cover.jpg",
+        "cover.jpeg",
+        "cover.png",
+        "cover.webp",
+        "folder.jpg",
+        "folder.jpeg",
+        "folder.png",
+        "folder.webp",
+        "front.jpg",
+        "front.jpeg",
+        "front.png",
+        "front.webp",
+    ];
+
+    let mut best_match: Option<(u8, u64, PathBuf)> = None;
+    let mut check_pattern = |name: &str, path: PathBuf| {
+        let lower = name.to_lowercase();
+        let priority = if preferred_patterns.contains(&lower.as_str()) {
+            1
+        } else if stem_patterns.iter().any(|pattern| pattern.eq_ignore_ascii_case(&lower)) {
+            2
+        } else {
+            return;
+        };
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            let size = metadata.len();
+            match &best_match {
+                Some((best_priority, best_size, _)) if *best_priority < priority => {}
+                Some((best_priority, best_size, _)) if *best_priority == priority && *best_size >= size => {}
+                _ => {
+                    best_match = Some((priority, size, path));
+                }
+            }
+        }
+    };
+
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                check_pattern(name, path.clone());
+            }
         }
     }
-    None
+
+    best_match.map(|(_, _, path)| path)
 }
 
 fn load_artwork_texture(ctx: &egui::Context, artwork_path: &Path, id: &str) -> Option<egui::TextureHandle> {

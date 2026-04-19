@@ -95,13 +95,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         // アートワーク画像の表示（アルバムアート）
         if let Some(texture) = &app.play_artwork_handle {
             let available = ui.available_size();
-            // 画像サイズを計算（画面サイズに応じて調整、最小128px、最大640px）
-            let max_side = (available.x.min(available.y) * 0.45).clamp(128.0, 640.0);
+            // 画像サイズをやや大きめに調整（画面サイズに応じた最小160px、最大1080px）
+            let max_side = (available.x.min(available.y) * 0.6).clamp(160.0, 1080.0);
             let mut image_size = texture.size_vec2();
             let scale = (max_side / image_size.x).min(max_side / image_size.y).min(1.0);
             image_size *= scale;
             ui.image(texture, image_size);
-            ui.add_space(8.0);
+            ui.add_space(12.0);
         }
 
         // トラック情報の表示

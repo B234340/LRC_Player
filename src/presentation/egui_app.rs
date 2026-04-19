@@ -11,8 +11,14 @@ use crossbeam_channel::{Receiver, Sender};
 use crate::infrastructure::lyrics::Lyrics;
 use crate::infrastructure::persistence::{MetaCache, PlaylistsFile, StateFile};
 use image::io::Reader as ImageReader;
+use std::fs;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::{MetadataOptions, StandardVisualKey};
+use symphonia::default::get_probe;
 use crate::localization::translate;
 use crate::presentation::side_panel::output;
 use crate::presentation::tabs;
@@ -23,7 +29,6 @@ use fontdb::{Database, Family, Source, Style};
 use rand::seq::IteratorRandom;
 use rand::thread_rng;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -1420,40 +1425,79 @@ impl GuiApp {
             return;
         }
 
-        let artwork_path = self.discover_artwork_for_track(path);
-        if artwork_path.is_none() {
-            self.play_artwork_handle = None;
-            self.play_artwork_source = None;
-            return;
-        }
+        if let Some(artwork_path) = self.discover_artwork_for_track(path) {
+            if self.play_artwork_source.as_ref() == Some(&artwork_path) && self.play_artwork_handle.is_some() {
+                return;
+            }
 
-        let artwork_path = artwork_path.unwrap();
-        if self.play_artwork_source.as_ref() == Some(&artwork_path) && self.play_artwork_handle.is_some() {
-            return;
-        }
-
-        let image_result: Result<image::DynamicImage, image::ImageError> = (|| {
-            let reader = ImageReader::open(&artwork_path).map_err(image::ImageError::IoError)?;
-            let reader = reader.with_guessed_format().map_err(image::ImageError::IoError)?;
-            reader.decode()
-        })();
-
-        match image_result {
-            Ok(image) => {
-                let size = [image.width() as usize, image.height() as usize];
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    size,
-                    &image.to_rgba8().into_vec(),
-                );
-                let texture = ctx.load_texture("play_artwork", color_image, egui::TextureOptions::default());
+            if let Some(texture) = self.load_artwork_texture_from_path(ctx, &artwork_path) {
                 self.play_artwork_handle = Some(texture);
                 self.play_artwork_source = Some(artwork_path);
-            }
-            Err(_) => {
-                self.play_artwork_handle = None;
-                self.play_artwork_source = None;
+                return;
             }
         }
+
+        if self.play_artwork_source.as_ref().map(|source| source.as_path()) == Some(path)
+            && self.play_artwork_handle.is_some()
+        {
+            return;
+        }
+
+        if let Some(image) = self.extract_embedded_artwork(path) {
+            let size = [image.width() as usize, image.height() as usize];
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                size,
+                &image.to_rgba8().into_vec(),
+            );
+            let texture = ctx.load_texture("play_artwork", color_image, egui::TextureOptions::default());
+            self.play_artwork_handle = Some(texture);
+            self.play_artwork_source = Some(path.to_path_buf());
+            return;
+        }
+
+        self.play_artwork_handle = None;
+        self.play_artwork_source = None;
+    }
+
+    fn load_artwork_texture_from_path(&self, ctx: &egui::Context, artwork_path: &Path) -> Option<egui::TextureHandle> {
+        let image = ImageReader::open(artwork_path)
+            .ok()?
+            .with_guessed_format()
+            .ok()?
+            .decode()
+            .ok()?;
+
+        let size = [image.width() as usize, image.height() as usize];
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            size,
+            &image.to_rgba8().into_vec(),
+        );
+
+        Some(ctx.load_texture("play_artwork", color_image, egui::TextureOptions::default()))
+    }
+
+    fn extract_embedded_artwork(&self, path: &Path) -> Option<image::DynamicImage> {
+        let src = File::open(path).ok()?;
+        let mss = MediaSourceStream::new(Box::new(src), Default::default());
+        let probe = get_probe().format(
+            &Default::default(),
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        ).ok()?;
+        let mut format = probe.format;
+        let metadata_source = format.metadata();
+        let metadata = metadata_source.current()?;
+
+        let artwork_visual = metadata.visuals().iter().find(|visual| {
+            visual.usage == Some(StandardVisualKey::FrontCover)
+        }).or_else(|| {
+            metadata.visuals().iter().max_by_key(|visual| {
+                visual.dimensions.map(|dimensions| dimensions.width.saturating_mul(dimensions.height)).unwrap_or(0)
+            })
+        })?;
+
+        image::load_from_memory(&artwork_visual.data).ok()
     }
 
     fn clear_album_artwork_cache(&mut self) {
@@ -1572,27 +1616,63 @@ impl GuiApp {
 
     fn discover_artwork_for_track(&self, path: &Path) -> Option<PathBuf> {
         let parent = path.parent()?;
-        let stem = path.file_stem()?.to_string_lossy();
-        let candidates = [
+        let stem = path.file_stem()?.to_string_lossy().to_string();
+        let stem_patterns = [
             format!("{}.jpg", stem),
             format!("{}.jpeg", stem),
             format!("{}.png", stem),
             format!("{}.webp", stem),
-            format!("folder.jpg"),
-            format!("cover.jpg"),
-            format!("front.jpg"),
-            format!("folder.png"),
-            format!("cover.png"),
-            format!("front.png"),
+        ];
+        let preferred_patterns = [
+            "cover.jpg",
+            "cover.jpeg",
+            "cover.png",
+            "cover.webp",
+            "folder.jpg",
+            "folder.jpeg",
+            "folder.png",
+            "folder.webp",
+            "front.jpg",
+            "front.jpeg",
+            "front.png",
+            "front.webp",
         ];
 
-        for candidate in candidates.iter() {
-            let candidate_path = parent.join(candidate);
-            if candidate_path.exists() {
-                return Some(candidate_path);
+        let mut best_match: Option<(u8, u64, PathBuf)> = None;
+        let mut check_pattern = |name: &str, path: PathBuf| {
+            let lower = name.to_lowercase();
+            let priority = if preferred_patterns.contains(&lower.as_str()) {
+                1
+            } else if stem_patterns.iter().any(|pattern| pattern.eq_ignore_ascii_case(&lower)) {
+                2
+            } else {
+                return;
+            };
+            if let Ok(metadata) = fs::metadata(&path) {
+                let size = metadata.len();
+                match &best_match {
+                    Some((best_priority, best_size, _)) if *best_priority < priority => {}
+                    Some((best_priority, best_size, _)) if *best_priority == priority && *best_size >= size => {}
+                    _ => {
+                        best_match = Some((priority, size, path));
+                    }
+                }
+            }
+        };
+
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    check_pattern(name, path.clone());
+                }
             }
         }
-        None
+
+        best_match.map(|(_, _, path)| path)
     }
 
     pub(crate) fn discover_lyrics_for_current_play_path(&mut self) {
