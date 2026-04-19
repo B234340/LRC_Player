@@ -88,6 +88,8 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.separator();
     let mut pending_select_playlist: Option<Option<usize>> = None;
     let mut pending_delete_playlist: Option<usize> = None;
+    let mut pending_move_playlist_up: Option<usize> = None;
+    let mut pending_move_playlist_down: Option<usize> = None;
     for (index, playlist) in app.playlists.iter().enumerate() {
         let selected = app.selected_playlist == Some(index);
         let is_favorite = playlist.name.eq_ignore_ascii_case("favorite");
@@ -114,6 +116,12 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add_enabled(!is_favorite && index < app.playlists.len() - 1, egui::Button::new("↓")).clicked() {
+                        pending_move_playlist_down = Some(index);
+                    }
+                    if ui.add_enabled(index > 1, egui::Button::new("↑")).clicked() {
+                        pending_move_playlist_up = Some(index);
+                    }
                     if ui.add_enabled(!is_favorite, egui::Button::new("Delete")).clicked() {
                         pending_delete_playlist = Some(index);
                     }
@@ -126,6 +134,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     if let Some(index) = pending_delete_playlist {
         app.remove_playlist(index);
         return;
+    }
+
+    if let Some(index) = pending_move_playlist_up {
+        app.move_playlist_up(index);
+    }
+    if let Some(index) = pending_move_playlist_down {
+        app.move_playlist_down(index);
     }
 
     if let Some(selection) = pending_select_playlist {

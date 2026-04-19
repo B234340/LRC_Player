@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use anyhow::Result;
 use lrc_player::application::dto::StateDto;
 use lrc_player::infrastructure::persistence::{MetaCache, StateFile};

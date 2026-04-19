@@ -71,6 +71,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         for root in library.directory_tree.iter() {
             render_directory_node(
                 ui,
+                app,
                 root,
                 0,
                 selected_directory,
@@ -183,14 +184,27 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
 fn render_directory_node(
     ui: &mut egui::Ui,
+    app: &mut GuiApp,
     node: &LibraryDirectoryVm,
     indent: usize,
     selected_directory: Option<&str>,
     pending_select_directory: &mut Option<String>,
 ) {
+    let has_children = !node.children.is_empty();
+    let expanded = app.is_library_directory_expanded(&node.path);
+
     ui.horizontal(|ui| {
         for _ in 0..indent {
             ui.add_space(12.0);
+        }
+
+        if has_children {
+            let icon = if expanded { "▼" } else { "▶" };
+            if ui.button(icon).clicked() {
+                app.toggle_library_directory_expanded(&node.path);
+            }
+        } else {
+            ui.add_space(18.0);
         }
 
         if ui
@@ -204,13 +218,16 @@ fn render_directory_node(
         }
     });
 
-    for child in node.children.iter() {
-        render_directory_node(
-            ui,
-            child,
-            indent + 1,
-            selected_directory,
-            pending_select_directory,
-        );
+    if expanded {
+        for child in node.children.iter() {
+            render_directory_node(
+                ui,
+                app,
+                child,
+                indent + 1,
+                selected_directory,
+                pending_select_directory,
+            );
+        }
     }
 }

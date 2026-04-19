@@ -205,23 +205,51 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     if let Some(lyrics) = &app.loaded_lyrics {
         ui.separator();
         ui.label("Lyrics preview:");
+
+        let current_time_ms = if app.lyrics_offset_ms.is_negative() {
+            app.play_position_ms.saturating_sub((-app.lyrics_offset_ms) as u64)
+        } else {
+            app.play_position_ms.saturating_add(app.lyrics_offset_ms as u64)
+        };
+        let highlighted_line_index = lyrics
+            .lines
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, line)| line.time_ms <= current_time_ms)
+            .map(|(index, _)| index);
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .max_height(300.0)
             .show(ui, |ui| {
-                for line in lyrics.lines.iter() {
+                for (index, line) in lyrics.lines.iter().enumerate() {
                     let time_ms = if app.lyrics_offset_ms.is_negative() {
                         line.time_ms.saturating_sub((-app.lyrics_offset_ms) as u64)
                     } else {
                         line.time_ms.saturating_add(app.lyrics_offset_ms as u64)
                     };
-                    ui.label(format!(
+                    let label = format!(
                         "[{:02}:{:02}.{:03}] {}",
                         time_ms / 60000,
                         (time_ms / 1000) % 60,
                         time_ms % 1000,
                         line.text
-                    ));
+                    );
+
+                    let response = if Some(index) == highlighted_line_index {
+                        ui.label(
+                            egui::RichText::new(label)
+                                .color(egui::Color32::WHITE)
+                                .background_color(egui::Color32::from_rgb(40, 40, 80)),
+                        )
+                    } else {
+                        ui.label(label)
+                    };
+
+                    if Some(index) == highlighted_line_index {
+                        response.scroll_to_me(Some(egui::Align::Center));
+                    }
                 }
             });
     }

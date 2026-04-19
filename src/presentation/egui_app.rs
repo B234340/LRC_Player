@@ -136,6 +136,7 @@ pub struct GuiApp {
     selected_directory: Option<String>,
     favorite_directories: Vec<String>,
     favorite_directory_input: String,
+    library_expanded_directories: std::collections::HashSet<String>,
     pub(crate) playlists: Vec<PlaylistDto>,
     pub(crate) new_playlist_name: String,
     pub(crate) selected_playlist: Option<usize>,
@@ -347,6 +348,46 @@ impl GuiApp {
             self.save_playlists();
             self.update_app_vm();
         }
+    }
+
+    pub(crate) fn move_playlist_up(&mut self, index: usize) {
+        if index <= 1 || index >= self.playlists.len() {
+            return;
+        }
+        if self.playlists[index - 1].name.eq_ignore_ascii_case("favorite") {
+            return;
+        }
+
+        self.playlists.swap(index - 1, index);
+        if let Some(selected) = self.selected_playlist {
+            if selected == index {
+                self.selected_playlist = Some(index - 1);
+            } else if selected == index - 1 {
+                self.selected_playlist = Some(index);
+            }
+        }
+        self.save_playlists();
+        self.update_app_vm();
+    }
+
+    pub(crate) fn move_playlist_down(&mut self, index: usize) {
+        if index == 0 || index + 1 >= self.playlists.len() {
+            return;
+        }
+        if self.playlists[index].name.eq_ignore_ascii_case("favorite") {
+            return;
+        }
+
+        self.playlists.swap(index, index + 1);
+        if let Some(selected) = self.selected_playlist {
+            if selected == index {
+                self.selected_playlist = Some(index + 1);
+            } else if selected == index + 1 {
+                self.selected_playlist = Some(index);
+            }
+        }
+        self.save_playlists();
+        self.update_app_vm();
     }
 
     pub(crate) fn add_queue_item(&mut self) {
@@ -924,6 +965,18 @@ impl GuiApp {
         self.update_app_vm();
     }
 
+    pub(crate) fn toggle_library_directory_expanded(&mut self, path: &str) {
+        if self.library_expanded_directories.contains(path) {
+            self.library_expanded_directories.remove(path);
+        } else {
+            self.library_expanded_directories.insert(path.to_string());
+        }
+    }
+
+    pub(crate) fn is_library_directory_expanded(&self, path: &str) -> bool {
+        self.library_expanded_directories.contains(path)
+    }
+
     fn add_favorite_directory(&mut self) {
         let dir = self.favorite_directory_input.trim().to_string();
         if dir.is_empty() || self.favorite_directories.contains(&dir) {
@@ -1489,6 +1542,9 @@ impl GuiApp {
         self.lyrics_files = Lyrics::discover_for_track(&self.play_path);
         self.selected_lyrics_index = None;
         self.loaded_lyrics = None;
+        if let Some(_) = self.lyrics_files.get(0) {
+            self.load_lyrics_file(0);
+        }
     }
 
     pub(crate) fn load_lyrics_file(&mut self, index: usize) {
@@ -2054,6 +2110,7 @@ impl GuiApp {
             selected_directory: None,
             favorite_directories: state.favorite_directories,
             favorite_directory_input: String::new(),
+            library_expanded_directories: std::collections::HashSet::new(),
             playlists,
             new_playlist_name: String::new(),
             selected_playlist: None,

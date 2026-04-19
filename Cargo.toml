@@ -2,6 +2,7 @@
 name = "lrc_player"
 version = "0.1.0"
 edition = "2021"
+default-run = "lrc_player"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "net", "io-util"] }
@@ -26,6 +27,14 @@ directories = "4"
 image = "0.24"
 eframe = "0.22"
 fontdb = "0.10"
+
+[[bin]]
+name = "lrc_player"
+path = "src/bin/gui.rs"
+
+[[bin]]
+name = "lrc_player_cli"
+path = "src/bin/cli.rs"
 
 [[bin]]
 name = "generate_10k_tracks"
