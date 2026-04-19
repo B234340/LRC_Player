@@ -184,10 +184,11 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     } else {
         for index in 0..app.lyrics_files.len() {
             let file_path = app.lyrics_files[index].clone();
-            let label = file_path
+            let file_name = file_path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("lyrics");
+            let label = format!("{} — {}", file_name, file_path.display());
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(app.selected_lyrics_index == Some(index), label)
@@ -224,30 +225,76 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             .max_height(300.0)
             .show(ui, |ui| {
                 for (index, line) in lyrics.lines.iter().enumerate() {
-                    let time_ms = if app.lyrics_offset_ms.is_negative() {
-                        line.time_ms.saturating_sub((-app.lyrics_offset_ms) as u64)
-                    } else {
-                        line.time_ms.saturating_add(app.lyrics_offset_ms as u64)
-                    };
-                    let label = format!(
-                        "[{:02}:{:02}.{:03}] {}",
-                        time_ms / 60000,
-                        (time_ms / 1000) % 60,
-                        time_ms % 1000,
-                        line.text
-                    );
+                    let is_current_line = Some(index) == highlighted_line_index;
+                    let label_text = line.text.clone();
 
-                    let response = if Some(index) == highlighted_line_index {
-                        ui.label(
-                            egui::RichText::new(label)
-                                .color(egui::Color32::WHITE)
-                                .background_color(egui::Color32::from_rgb(40, 40, 80)),
-                        )
+                    let response = if is_current_line {
+                        if line.segments.len() > 1 {
+                            let font_id = egui::TextStyle::Body.resolve(ui.style());
+                            let text_color = ui.style().visuals.text_color();
+                            let highlight_color = egui::Color32::from_rgb(40, 40, 80);
+
+                            let mut prefix_text = String::new();
+                            let mut highlight_width = 0.0;
+                            let full_text_width = ui.fonts(|fonts| {
+                                let mut job = egui::text::LayoutJob::default();
+                                job.append(&line.text, 0.0, egui::TextFormat::simple(font_id.clone(), text_color));
+                                fonts.layout_job(job).size().x
+                            });
+
+                            for (seg_index, segment) in line.segments.iter().enumerate() {
+                                let seg_start = segment.time_ms;
+                                let seg_end = line.segments.get(seg_index + 1).map(|next| next.time_ms);
+
+                                if let Some(end_ms) = seg_end {
+                                    if current_time_ms >= end_ms {
+                                        prefix_text.push_str(&segment.text);
+                                        continue;
+                                    }
+                                }
+
+                                let prefix_width = ui.fonts(|fonts| {
+                                    let mut job = egui::text::LayoutJob::default();
+                                    job.append(&prefix_text, 0.0, egui::TextFormat::simple(font_id.clone(), text_color));
+                                    fonts.layout_job(job).size().x
+                                });
+
+                                if current_time_ms < seg_start {
+                                    highlight_width = prefix_width;
+                                } else if let Some(end_ms) = seg_end {
+                                    let elapsed = current_time_ms.saturating_sub(seg_start);
+                                    let duration = end_ms.saturating_sub(seg_start).max(1);
+                                    let ratio = (elapsed as f32 / duration as f32).clamp(0.0, 1.0);
+                                    let segment_width = ui.fonts(|fonts| {
+                                        let mut job = egui::text::LayoutJob::default();
+                                        job.append(&segment.text, 0.0, egui::TextFormat::simple(font_id.clone(), text_color));
+                                        fonts.layout_job(job).size().x
+                                    });
+                                    highlight_width = prefix_width + segment_width * ratio;
+                                } else {
+                                    highlight_width = full_text_width;
+                                }
+                                break;
+                            }
+
+                            let text_size = egui::Vec2::new(full_text_width, ui.fonts(|fonts| fonts.row_height(&font_id)));
+                            let (rect, response) = ui.allocate_exact_size(text_size, egui::Sense::hover());
+                            let highlight_rect = egui::Rect::from_min_size(rect.min, egui::vec2(highlight_width, rect.height()));
+                            ui.painter().rect_filled(highlight_rect, 0.0, highlight_color);
+                            ui.painter().text(rect.min, egui::Align2::LEFT_TOP, &line.text, font_id.clone(), text_color);
+                            response
+                        } else {
+                            ui.label(
+                                egui::RichText::new(label_text)
+                                    .color(egui::Color32::WHITE)
+                                    .background_color(egui::Color32::from_rgb(40, 40, 80)),
+                            )
+                        }
                     } else {
-                        ui.label(label)
+                        ui.label(label_text)
                     };
 
-                    if Some(index) == highlighted_line_index {
+                    if is_current_line {
                         response.scroll_to_me(Some(egui::Align::Center));
                     }
                 }

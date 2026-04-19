@@ -175,7 +175,8 @@ async fn main() -> anyhow::Result<()> {
             // main loop: process incoming IPC scan requests
             while let Some(req) = rx.recv().await {
                 tracing::info!("received IPC ScanRequest: {:?}", req.paths);
-                let paths = req.paths.into_iter().map(PathBuf::from).collect();
+                let mut paths: Vec<PathBuf> = req.paths.into_iter().map(PathBuf::from).collect();
+                paths.extend(req.lrc_paths.into_iter().map(PathBuf::from));
                 let excludes = req.excludes.into_iter().map(PathBuf::from).collect();
                 let opts = ScanOptions { fast: false, excludes };
                 let handle = coordinator.start_scan(paths, opts).await?;
@@ -192,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
                     .collect();
                 let req = ipc_mod::ScanRequest {
                     paths,
+                    lrc_paths: Vec::new(),
                     excludes: Vec::new(),
                     cancel: false,
                 };

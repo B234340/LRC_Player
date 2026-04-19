@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "aac"];
+const LRC_EXTENSIONS: &[&str] = &["lrc", "LRC"];
 
 #[derive(Default)]
 pub struct FileScanner;
@@ -17,6 +18,28 @@ impl FileScanner {
         let mut results = Vec::new();
         self.collect_paths(path, &mut results, true, excludes);
         results
+    }
+
+    pub fn is_audio_file(&self, path: &Path) -> bool {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| {
+                AUDIO_EXTENSIONS
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(ext))
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn is_lyrics_file(&self, path: &Path) -> bool {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| {
+                LRC_EXTENSIONS
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(ext))
+            })
+            .unwrap_or(false)
     }
 
     pub fn generate_dummy_track_files(root: &Path, count: usize) {
@@ -98,14 +121,7 @@ impl FileScanner {
     }
 
     fn is_supported_file(&self, path: &Path) -> bool {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| {
-                AUDIO_EXTENSIONS
-                    .iter()
-                    .any(|allowed| allowed.eq_ignore_ascii_case(ext))
-            })
-            .unwrap_or(false)
+        self.is_audio_file(path) || self.is_lyrics_file(path)
     }
 }
 

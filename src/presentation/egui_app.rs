@@ -128,8 +128,10 @@ pub struct GuiApp {
     pub(crate) lyrics_offset_ms: i64,
     pub(crate) play_status: Option<String>,
     scan_target_input: String,
+    scan_lrc_target_input: String,
     scan_exclude_input: String,
     scan_targets: Vec<String>,
+    scan_lrc_targets: Vec<String>,
     pub(crate) scan_excludes: Vec<String>,
     selected_album: Option<String>,
     selected_artist: Option<String>,
@@ -177,6 +179,7 @@ impl GuiApp {
         config: &Config,
         last_scan_status: Option<String>,
         scan_targets: Vec<String>,
+        scan_lrc_targets: Vec<String>,
         scan_excludes: Vec<String>,
         library: LibraryDto,
         playlists: &[PlaylistDto],
@@ -195,6 +198,7 @@ impl GuiApp {
             scan_parsed: None,
             scan_registered: None,
             scan_targets,
+            scan_lrc_targets: scan_lrc_targets,
             scan_excludes,
             queue_tracks: Vec::new(),
             selected_queue_index: None,
@@ -216,6 +220,7 @@ impl GuiApp {
                 scan_parsed: None,
                 scan_registered: None,
                 scan_targets: Vec::new(),
+                scan_lrc_targets: Vec::new(),
                 scan_excludes: Vec::new(),
                 queue_tracks: Vec::new(),
                 selected_queue_index: None,
@@ -239,6 +244,7 @@ impl GuiApp {
             scan_parsed: None,
             scan_registered: None,
             scan_targets: self.scan_targets.clone(),
+            scan_lrc_targets: self.scan_lrc_targets.clone(),
             scan_excludes: self.scan_excludes.clone(),
             queue_tracks: self.queue.tracks.clone(),
             selected_queue_index: self.selected_queue_index,
@@ -1539,7 +1545,7 @@ impl GuiApp {
             return;
         }
 
-        self.lyrics_files = Lyrics::discover_for_track(&self.play_path);
+        self.lyrics_files = Lyrics::discover_for_track(&self.play_path, &self.scan_lrc_targets);
         self.selected_lyrics_index = None;
         self.loaded_lyrics = None;
         if let Some(_) = self.lyrics_files.get(0) {
@@ -1631,6 +1637,7 @@ impl GuiApp {
             &cfg,
             self.last_scan_status.clone(),
             self.scan_targets.clone(),
+            self.scan_lrc_targets.clone(),
             self.scan_excludes.clone(),
             library,
             &self.playlists,
@@ -1642,7 +1649,8 @@ impl GuiApp {
 
     fn request_scan(&mut self) {
         let paths = self.scan_targets.clone();
-        if paths.is_empty() {
+        let lrc_paths = self.scan_lrc_targets.clone();
+        if paths.is_empty() && lrc_paths.is_empty() {
             self.last_scan_status = Some("No scan targets configured".to_string());
             self.save_state();
             self.update_app_vm();
@@ -1656,6 +1664,7 @@ impl GuiApp {
         let socket = ipc_mod::default_socket_path();
         let request = ipc_mod::ScanRequest {
             paths,
+            lrc_paths,
             excludes: self.scan_excludes.clone(),
             cancel: false,
         };
@@ -1877,6 +1886,7 @@ impl GuiApp {
         let socket = ipc_mod::default_socket_path();
         let request = ipc_mod::ScanRequest {
             paths: Vec::new(),
+            lrc_paths: Vec::new(),
             excludes: self.scan_excludes.clone(),
             cancel: true,
         };
@@ -1905,6 +1915,24 @@ impl GuiApp {
     fn remove_scan_target(&mut self, index: usize) {
         if index < self.scan_targets.len() {
             self.scan_targets.remove(index);
+            self.save_state();
+            self.update_app_vm();
+        }
+    }
+
+    fn add_scan_lrc_target(&mut self) {
+        let target = self.scan_lrc_target_input.trim().to_string();
+        if !target.is_empty() {
+            self.scan_lrc_targets.push(target);
+            self.scan_lrc_target_input.clear();
+            self.save_state();
+            self.update_app_vm();
+        }
+    }
+
+    fn remove_scan_lrc_target(&mut self, index: usize) {
+        if index < self.scan_lrc_targets.len() {
+            self.scan_lrc_targets.remove(index);
             self.save_state();
             self.update_app_vm();
         }
@@ -2045,6 +2073,7 @@ impl GuiApp {
                 &cfg,
                 state.last_scan_status.clone(),
                 state.scan_targets.clone(),
+                state.scan_lrc_targets.clone(),
                 state.scan_excludes.clone(),
                 LibraryDto {
                     album_count: 0,
@@ -2102,8 +2131,10 @@ impl GuiApp {
             queue_scroll_to_playing: active_tab == Tab::Queue,
             artist_view_mode: ArtistViewMode::Artist,
             scan_target_input: String::new(),
+            scan_lrc_target_input: String::new(),
             scan_exclude_input: String::new(),
             scan_targets: state.scan_targets,
+            scan_lrc_targets: state.scan_lrc_targets,
             scan_excludes: state.scan_excludes,
             selected_album: None,
             selected_artist: None,
@@ -2311,7 +2342,7 @@ impl App for GuiApp {
                 ui.label("Configure scan targets and exclude paths, then press Request scan.");
 
                 ui.group(|ui| {
-                    ui.label("Scan target path:");
+                    ui.label("Audio scan target path:");
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut self.scan_target_input);
                         if ui.button("Add target").clicked() {
@@ -2326,6 +2357,28 @@ impl App for GuiApp {
                                 ui.label(format!("• {}", target));
                                 if ui.button("Remove").clicked() {
                                     self.remove_scan_target(index);
+                                }
+                            });
+                        }
+                    }
+                });
+
+                ui.group(|ui| {
+                    ui.label("LRC scan target path:");
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.scan_lrc_target_input);
+                        if ui.button("Add LRC target").clicked() {
+                            self.add_scan_lrc_target();
+                        }
+                    });
+
+                    if !self.scan_lrc_targets.is_empty() {
+                        let targets = self.scan_lrc_targets.clone();
+                        for (index, target) in targets.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("• {}", target));
+                                if ui.button("Remove").clicked() {
+                                    self.remove_scan_lrc_target(index);
                                 }
                             });
                         }

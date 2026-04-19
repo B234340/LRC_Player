@@ -5,6 +5,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let vm = &app.app_vm;
     ui.heading("Scan");
     ui.label("Configure scan targets and exclude patterns, then start or cancel the scan.");
+    ui.label("Scan can discover audio files and related .lrc files; LRC directories are also supported.");
     ui.separator();
 
     ui.group(|ui| {
@@ -13,6 +14,17 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             ui.label("No scan targets configured.");
         } else {
             for target in vm.scan.scan_targets.iter() {
+                ui.label(format!("• {}", target));
+            }
+        }
+    });
+
+    ui.group(|ui| {
+        ui.label("LRC scan targets:");
+        if vm.scan.scan_lrc_targets.is_empty() {
+            ui.label("No LRC scan targets configured.");
+        } else {
+            for target in vm.scan.scan_lrc_targets.iter() {
                 ui.label(format!("• {}", target));
             }
         }

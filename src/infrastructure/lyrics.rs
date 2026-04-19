@@ -1,11 +1,19 @@
+use crate::infrastructure::persistence::MetaCache;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LyricSegment {
+    pub time_ms: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LyricLine {
     pub time_ms: u64,
     pub text: String,
+    pub segments: Vec<LyricSegment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,14 +33,8 @@ impl Lyrics {
                 continue;
             }
 
-            if let Some(start) = line.find('[') {
-                if let Some(end) = line[start..].find(']') {
-                    let tag = &line[start + 1..start + end];
-                    if let Some(ms) = parse_timestamp(tag) {
-                        let text = line[start + end + 1..].trim().to_string();
-                        lines.push(LyricLine { time_ms: ms, text });
-                    }
-                }
+            if let Some((ms, text, segments)) = Self::parse_timestamped_line(line) {
+                lines.push(LyricLine { time_ms: ms, text, segments });
             }
         }
 
@@ -40,10 +42,63 @@ impl Lyrics {
         Ok(Self { lines })
     }
 
-    pub fn discover_for_track<P: AsRef<Path>>(track_path: P) -> Vec<PathBuf> {
+    fn parse_timestamped_line(line: &str) -> Option<(u64, String, Vec<LyricSegment>)> {
+        let mut segments = Vec::new();
+        let mut i = 0;
+
+        while i < line.len() {
+            let remaining = &line[i..];
+            let closing = if remaining.starts_with('[') {
+                ']'
+            } else if remaining.starts_with('<') {
+                '>'
+            } else {
+                break;
+            };
+
+            if let Some(end_rel) = remaining[1..].find(closing) {
+                let tag = &remaining[1..1 + end_rel];
+                if let Some(ms) = parse_timestamp(tag) {
+                    let content_start = i + 1 + end_rel + closing.len_utf8();
+                    let next_tag_offset = line[content_start..]
+                        .find('[')
+                        .or_else(|| line[content_start..].find('<'))
+                        .map(|offset| content_start + offset)
+                        .unwrap_or(line.len());
+                    let segment_text = line[content_start..next_tag_offset].to_string();
+                    segments.push(LyricSegment { time_ms: ms, text: segment_text });
+                    i = next_tag_offset;
+                    continue;
+                }
+            }
+
+            break;
+        }
+
+        if segments.is_empty() {
+            return None;
+        }
+
+        let text = segments.iter().map(|segment| segment.text.clone()).collect();
+        Some((segments[0].time_ms, text, segments))
+    }
+
+    pub fn discover_for_track<P: AsRef<Path>>(track_path: P, lrc_paths: &[String]) -> Vec<PathBuf> {
+        fn push_unique(
+            results: &mut Vec<PathBuf>,
+            seen: &mut std::collections::HashSet<PathBuf>,
+            path: PathBuf,
+        ) {
+            if seen.insert(path.clone()) {
+                results.push(path);
+            }
+        }
+
+        let track_path = track_path.as_ref();
+        let mut local_sidecar: Option<PathBuf> = None;
         let mut results = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let track_path = track_path.as_ref();
+
         if let Some(parent) = track_path.parent() {
             if let Some(stem) = track_path.file_stem().and_then(|s| s.to_str()) {
                 for ext in ["lrc", "LRC"] {
@@ -52,14 +107,66 @@ impl Lyrics {
                         continue;
                     }
 
-                    let actual_path =
-                        fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
-                    if seen.insert(actual_path.clone()) {
-                        results.push(actual_path);
+                    let actual_path = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                    local_sidecar = Some(actual_path);
+                    break;
+                }
+            }
+        }
+
+        let lrc_path_roots: Vec<PathBuf> = lrc_paths
+            .iter()
+            .filter_map(|path| {
+                let path_buf = PathBuf::from(path);
+                fs::canonicalize(&path_buf).ok().or(Some(path_buf))
+            })
+            .collect();
+
+        let mut prioritized_meta_paths = Vec::new();
+        let mut other_meta_paths = Vec::new();
+
+        if let Ok(cache) = MetaCache::open_default() {
+            if let Ok(db_paths) = cache.lyrics_for_track_path(track_path) {
+                for path in db_paths.into_iter() {
+                    let path_buf = PathBuf::from(path);
+                    if !path_buf.exists() {
+                        continue;
+                    }
+
+                    let path_buf = fs::canonicalize(&path_buf).unwrap_or_else(|_| path_buf.clone());
+                    if !lrc_path_roots.is_empty() && lrc_path_roots.iter().any(|root| path_buf.starts_with(root)) {
+                        prioritized_meta_paths.push(path_buf);
+                    } else {
+                        other_meta_paths.push(path_buf);
                     }
                 }
             }
         }
+
+        if !lrc_path_roots.is_empty() {
+            for path in prioritized_meta_paths {
+                push_unique(&mut results, &mut seen, path);
+            }
+            if results.is_empty() {
+                if let Some(local) = &local_sidecar {
+                    push_unique(&mut results, &mut seen, local.clone());
+                }
+            }
+            for path in other_meta_paths {
+                push_unique(&mut results, &mut seen, path);
+            }
+        } else {
+            if let Some(local) = &local_sidecar {
+                push_unique(&mut results, &mut seen, local.clone());
+            }
+            for path in prioritized_meta_paths {
+                push_unique(&mut results, &mut seen, path);
+            }
+            for path in other_meta_paths {
+                push_unique(&mut results, &mut seen, path);
+            }
+        }
+
         results
     }
 }

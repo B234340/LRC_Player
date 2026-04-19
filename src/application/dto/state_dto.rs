@@ -45,6 +45,8 @@ pub struct StateDto {
     #[serde(default)]
     pub scan_targets: Vec<String>,
     #[serde(default)]
+    pub scan_lrc_targets: Vec<String>,
+    #[serde(default)]
     pub scan_excludes: Vec<String>,
     #[serde(default)]
     pub queue_tracks: Vec<String>,

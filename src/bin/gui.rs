@@ -28,6 +28,7 @@ fn update_scan_status(
             scan_parsed: None,
             scan_registered: None,
             scan_targets: Vec::new(),
+            scan_lrc_targets: Vec::new(),
             scan_excludes: Vec::new(),
             queue_tracks: Vec::new(),
             selected_queue_index: None,

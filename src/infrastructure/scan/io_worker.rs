@@ -80,6 +80,13 @@ enum DBCommand {
         preferred: bool,
         available: bool,
     },
+    UpsertLyricsLocation {
+        content_id: Option<String>,
+        path: String,
+        size: i64,
+        mtime: i64,
+        last_seen: i64,
+    },
     Checkpoint,
 }
 
@@ -316,6 +323,16 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                         );
                                         staged_count += 1;
                                     }
+                                    DBCommand::UpsertLyricsLocation { content_id, path, size, mtime, last_seen } => {
+                                        let _ = m.upsert_lyrics_location(
+                                            content_id.as_deref(),
+                                            &path,
+                                            size,
+                                            mtime,
+                                            last_seen,
+                                        );
+                                        staged_count += 1;
+                                    }
                                     DBCommand::Checkpoint => {
                                         let _ = m.checkpoint();
                                         staged_count = 0;
@@ -363,6 +380,7 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                     let dedup = DedupService::new();
                     let db_for_job = db_tx_clone.clone();
                     let _fast_scan = options.fast;
+                    let maybe_cache = MetaCache::open_default().ok();
                     tokio::spawn(async move {
                         let scanner = FileScanner::new();
                         if paths.is_empty() {
@@ -411,8 +429,77 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                         registered,
                                     });
 
-                                    if let Some(partial) = partial_hash.clone() {
-                                        if let Ok(meta) = std::fs::metadata(&file_path) {
+                                    if scanner.is_audio_file(&file_path) {
+                                        if let Some(partial) = partial_hash.clone() {
+                                            if let Ok(meta) = std::fs::metadata(&file_path) {
+                                                let size = meta.len() as i64;
+                                                let mtime = meta
+                                                    .modified()
+                                                    .ok()
+                                                    .and_then(|t| {
+                                                        t.duration_since(std::time::UNIX_EPOCH).ok()
+                                                    })
+                                                    .map(|d| d.as_secs() as i64)
+                                                    .unwrap_or(0);
+                                                let norm = file_path.to_string_lossy().to_string();
+                                                let db_sender = db_for_job.clone();
+                                                let _ = db_sender
+                                                    .send(DBCommand::UpsertFile {
+                                                        path: file_path.to_string_lossy().to_string(),
+                                                        norm_path: norm.clone(),
+                                                        size,
+                                                        mtime,
+                                                        device: None,
+                                                        inode: None,
+                                                        stable_key: Some(partial.clone()),
+                                                    })
+                                                    .await;
+
+                                                let (title, artist, album_artist, composer, album) =
+                                                    extract_audio_tags(&file_path);
+                                                let now_ts = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .map(|d| d.as_secs() as i64)
+                                                    .unwrap_or(0);
+                                                let content_id = file_path.to_string_lossy().to_string();
+                                                let _ = db_sender
+                                                    .send(DBCommand::UpsertTrack {
+                                                        content_id: content_id.clone(),
+                                                        title,
+                                                        artist,
+                                                        album_artist,
+                                                        composer,
+                                                        album,
+                                                        canonical_location_id: None,
+                                                        created_at: now_ts,
+                                                    })
+                                                    .await;
+
+                                                let _ = db_sender
+                                                    .send(DBCommand::UpsertLocation {
+                                                        content_id: content_id.clone(),
+                                                        path: file_path.to_string_lossy().to_string(),
+                                                        device: None,
+                                                        inode: None,
+                                                        size,
+                                                        mtime,
+                                                        last_seen: now_ts,
+                                                        preferred: false,
+                                                        available: true,
+                                                    })
+                                                    .await;
+
+                                                let _ = db_sender
+                                                    .send(DBCommand::UpsertHash {
+                                                        content_id: content_id.clone(),
+                                                        algo: "blake3-partial".to_string(),
+                                                        full_hash: None,
+                                                        partial_hash: Some(partial.clone()),
+                                                        computed_at: now_ts,
+                                                    })
+                                                    .await;
+                                            }
+                                        } else if let Ok(meta) = std::fs::metadata(&file_path) {
                                             let size = meta.len() as i64;
                                             let mtime = meta
                                                 .modified()
@@ -432,77 +519,59 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                     mtime,
                                                     device: None,
                                                     inode: None,
-                                                    stable_key: Some(partial.clone()),
+                                                    stable_key: None,
                                                 })
                                                 .await;
-
-                                            let (title, artist, album_artist, composer, album) =
-                                                extract_audio_tags(&file_path);
+                                        }
+                                    } else if scanner.is_lyrics_file(&file_path) {
+                                        if let Ok(meta) = std::fs::metadata(&file_path) {
+                                            let size = meta.len() as i64;
+                                            let mtime = meta
+                                                .modified()
+                                                .ok()
+                                                .and_then(|t| {
+                                                    t.duration_since(std::time::UNIX_EPOCH).ok()
+                                                })
+                                                .map(|d| d.as_secs() as i64)
+                                                .unwrap_or(0);
                                             let now_ts = std::time::SystemTime::now()
                                                 .duration_since(std::time::UNIX_EPOCH)
                                                 .map(|d| d.as_secs() as i64)
                                                 .unwrap_or(0);
-                                            let content_id = file_path.to_string_lossy().to_string();
-                                            let _ = db_sender
-                                                .send(DBCommand::UpsertTrack {
-                                                    content_id: content_id.clone(),
-                                                    title,
-                                                    artist,
-                                                    album_artist,
-                                                    composer,
-                                                    album,
-                                                    canonical_location_id: None,
-                                                    created_at: now_ts,
-                                                })
-                                                .await;
 
+                                            let parent_name = file_path
+                                                .parent()
+                                                .and_then(|p| p.file_name())
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("");
+                                            let file_stem = file_path
+                                                .file_stem()
+                                                .and_then(|s| s.to_str())
+                                                .unwrap_or("");
+
+                                            let associated_content_id = maybe_cache
+                                                .as_ref()
+                                                .and_then(|cache| {
+                                                    cache
+                                                        .find_track_content_id_by_file_stem_and_parent(
+                                                            file_stem,
+                                                            parent_name,
+                                                        )
+                                                        .ok()
+                                                })
+                                                .flatten();
+
+                                            let db_sender = db_for_job.clone();
                                             let _ = db_sender
-                                                .send(DBCommand::UpsertLocation {
-                                                    content_id: content_id.clone(),
+                                                .send(DBCommand::UpsertLyricsLocation {
+                                                    content_id: associated_content_id.clone(),
                                                     path: file_path.to_string_lossy().to_string(),
-                                                    device: None,
-                                                    inode: None,
                                                     size,
                                                     mtime,
                                                     last_seen: now_ts,
-                                                    preferred: false,
-                                                    available: true,
-                                                })
-                                                .await;
-
-                                            let _ = db_sender
-                                                .send(DBCommand::UpsertHash {
-                                                    content_id: content_id.clone(),
-                                                    algo: "blake3-partial".to_string(),
-                                                    full_hash: None,
-                                                    partial_hash: Some(partial.clone()),
-                                                    computed_at: now_ts,
                                                 })
                                                 .await;
                                         }
-                                    } else if let Ok(meta) = std::fs::metadata(&file_path) {
-                                        let size = meta.len() as i64;
-                                        let mtime = meta
-                                            .modified()
-                                            .ok()
-                                            .and_then(|t| {
-                                                t.duration_since(std::time::UNIX_EPOCH).ok()
-                                            })
-                                            .map(|d| d.as_secs() as i64)
-                                            .unwrap_or(0);
-                                        let norm = file_path.to_string_lossy().to_string();
-                                        let db_sender = db_for_job.clone();
-                                        let _ = db_sender
-                                            .send(DBCommand::UpsertFile {
-                                                path: file_path.to_string_lossy().to_string(),
-                                                norm_path: norm.clone(),
-                                                size,
-                                                mtime,
-                                                device: None,
-                                                inode: None,
-                                                stable_key: None,
-                                            })
-                                            .await;
                                     }
                                 }
                             }

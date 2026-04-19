@@ -14,6 +14,7 @@ mod unix_ipc {
     #[derive(Serialize, Deserialize, Debug)]
     pub struct ScanRequest {
         pub paths: Vec<String>,
+        pub lrc_paths: Vec<String>,
         pub excludes: Vec<String>,
         pub cancel: bool,
     }
@@ -101,6 +102,7 @@ mod fallback {
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct ScanRequest {
         pub paths: Vec<String>,
+        pub lrc_paths: Vec<String>,
         pub excludes: Vec<String>,
         pub cancel: bool,
     }

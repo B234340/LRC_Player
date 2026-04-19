@@ -90,6 +90,17 @@ CREATE TABLE IF NOT EXISTS hashes (
     computed_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS lyrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content_id TEXT REFERENCES tracks(content_id),
+    path TEXT NOT NULL UNIQUE,
+    size INTEGER,
+    mtime INTEGER,
+    last_seen INTEGER,
+    available BOOLEAN DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_lyrics_content ON lyrics(content_id);
+
 -- Staging tables (same schema as main but with UNIQUE path for upsert semantics)
 CREATE TABLE IF NOT EXISTS files_staging (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -193,6 +204,80 @@ COMMIT;
     pub fn open_default() -> anyhow::Result<Self> {
         let path = Self::default_path()?;
         Self::new(path)
+    }
+
+    /// Example helper: insert or replace a `lyrics` row based on path
+    pub fn upsert_lyrics_location(
+        &self,
+        content_id: Option<&str>,
+        path: &str,
+        size: i64,
+        mtime: i64,
+        last_seen: i64,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO lyrics (content_id, path, size, mtime, last_seen, available)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)
+             ON CONFLICT(path) DO UPDATE SET
+               content_id = excluded.content_id,
+               size = excluded.size,
+               mtime = excluded.mtime,
+               last_seen = excluded.last_seen,
+               available = excluded.available",
+            params![content_id, path, size, mtime, last_seen],
+        )?;
+        Ok(())
+    }
+
+    pub fn find_track_content_id_by_path(&self, file_path: &Path) -> anyhow::Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT content_id FROM locations WHERE path = ?1 LIMIT 1")?;
+        let mut rows = stmt.query(params![file_path.to_string_lossy()])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get::<_, Option<String>>(0)?)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn find_track_content_id_by_file_stem_and_parent(
+        &self,
+        file_stem: &str,
+        parent_name: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.content_id, l.path FROM locations l JOIN tracks t ON t.content_id = l.content_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (content_id, path_str) = row?;
+            let path = Path::new(&path_str);
+            if path.file_stem().and_then(|s| s.to_str()) == Some(file_stem) {
+                if let Some(parent) = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+                    if parent == parent_name {
+                        return Ok(Some(content_id));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn lyrics_for_track_path(&self, file_path: &Path) -> anyhow::Result<Vec<String>> {
+        if let Some(content_id) = self.find_track_content_id_by_path(file_path)? {
+            let mut stmt = self.conn.prepare(
+                "SELECT path FROM lyrics WHERE content_id = ?1 AND available = 1",
+            )?;
+            let rows = stmt.query_map(params![content_id], |row| row.get(0))?;
+            let mut paths = Vec::new();
+            for path in rows {
+                paths.push(path?);
+            }
+            Ok(paths)
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     /// Example helper: insert or replace a `files` row based on path

@@ -7,6 +7,7 @@ pub struct ScanVm {
     pub scan_parsed: Option<u64>,
     pub scan_registered: Option<u64>,
     pub scan_targets: Vec<String>,
+    pub scan_lrc_targets: Vec<String>,
     pub scan_excludes: Vec<String>,
 }
 
@@ -18,6 +19,7 @@ impl From<&StateDto> for ScanVm {
             scan_parsed: dto.scan_parsed,
             scan_registered: dto.scan_registered,
             scan_targets: dto.scan_targets.clone(),
+            scan_lrc_targets: dto.scan_lrc_targets.clone(),
             scan_excludes: dto.scan_excludes.clone(),
         }
     }
