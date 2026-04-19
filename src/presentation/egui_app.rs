@@ -13,7 +13,8 @@ use crate::infrastructure::persistence::{MetaCache, PlaylistsFile, StateFile};
 use image::io::Reader as ImageReader;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use crate::localization::{language_name, supported_languages, translate};
+use crate::localization::translate;
+use crate::presentation::side_panel::output;
 use crate::presentation::tabs;
 use crate::shared::ipc as ipc_mod;
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -100,9 +101,9 @@ impl Tab {
 pub struct GuiApp {
     pub app_vm: AppVm,
     active_tab: Tab,
-    device_names: Vec<String>,
-    selected: Option<usize>,
-    device_filter: String,
+    pub(crate) device_names: Vec<String>,
+    pub(crate) selected: Option<usize>,
+    pub(crate) device_filter: String,
     pub(crate) play_path: String,
     pub(crate) lyrics_files: Vec<std::path::PathBuf>,
     pub(crate) selected_lyrics_index: Option<usize>,
@@ -163,6 +164,7 @@ pub struct GuiApp {
     pub(crate) queue_handle_hold_started_at: Option<Instant>,
     pub(crate) queue_drag_source_index: Option<usize>,
     pub(crate) taps: usize,
+    pub(crate) side_panel_expanded: bool,
     pub(crate) theme: Theme,
     pub(crate) log_level: LogLevel,
     pub(crate) language: Language,
@@ -2203,6 +2205,7 @@ impl GuiApp {
             seek_key_last_step_at: None,
             queue_scroll_to_playing: active_tab == Tab::Queue,
             artist_view_mode: state.artist_view_mode,
+            side_panel_expanded: true,
             scan_target_input: String::new(),
             scan_lrc_target_input: String::new(),
             scan_exclude_input: String::new(),
@@ -2293,130 +2296,13 @@ impl App for GuiApp {
             });
         });
 
-        egui::SidePanel::left("side_panel").resizable(false).show(ctx, |ui| {
-            ui.heading(translate("output_device", self.language));
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                ui.label(translate("filter", self.language));
-                ui.text_edit_singleline(&mut self.device_filter);
+        egui::SidePanel::left("side_panel")
+            .resizable(false)
+            .min_width(if self.side_panel_expanded { 240.0 } else { 32.0 })
+            .default_width(if self.side_panel_expanded { 240.0 } else { 32.0 })
+            .show(ctx, |ui| {
+                output::ui(ui, self);
             });
-
-            let filter = self.device_filter.to_lowercase();
-            let default_label = translate("default_output_device_label", self.language);
-            let mut filtered: Vec<(Option<usize>, &str)> = Vec::new();
-
-            if filter.is_empty() || default_label.to_lowercase().contains(&filter) {
-                filtered.push((None, default_label));
-            }
-            for (idx, name) in self.device_names.iter().enumerate() {
-                if filter.is_empty() || name.to_lowercase().contains(&filter) {
-                    filtered.push((Some(idx), name.as_str()));
-                }
-            }
-
-            if filtered.is_empty() {
-                ui.label(translate("no_matching_devices", self.language));
-            } else {
-                let mut sel_in_filtered = 0usize;
-                for (i, (orig_idx, _)) in filtered.iter().enumerate() {
-                    if *orig_idx == self.selected {
-                        sel_in_filtered = i;
-                        break;
-                    }
-                }
-
-                egui::ComboBox::from_id_source("device_combo")
-                    .selected_text(filtered.get(sel_in_filtered).map(|(_, s)| *s).unwrap_or(default_label))
-                    .show_ui(ui, |ui| {
-                        for (i, (_orig_idx, name)) in filtered.iter().enumerate() {
-                            ui.selectable_value(&mut sel_in_filtered, i, *name);
-                        }
-                    });
-
-                if let Some((orig_idx, _)) = filtered.get(sel_in_filtered) {
-                    let new_selected = *orig_idx;
-                    if self.selected != new_selected {
-                        self.selected = new_selected;
-                        if let Some(idx) = new_selected {
-                            if let Some(name) = self.device_names.get(idx) {
-                                let cfg = Config::load();
-                                self.taps = cfg.taps_for_device(Some(name));
-                            }
-                        }
-
-                        // Apply device switch immediately for active playback so users
-                        // don't need to manually pause/play or press Save first.
-                        if !self.play_path.trim().is_empty()
-                            && matches!(
-                                self.playback_state,
-                                PlaybackState::Playing
-                                    | PlaybackState::Buffering
-                                    | PlaybackState::Seeking
-                            )
-                        {
-                            self.playback_state = PlaybackState::Buffering;
-                            self.play_status = Some("Switching output device...".to_string());
-                            self.request_play();
-                        }
-                    }
-                }
-            }
-
-            if ui.button(translate("save_device", self.language)).clicked() {
-                let mut cfg = Config::load();
-                if let Some(idx) = self.selected {
-                    let name = self.device_names[idx].clone();
-                    cfg.preferred_output_device = Some(name.clone());
-                    if let Some(settings) = cfg.device_settings.get(&name) {
-                        self.taps = settings.resampler_taps;
-                    }
-                } else {
-                    cfg.preferred_output_device = None;
-                }
-                let _ = cfg.save();
-                self.update_app_vm();
-            }
-
-            ui.add_space(8.0);
-            ui.label(translate("resampler_taps", self.language));
-            ui.add(egui::DragValue::new(&mut self.taps).clamp_range(4..=256));
-            if ui.button(translate("save_taps", self.language)).clicked() {
-                let mut cfg = Config::load();
-                if let Some(idx) = self.selected {
-                    let name = self.device_names[idx].clone();
-                    cfg.set_taps_for_device(name, self.taps);
-                } else {
-                    cfg.resampler_taps = self.taps;
-                }
-                let _ = cfg.save();
-                self.update_app_vm();
-            }
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(translate("language", self.language));
-                let mut selected_lang = self.language;
-                egui::ComboBox::from_id_source("language_combo")
-                    .selected_text(language_name(self.language))
-                    .show_ui(ui, |ui| {
-                        for lang in supported_languages() {
-                            ui.selectable_value(&mut selected_lang, *lang, language_name(*lang));
-                        }
-                    });
-
-                if selected_lang != self.language {
-                    self.language = selected_lang;
-                }
-            });
-
-            if ui.button("Save language").clicked() {
-                let mut cfg = Config::load();
-                cfg.language = self.language;
-                let _ = cfg.save();
-                self.update_app_vm();
-            }
-        });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.active_tab {
