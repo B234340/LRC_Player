@@ -10,7 +10,7 @@ use crate::ports::audio_output::{AudioFormat, AudioOutput, SampleFormat};
 use crossbeam_channel::{Receiver, Sender};
 use crate::infrastructure::lyrics::Lyrics;
 use crate::infrastructure::persistence::{MetaCache, PlaylistsFile, StateFile};
-use image::io::Reader as ImageReader;
+use image::{GenericImageView, io::Reader as ImageReader};
 use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -142,6 +142,9 @@ pub struct GuiApp {
     pub(crate) play_album: Option<String>,
     pub(crate) play_artwork_handle: Option<egui::TextureHandle>,
     pub(crate) play_artwork_source: Option<PathBuf>,
+    pub(crate) play_artwork_blur_handle: Option<egui::TextureHandle>,
+    pub(crate) play_artwork_blur_source: Option<PathBuf>,
+    pub(crate) lrc_overlay_enabled: bool,
     pub(crate) lyrics_offset_ms: i64,
     pub(crate) play_status: Option<String>,
     pub(crate) scan_target_input: String,
@@ -222,6 +225,7 @@ impl GuiApp {
             selected_queue_index: None,
             queue_playback_mode: PlaybackMode::Sequential,
             artist_view_mode: ArtistViewMode::Artist,
+            lrc_overlay_enabled: false,
             favorite_directories: Vec::new(),
         };
 
@@ -245,6 +249,7 @@ impl GuiApp {
                 selected_queue_index: None,
                 queue_playback_mode: PlaybackMode::Sequential,
                 artist_view_mode: ArtistViewMode::Artist,
+                lrc_overlay_enabled: false,
                 last_play_position_ms: None,
                 favorite_directories: Vec::new(),
             })
@@ -270,6 +275,7 @@ impl GuiApp {
             selected_queue_index: self.selected_queue_index,
             queue_playback_mode: self.playback_mode,
             artist_view_mode: self.artist_view_mode,
+            lrc_overlay_enabled: self.lrc_overlay_enabled,
             favorite_directories: self.favorite_directories.clone(),
         };
         if let Ok(store) = StateFile::open() {
@@ -1422,58 +1428,113 @@ impl GuiApp {
         if path.as_os_str().is_empty() || !path.exists() {
             self.play_artwork_handle = None;
             self.play_artwork_source = None;
+            self.play_artwork_blur_handle = None;
+            self.play_artwork_blur_source = None;
             return;
         }
 
-        if let Some(artwork_path) = self.discover_artwork_for_track(path) {
-            if self.play_artwork_source.as_ref() == Some(&artwork_path) && self.play_artwork_handle.is_some() {
+        let artwork_path = self.discover_artwork_for_track(path);
+        let artwork_source = artwork_path
+            .as_ref()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| path.to_path_buf());
+
+        let need_regular_texture = self.play_artwork_source.as_ref() != Some(&artwork_source)
+            || self.play_artwork_handle.is_none();
+        let need_blur_texture = self.lrc_overlay_enabled
+            && (self.play_artwork_blur_source.as_ref() != Some(&artwork_source)
+                || self.play_artwork_blur_handle.is_none());
+
+        if need_regular_texture || need_blur_texture {
+            let artwork_image = if let Some(ref art_path) = artwork_path {
+                self.load_image_from_path(art_path)
+            } else {
+                self.extract_embedded_artwork(path)
+            };
+
+            if artwork_image.is_none() {
+                self.play_artwork_handle = None;
+                self.play_artwork_source = None;
+                self.play_artwork_blur_handle = None;
+                self.play_artwork_blur_source = None;
                 return;
             }
 
-            if let Some(texture) = self.load_artwork_texture_from_path(ctx, &artwork_path) {
-                self.play_artwork_handle = Some(texture);
-                self.play_artwork_source = Some(artwork_path);
-                return;
+            let artwork_image = artwork_image.unwrap();
+
+            if need_regular_texture {
+                self.play_artwork_handle = self.load_artwork_texture_from_image(
+                    ctx,
+                    artwork_image.clone(),
+                    "play_artwork",
+                );
+                self.play_artwork_source = self.play_artwork_handle.as_ref().map(|_| artwork_source.clone());
+            }
+
+            if self.lrc_overlay_enabled {
+                if need_blur_texture {
+                    self.play_artwork_blur_handle = self.load_blurred_artwork_texture_from_image(
+                        ctx,
+                        artwork_image,
+                        "play_artwork_blur",
+                    );
+                    self.play_artwork_blur_source = self.play_artwork_blur_handle.as_ref().map(|_| artwork_source.clone());
+                }
+            } else {
+                self.play_artwork_blur_handle = None;
+                self.play_artwork_blur_source = None;
             }
         }
-
-        if self.play_artwork_source.as_ref().map(|source| source.as_path()) == Some(path)
-            && self.play_artwork_handle.is_some()
-        {
-            return;
-        }
-
-        if let Some(image) = self.extract_embedded_artwork(path) {
-            let size = [image.width() as usize, image.height() as usize];
-            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                size,
-                &image.to_rgba8().into_vec(),
-            );
-            let texture = ctx.load_texture("play_artwork", color_image, egui::TextureOptions::default());
-            self.play_artwork_handle = Some(texture);
-            self.play_artwork_source = Some(path.to_path_buf());
-            return;
-        }
-
-        self.play_artwork_handle = None;
-        self.play_artwork_source = None;
     }
 
-    fn load_artwork_texture_from_path(&self, ctx: &egui::Context, artwork_path: &Path) -> Option<egui::TextureHandle> {
-        let image = ImageReader::open(artwork_path)
-            .ok()?
-            .with_guessed_format()
-            .ok()?
-            .decode()
-            .ok()?;
+    fn load_image_from_path(&self, artwork_path: &Path) -> Option<image::DynamicImage> {
+        let reader = ImageReader::open(artwork_path).ok()?;
+        let reader = reader.with_guessed_format().ok()?;
+        reader.decode().ok()
+    }
 
+    fn crop_image_to_square(&self, image: image::DynamicImage) -> image::DynamicImage {
+        let (width, height) = image.dimensions();
+        if width == height {
+            return image;
+        }
+
+        let side: u32 = width.min(height);
+        let x = (width - side) / 2;
+        let y = (height - side) / 2;
+        let buffer = image.to_rgba8();
+        let cropped = image::imageops::crop_imm(&buffer, x, y, side, side).to_image();
+        image::DynamicImage::ImageRgba8(cropped)
+    }
+
+    fn load_artwork_texture_from_image(
+        &self,
+        ctx: &egui::Context,
+        image: image::DynamicImage,
+        id: &str,
+    ) -> Option<egui::TextureHandle> {
+        let image = self.crop_image_to_square(image);
         let size = [image.width() as usize, image.height() as usize];
         let color_image = egui::ColorImage::from_rgba_unmultiplied(
             size,
             &image.to_rgba8().into_vec(),
         );
+        Some(ctx.load_texture(id, color_image, egui::TextureOptions::default()))
+    }
 
-        Some(ctx.load_texture("play_artwork", color_image, egui::TextureOptions::default()))
+    fn load_blurred_artwork_texture_from_image(
+        &self,
+        ctx: &egui::Context,
+        image: image::DynamicImage,
+        id: &str,
+    ) -> Option<egui::TextureHandle> {
+        let image = self.crop_image_to_square(image);
+        let blurred = image::imageops::blur(&image, 10.0);
+        self.load_artwork_texture_from_image(
+            ctx,
+            image::DynamicImage::ImageRgba8(blurred),
+            id,
+        )
     }
 
     fn extract_embedded_artwork(&self, path: &Path) -> Option<image::DynamicImage> {
@@ -2315,6 +2376,9 @@ impl GuiApp {
             log_level: cfg.log_level,
             language: cfg.language,
             last_scan_status: state.last_scan_status,
+            play_artwork_blur_handle: None,
+            play_artwork_blur_source: None,
+            lrc_overlay_enabled: state.lrc_overlay_enabled,
             album_meta_cache: MetaCache::open_default().ok(),
             album_artwork_path_cache: HashMap::new(),
             album_artwork_texture_cache: HashMap::new(),

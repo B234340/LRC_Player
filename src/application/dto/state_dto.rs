@@ -56,6 +56,8 @@ pub struct StateDto {
     pub queue_playback_mode: PlaybackMode,
     #[serde(default)]
     pub artist_view_mode: crate::presentation::egui_app::ArtistViewMode,
+    #[serde(default)]
+    pub lrc_overlay_enabled: bool,
 
     #[serde(default)]
     pub favorite_directories: Vec<String>,

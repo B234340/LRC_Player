@@ -34,6 +34,7 @@ fn update_scan_status(
             selected_queue_index: None,
             queue_playback_mode: lrc_player::domain::model::PlaybackMode::Sequential,
             artist_view_mode: lrc_player::presentation::egui_app::ArtistViewMode::Artist,
+            lrc_overlay_enabled: false,
             favorite_directories: Vec::new(),
         });
     state.last_scan_status = Some(status.to_string());
