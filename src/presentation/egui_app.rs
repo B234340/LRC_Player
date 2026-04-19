@@ -108,6 +108,9 @@ pub struct GuiApp {
     playback_start_instant: Option<Instant>,
     playback_start_ms: u64,
     pending_play_request: bool,
+    active_output_device_name: Option<String>,
+    last_seen_default_output_device_name: Option<String>,
+    last_default_device_poll_at: Option<Instant>,
     playback_state_before_seek: Option<PlaybackState>,
     pending_seek_ms: Option<u64>,
     seek_last_change_at: Option<Instant>,
@@ -1036,6 +1039,47 @@ impl GuiApp {
         self.pending_play_request = false;
     }
 
+    fn monitor_default_output_device_hotplug(&mut self) {
+        if self.selected.is_some() {
+            return;
+        }
+        if self.pending_play_request {
+            return;
+        }
+        if !matches!(
+            self.playback_state,
+            PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking
+        ) {
+            return;
+        }
+
+        let now = Instant::now();
+        if let Some(last) = self.last_default_device_poll_at {
+            if now.duration_since(last) < Duration::from_millis(500) {
+                return;
+            }
+        }
+        self.last_default_device_poll_at = Some(now);
+
+        let current_default = audio::cpal_output::default_device_name();
+        if self.last_seen_default_output_device_name.is_none() {
+            self.last_seen_default_output_device_name = current_default;
+            return;
+        }
+
+        if self.last_seen_default_output_device_name != current_default {
+            self.last_seen_default_output_device_name = current_default.clone();
+
+            // If playback is bound to the old default device, restart so CPAL reopens
+            // on the new system default endpoint.
+            if self.active_output_device_name != current_default {
+                self.playback_state = PlaybackState::Buffering;
+                self.play_status = Some("Default output device changed, reconnecting...".to_string());
+                self.request_play();
+            }
+        }
+    }
+
     pub(crate) fn set_seek_interacting(&mut self, interacting: bool) {
         self.seek_interacting = interacting;
     }
@@ -1738,6 +1782,13 @@ impl GuiApp {
                 }
             };
 
+            let selected_device_name = output.selected_device_name();
+            if let Some(device_name) = selected_device_name {
+                let _ = status_tx.send(format!("Playback device: {}", device_name));
+            } else {
+                let _ = status_tx.send("Playback device: <default>".to_string());
+            }
+
             let producer_tx = match output.producer_sender() {
                 Some(tx) => tx,
                 None => {
@@ -1825,6 +1876,12 @@ impl GuiApp {
             while let Ok(status) = rx.try_recv() {
                 if status.starts_with("Playback running") {
                     self.playback_state = PlaybackState::Playing;
+                } else if let Some(device_name) = status.strip_prefix("Playback device: ") {
+                    if device_name == "<default>" {
+                        self.active_output_device_name = audio::cpal_output::default_device_name();
+                    } else {
+                        self.active_output_device_name = Some(device_name.to_string());
+                    }
                 } else if status == "Playback finished" {
                     self.playback_state = PlaybackState::Stopped;
                     self.playback_start_instant = None;
@@ -1848,6 +1905,7 @@ impl GuiApp {
                 self.detach_playback_thread();
                 self.playback_cancel_sender = None;
                 self.playback_status_receiver = None;
+                self.active_output_device_name = None;
                 if self.pending_play_request {
                     self.pending_play_request = false;
                     self.request_play();
@@ -2120,6 +2178,9 @@ impl GuiApp {
             playback_start_instant: None,
             playback_start_ms: state.last_play_position_ms.unwrap_or(0),
             pending_play_request: false,
+            active_output_device_name: None,
+            last_seen_default_output_device_name: audio::cpal_output::default_device_name(),
+            last_default_device_poll_at: None,
             playback_state_before_seek: None,
             pending_seek_ms: None,
             seek_last_change_at: None,
@@ -2181,6 +2242,7 @@ impl App for GuiApp {
             self.refresh_scan_status();
         }
         self.poll_playback_status();
+        self.monitor_default_output_device_hotplug();
 
         // eframe is mostly event-driven; request periodic repaint while playback is active
         // so seek bar/time visualization does not stall for long intervals.
@@ -2229,59 +2291,79 @@ impl App for GuiApp {
             });
 
             let filter = self.device_filter.to_lowercase();
-            let filtered: Vec<(usize, &String)> = if filter.is_empty() {
-                self.device_names.iter().enumerate().collect()
-            } else {
-                self.device_names
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, n)| n.to_lowercase().contains(&filter))
-                    .collect()
-            };
+            let default_label = translate("default_output_device_label", self.language);
+            let mut filtered: Vec<(Option<usize>, &str)> = Vec::new();
+
+            if filter.is_empty() || default_label.to_lowercase().contains(&filter) {
+                filtered.push((None, default_label));
+            }
+            for (idx, name) in self.device_names.iter().enumerate() {
+                if filter.is_empty() || name.to_lowercase().contains(&filter) {
+                    filtered.push((Some(idx), name.as_str()));
+                }
+            }
 
             if filtered.is_empty() {
                 ui.label(translate("no_matching_devices", self.language));
             } else {
-                let default_sel = self.selected.unwrap_or(0);
                 let mut sel_in_filtered = 0usize;
                 for (i, (orig_idx, _)) in filtered.iter().enumerate() {
-                    if *orig_idx == default_sel {
+                    if *orig_idx == self.selected {
                         sel_in_filtered = i;
                         break;
                     }
                 }
 
                 egui::ComboBox::from_id_source("device_combo")
-                    .selected_text(filtered.get(sel_in_filtered).map(|(_, s)| s.as_str()).unwrap_or(""))
+                    .selected_text(filtered.get(sel_in_filtered).map(|(_, s)| *s).unwrap_or(default_label))
                     .show_ui(ui, |ui| {
                         for (i, (_orig_idx, name)) in filtered.iter().enumerate() {
-                            ui.selectable_value(&mut sel_in_filtered, i, name.as_str());
+                            ui.selectable_value(&mut sel_in_filtered, i, *name);
                         }
                     });
 
                 if let Some((orig_idx, _)) = filtered.get(sel_in_filtered) {
-                    let new_selected = Some(*orig_idx);
+                    let new_selected = *orig_idx;
                     if self.selected != new_selected {
                         self.selected = new_selected;
-                        if let Some(name) = self.device_names.get(*orig_idx) {
-                            let cfg = Config::load();
-                            self.taps = cfg.taps_for_device(Some(name));
+                        if let Some(idx) = new_selected {
+                            if let Some(name) = self.device_names.get(idx) {
+                                let cfg = Config::load();
+                                self.taps = cfg.taps_for_device(Some(name));
+                            }
+                        }
+
+                        // Apply device switch immediately for active playback so users
+                        // don't need to manually pause/play or press Save first.
+                        if !self.play_path.trim().is_empty()
+                            && matches!(
+                                self.playback_state,
+                                PlaybackState::Playing
+                                    | PlaybackState::Buffering
+                                    | PlaybackState::Seeking
+                            )
+                        {
+                            self.playback_state = PlaybackState::Buffering;
+                            self.play_status = Some("Switching output device...".to_string());
+                            self.request_play();
                         }
                     }
                 }
             }
 
             if ui.button(translate("save_device", self.language)).clicked() {
+                let mut cfg = Config::load();
                 if let Some(idx) = self.selected {
                     let name = self.device_names[idx].clone();
-                    let mut cfg = Config::load();
                     cfg.preferred_output_device = Some(name.clone());
                     if let Some(settings) = cfg.device_settings.get(&name) {
                         self.taps = settings.resampler_taps;
                     }
-                    let _ = cfg.save();
-                    self.update_app_vm();
+                } else {
+                    cfg.preferred_output_device = None;
                 }
+                let _ = cfg.save();
+                self.update_app_vm();
             }
 
             ui.add_space(8.0);

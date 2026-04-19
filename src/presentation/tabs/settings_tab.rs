@@ -11,7 +11,11 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.label(format!(
         "{} {}",
         translate("output_device", app.language),
-        app.app_vm.settings.preferred_output_device.as_deref().unwrap_or("<none>")
+        app.app_vm
+            .settings
+            .preferred_output_device
+            .as_deref()
+            .unwrap_or("<default>")
     ));
     ui.label(format!("{} {}", translate("resampler_taps", app.language), app.taps));
 

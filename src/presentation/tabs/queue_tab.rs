@@ -7,27 +7,34 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// 再生キュー画面のUIを描画する関数
 pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
+    // --- キーボード修飾キーの状態を取得 ---
     let (ctrl_pressed, shift_pressed, esc_pressed) = ui.ctx().input(|input| {
         (
-            input.modifiers.ctrl,
-            input.modifiers.shift,
-            input.key_pressed(egui::Key::Escape),
+            input.modifiers.ctrl,   // Ctrlキー押下状態
+            input.modifiers.shift,  // Shiftキー押下状態
+            input.key_pressed(egui::Key::Escape),  // Escapeキー押下検出
         )
     });
+    
+    // Escapeキーで選択解除とドラッグ操作をキャンセル
     if esc_pressed {
         app.clear_queue_selection();
         app.cancel_queue_drag();
     }
 
+    // マウスのプライマリボタンが離されたら、ハンドル長押し状態をクリア
     if !ui.ctx().input(|input| input.pointer.primary_down()) {
         app.clear_queue_handle_hold();
     }
 
+    // --- ヘッダー表示 ---
     ui.heading("Queue");
     ui.label(format!("{} tracks in queue", app.app_vm.queue.tracks.len()));
     ui.separator();
 
+    // --- キューへの楽曲追加入力欄 ---
     ui.horizontal(|ui| {
         ui.text_edit_singleline(&mut app.queue_item_input);
         if ui.button("Add to queue").clicked() {
@@ -35,6 +42,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         }
     });
 
+    // --- 再生モード選択 ---
     let mut mode_changed = false;
     ui.horizontal(|ui| {
         ui.label("Playback mode:");
@@ -51,15 +59,20 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             .selectable_value(&mut app.playback_mode, PlaybackMode::Shuffle, "Shuffle")
             .changed();
     });
+    
+    // モード変更時は状態を保存
     if mode_changed {
         app.save_state();
     }
 
     ui.add_space(8.0);
 
+    // --- アートワーク検出関数（内部関数）---
+    /// トラックに対応するアートワーク画像を検出する
     fn discover_artwork_for_track(path: &Path) -> Option<PathBuf> {
         let parent = path.parent()?;
         let stem = path.file_stem()?.to_string_lossy();
+        // 検索候補のファイル名リスト
         let candidates = [
             format!("{}.jpg", stem),
             format!("{}.jpeg", stem),
@@ -81,6 +94,8 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         None
     }
 
+    // --- アートワーク読み込み関数（内部関数）---
+    /// アートワーク画像を読み込み、eguiのテクスチャとして返す
     fn load_artwork_texture(ctx: &egui::Context, artwork_path: &Path, id: &str) -> Option<egui::TextureHandle> {
         if let Ok(reader) = ImageReader::open(artwork_path) {
             if let Ok(reader) = reader.with_guessed_format() {
@@ -97,6 +112,8 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         None
     }
 
+    // --- キャッシュ付きアートワーク取得関数（内部関数）---
+    /// キャッシュされたアートワークテクスチャを取得する
     fn get_cached_artwork_texture(
         ctx: &egui::Context,
         artwork_path: &Path,
@@ -105,6 +122,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         let cache_id = egui::Id::new("queue_artwork_texture_cache");
         let cache_key = artwork_path.to_string_lossy().to_string();
 
+        // キャッシュ確認
         let existing = ctx.data(|data| {
             data.get_temp::<HashMap<String, egui::TextureHandle>>(cache_id)
                 .and_then(|cache| cache.get(&cache_key).cloned())
@@ -113,6 +131,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             return existing;
         }
 
+        // 新規読み込みとキャッシュ保存
         let texture = load_artwork_texture(ctx, artwork_path, id)?;
         ctx.data_mut(|data| {
             let cache = data.get_temp_mut_or_default::<HashMap<String, egui::TextureHandle>>(cache_id);
@@ -121,6 +140,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         Some(texture)
     }
 
+    // --- ドラッグ移動中のガイダンス表示 ---
     if let Some(source) = app.queue_drag_source_index {
         ui.label(format!(
             "Moving track {}. Click a destination row/handle to place, or click the same row/handle to cancel.",
@@ -128,35 +148,43 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         ));
     }
 
+    // キューが空の場合
     let tracks = app.app_vm.queue.tracks.clone();
     if tracks.is_empty() {
         ui.label("Queue is empty.");
         return;
     }
 
-    let mut pending_move_up: Option<usize> = None;
-    let mut pending_move_down: Option<usize> = None;
-    let mut pending_remove_indices: Option<Vec<usize>> = None;
-    let mut pending_play: Option<usize> = None;
-    let mut pending_next_path: Option<String> = None;
-    let mut pending_enqueue_path: Option<String> = None;
-    let mut pending_add_to_playlist: Option<(usize, Vec<String>)> = None;
-    let mut pending_show_details_path: Option<String> = None;
+    // --- 遅延実行するアクションを保持する変数群 ---
+    let mut pending_move_up: Option<usize> = None;           // 上に移動
+    let mut pending_move_down: Option<usize> = None;         // 下に移動
+    let mut pending_remove_indices: Option<Vec<usize>> = None; // 削除（複数選択対応）
+    let mut pending_play: Option<usize> = None;              // 再生
+    let mut pending_next_path: Option<String> = None;        // 次に再生
+    let mut pending_enqueue_path: Option<String> = None;     // キュー末尾に追加
+    let mut pending_add_to_playlist: Option<(usize, Vec<String>)> = None; // プレイリストに追加
+    let mut pending_show_details_path: Option<String> = None; // 詳細表示
+    
+    // プレイリスト一覧（追加先用）
     let playlist_targets: Vec<(usize, String)> = app
         .playlists
         .iter()
         .enumerate()
         .map(|(idx, p)| (idx, p.name.clone()))
         .collect();
+    
     let meta_cache = MetaCache::open_default().ok();
 
+    // --- スクロール可能なキュー一覧 ---
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (index, track) in tracks.iter().enumerate() {
-                let is_selected = app.is_queue_item_selected(index);
-                let is_playing = app.current_queue_index == Some(index);
+                let is_selected = app.is_queue_item_selected(index);  // 選択状態
+                let is_playing = app.current_queue_index == Some(index);  // 再生中かどうか
                 let path = std::path::Path::new(track);
+                
+                // 表示用タイトル（メタデータがない場合のフォールバック）
                 let fallback_title = path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -166,6 +194,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     .and_then(|parent| parent.to_str())
                     .unwrap_or("");
 
+                // メタデータキャッシュから情報を取得
                 let metadata = meta_cache
                     .as_ref()
                     .and_then(|cache| cache.track_metadata_by_location(track).ok().flatten());
@@ -185,28 +214,34 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     .filter(|text| !text.trim().is_empty())
                     .unwrap_or("Unknown album");
 
+                // 状態に応じてフレームスタイルを変更
                 let mut frame = egui::Frame::group(ui.style());
                 if is_playing {
+                    // 再生中：選択色で塗りつぶし、太枠
                     frame = frame
                         .fill(ui.visuals().selection.bg_fill)
                         .stroke(egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
                 } else if is_selected {
+                    // 選択中：細枠
                     frame = frame.stroke(egui::Stroke::new(1.0, ui.visuals().widgets.active.bg_stroke.color));
                 }
                 if app.queue_drag_source_index == Some(index) {
+                    // ドラッグ元：警告色の太枠
                     frame = frame.stroke(egui::Stroke::new(2.0, ui.visuals().warn_fg_color));
                 }
 
                 frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        // --- ドラッグハンドル（☰ / ⇅）---
                         let art_size = egui::vec2(44.0, 44.0);
                         let handle_label = if app.queue_drag_source_index == Some(index) {
-                            "⇅"
+                            "⇅"  // 移動中アイコン
                         } else {
-                            "☰"
+                            "☰"  // 通常ハンドルアイコン
                         };
                         let handle_size = 18.0_f32;
                         let handle_pad_y = ((art_size.y - handle_size) * 0.5).max(0.0);
+                        
                         let handle_response = ui
                             .allocate_ui_with_layout(
                                 egui::vec2(20.0, art_size.y),
@@ -219,22 +254,27 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                             .inner
                             .on_hover_text("Handle: click to select. Hold 350ms to start moving one track.");
 
+                        // ドラッグ操作の処理
                         if let Some(source) = app.queue_drag_source_index {
+                            // ドラッグ中：クリックで移動先を決定
                             if handle_response.clicked() {
                                 if source == index {
-                                    app.cancel_queue_drag();
+                                    app.cancel_queue_drag();  // 同じ位置ならキャンセル
                                 } else {
-                                    app.move_queue_item_to(source, index);
+                                    app.move_queue_item_to(source, index);  // 移動実行
                                     app.cancel_queue_drag();
                                 }
                             }
                         } else {
+                            // 通常時：長押し検出と選択処理
                             if handle_response.is_pointer_button_down_on() {
+                                // 長押し開始を記録
                                 if app.queue_handle_hold_index != Some(index) {
                                     app.queue_handle_hold_index = Some(index);
                                     app.queue_handle_hold_started_at = Some(Instant::now());
                                 }
 
+                                // 350ms以上押し続けたらドラッグモード開始
                                 if let Some(started_at) = app.queue_handle_hold_started_at {
                                     let elapsed = started_at.elapsed();
                                     let hold_delay = Duration::from_millis(350);
@@ -243,28 +283,32 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                         app.select_queue_item_single(index);
                                         app.clear_queue_handle_hold();
                                     } else {
+                                        // 再描画を予約
                                         ui.ctx().request_repaint_after(hold_delay - elapsed);
                                     }
                                 }
                             }
 
+                            // クリック時の選択処理（修飾キーに応じて動作変更）
                             if handle_response.clicked() {
                                 if shift_pressed {
-                                    app.select_queue_item_range_to(index);
+                                    app.select_queue_item_range_to(index);  // Shift: 範囲選択
                                 } else if ctrl_pressed {
-                                    app.toggle_queue_item_selection(index);
+                                    app.toggle_queue_item_selection(index);  // Ctrl: 選択切り替え
                                 } else {
-                                    app.select_queue_item_single(index);
+                                    app.select_queue_item_single(index);  // 通常: 単一選択
                                 }
                             }
                         }
 
+                        // --- アートワーク表示 ---
                         if let Some(art_path) = discover_artwork_for_track(Path::new(track)) {
                             if let Some(texture) =
                                 get_cached_artwork_texture(ui.ctx(), &art_path, &format!("queue_art_{}", index))
                             {
                                 ui.image(&texture, art_size);
                             } else {
+                                // 読み込み失敗時のプレースホルダー
                                 let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
                                 let art_bg = if is_playing {
                                     ui.visuals().selection.bg_fill
@@ -281,6 +325,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                 );
                             }
                         } else {
+                            // アートワークなしのプレースホルダー
                             let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
                             let art_bg = if is_playing {
                                 ui.visuals().selection.bg_fill
@@ -297,8 +342,10 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                             );
                         }
 
+                        // --- トラック情報表示 ---
                         ui.vertical(|ui| {
                             let response = ui.horizontal(|ui| {
+                                // トラックタイトル（再生中の場合は [Playing] を付加）
                                 let title_text = if is_playing {
                                     format!("{}: {} [Playing]", index + 1, title)
                                 } else {
@@ -308,6 +355,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     "Left click: play now (queue order unchanged). Right click: common actions.",
                                 );
 
+                                // 複数選択時の対象トラックリストを作成
                                 let selected_track_paths: Vec<String> = if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
                                     app.selected_queue_indices
                                         .iter()
@@ -317,8 +365,10 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     vec![track.clone()]
                                 };
 
+                                // クリック時の処理
                                 if response.clicked() {
                                     if let Some(source) = app.queue_drag_source_index {
+                                        // ドラッグ中：移動先として処理
                                         if source == index {
                                             app.cancel_queue_drag();
                                         } else {
@@ -326,10 +376,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                             app.cancel_queue_drag();
                                         }
                                     } else {
+                                        // 通常時：選択して再生
                                         app.select_queue_item_single(index);
                                         app.play_selected_queue_item();
                                     }
                                 }
+                                
+                                // 右クリックコンテキストメニュー
                                 let response = response.context_menu(|ui| {
                                     if ui.button("Play now").clicked() {
                                         pending_play = Some(index);
@@ -370,15 +423,18 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                             })
                             .inner;
 
+                            // アーティスト名とアルバム名を表示
                             ui.label(format!("Artist: {}", artist));
                             ui.label(format!("Album: {}", album));
 
+                            // 再生中トラックへの自動スクロール
                             if is_playing && app.queue_scroll_to_playing {
                                 response.scroll_to_me(Some(egui::Align::Center));
                                 app.queue_scroll_to_playing = false;
                             }
                         });
 
+                        // --- 右寄せ操作ボタン ---
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Play").clicked() {
                                 pending_play = Some(index);
@@ -404,6 +460,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             }
         });
 
+    // --- 保留中のアクションを実行 ---
     if let Some(index) = pending_move_up {
         app.move_queue_item_up(index);
     }
@@ -412,8 +469,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     }
     if let Some(indices) = pending_remove_indices {
         let mut indices = indices;
+        // 降順ソートして後ろから削除（インデックスずれ防止）
         indices.sort_unstable_by(|a, b| b.cmp(a));
-        indices.dedup();
+        indices.dedup();  // 重複除去
         for index in indices {
             app.remove_queue_item(index);
         }
@@ -438,6 +496,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         app.open_track_details(&path);
     }
 
+    // --- 一括操作ボタン ---
     ui.separator();
     ui.horizontal(|ui| {
         if ui.button("Play selected").clicked() {

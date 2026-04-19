@@ -35,6 +35,7 @@ pub fn translate(key: &str, lang: Language) -> &'static str {
             "log_level_trace" => "Trace",
             "save_log_level" => "Save log level",
             "keyboard_shortcuts" => "Keyboard shortcuts:",
+            "default_output_device_label" => "Default (system)",
             _ => "",
         },
         Language::Ja => match key {
@@ -70,6 +71,7 @@ pub fn translate(key: &str, lang: Language) -> &'static str {
             "log_level_trace" => "トレース",
             "save_log_level" => "ログレベルを保存",
             "keyboard_shortcuts" => "キーボードショートカット:",
+            "default_output_device_label" => "既定 (システム)",
             _ => "",
         },
         Language::Zh => match key {
@@ -105,6 +107,7 @@ pub fn translate(key: &str, lang: Language) -> &'static str {
             "log_level_trace" => "跟踪",
             "save_log_level" => "保存日志级别",
             "keyboard_shortcuts" => "键盘快捷键:",
+            "default_output_device_label" => "默认（系统）",
             _ => "",
         },
     }
