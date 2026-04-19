@@ -1,6 +1,8 @@
+use crate::presentation::components::track_list::{
+    render_standard_track_list, TrackActivation,
+};
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
-use std::collections::HashMap;
 
 /// アルバムタイトルを指定された文字数制限と行数で折り返す関数
 /// 
@@ -118,10 +120,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let mut pending_enqueue_path: Option<String> = None;  // キューに追加するトラックパス
     let mut pending_add_to_playlist: Option<(usize, String)> = None;  // プレイリストに追加するトラック
     let mut pending_show_details_path: Option<String> = None;  // 詳細表示するトラックパス
-    
-    // メタデータキャッシュを開く
-    let meta_cache = crate::infrastructure::persistence::MetaCache::open_default().ok();
-    let mut track_metadata_cache: HashMap<String, (String, String)> = HashMap::new();
     
     // プレイリストの一覧を作成（インデックスと名前のペア）
     let playlist_targets: Vec<(usize, String)> = app
@@ -404,116 +402,31 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                 ui.label("Double left click: create queue from this list and play. Right click: common actions.");
                                 ui.add_space(6.0);
                                 
-                                // トラック一覧のスクロール領域
-                                egui::ScrollArea::vertical()
-                                    .id_source("album_detail_tracks_scroll")
-                                    .auto_shrink([false, false])
-                                    .max_height((panel_height - 84.0).max(120.0))
-                                    .show(ui, |ui| {
-                                        for (i, track) in selected_album_tracks.iter().enumerate() {
-                                            ui.horizontal(|ui| {
-                                                // トラックの表示タイトルを取得（ファイル名から抽出）
-                                                let fallback_title = std::path::Path::new(&track.title)
-                                                    .file_name()
-                                                    .and_then(|name| name.to_str())
-                                                    .unwrap_or(track.title.as_str())
-                                                    .to_string();
-                                                
-                                                // メタデータキャッシュからトラック情報を取得
-                                                let display_meta = track_metadata_cache
-                                                    .entry(track.title.clone())
-                                                    .or_insert_with(|| {
-                                                        meta_cache
-                                                            .as_ref()
-                                                            .and_then(|cache| {
-                                                                cache
-                                                                    .track_metadata_by_location(&track.title)
-                                                                    .ok()
-                                                                    .flatten()
-                                                            })
-                                                            .map(|(title, artist, _)| {
-                                                                let title = if title.trim().is_empty() {
-                                                                    fallback_title.clone()
-                                                                } else {
-                                                                    title
-                                                                };
-                                                                let artist = if artist.trim().is_empty() {
-                                                                    "Unknown artist".to_string()
-                                                                } else {
-                                                                    artist
-                                                                };
-                                                                (title, artist)
-                                                            })
-                                                            .unwrap_or((fallback_title.clone(), "Unknown artist".to_string()))
-                                                    })
-                                                    .clone();
-                                                let (display_title, display_artist) = display_meta;
+                                let tracks: Vec<String> = selected_album_tracks
+                                    .iter()
+                                    .map(|track| track.title.clone())
+                                    .collect();
+                                let track_list_outcome = render_standard_track_list(
+                                    ui,
+                                    app,
+                                    "album_detail_tracks_scroll",
+                                    &tracks,
+                                    &playlist_targets,
+                                    TrackActivation::DoubleClick,
+                                    22.0,
+                                    Some((panel_height - 84.0).max(120.0)),
+                                    |i, display| {
+                                        format!("{:>2}. {} - {}", i + 1, display.title, display.artist)
+                                    },
+                                );
 
-                                                // トラック情報のラベル
-                                                let label = format!("{:>2}. {} - {}", i + 1, display_title, display_artist);
-                                                
-                                                // お気に入りスターの表示
-                                                let is_favorite = app.is_track_favorite(&track.title);
-                                                let star_label = if is_favorite { "★" } else { "☆" };
-                                                let toggle_response = ui
-                                                    .allocate_ui_with_layout(
-                                                        egui::vec2(24.0, 22.0),
-                                                        egui::Layout::top_down(egui::Align::Center),
-                                                        |ui| {
-                                                            ui.add_sized([22.0, 22.0], egui::Button::new(star_label))
-                                                        },
-                                                    )
-                                                    .inner
-                                                    .on_hover_text("Toggle favorite");
-                                                
-                                                if toggle_response.clicked() {
-                                                    app.toggle_favorite_track(&track.title);
-                                                }
-                                                
-                                                ui.add_space(4.0);
-                                                let response = ui.selectable_label(false, label);
-                                                
-                                                // ダブルクリックで再生開始
-                                                if response.double_clicked() {
-                                                    pending_play_index = Some(i);
-                                                    pending_play_list = selected_album_tracks
-                                                        .iter()
-                                                        .map(|row| row.title.clone())
-                                                        .collect();
-                                                }
-                                                
-                                                // 右クリックコンテキストメニュー
-                                                response.context_menu(|ui| {
-                                                    if ui.button("Play now").clicked() {
-                                                        pending_play_now_path = Some(track.title.clone());
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui.button("Play next").clicked() {
-                                                        pending_next_path = Some(track.title.clone());
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui.button("Add to queue").clicked() {
-                                                        pending_enqueue_path = Some(track.title.clone());
-                                                        ui.close_menu();
-                                                    }
-                                                    ui.separator();
-                                                    ui.label("Add to playlist");
-                                                    for (target_index, target_name) in &playlist_targets {
-                                                        if ui.button(target_name).clicked() {
-                                                            pending_add_to_playlist =
-                                                                Some((*target_index, track.title.clone()));
-                                                            ui.close_menu();
-                                                        }
-                                                    }
-                                                    ui.separator();
-                                                    if ui.button("Show details").clicked() {
-                                                        pending_show_details_path = Some(track.title.clone());
-                                                        ui.close_menu();
-                                                    }
-                                                });
-                                            });
-                                        }
-                                    });
+                                pending_play_index = track_list_outcome.play_index;
+                                pending_play_list = track_list_outcome.play_list;
+                                pending_play_now_path = track_list_outcome.play_now_path;
+                                pending_next_path = track_list_outcome.next_path;
+                                pending_enqueue_path = track_list_outcome.enqueue_path;
+                                pending_add_to_playlist = track_list_outcome.add_to_playlist;
+                                pending_show_details_path = track_list_outcome.show_details_path;
                                 }
                             });
                         }

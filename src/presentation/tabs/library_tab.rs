@@ -38,14 +38,27 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     // --- お気に入りディレクトリ一覧 ---
     ui.separator();
     ui.heading("Favorites");
-    if library.favorite_directories.is_empty() {
+    ui.horizontal(|ui| {
+        ui.text_edit_singleline(&mut app.favorite_directory_input);
+        if ui.button("Add favorite").clicked() {
+            app.add_favorite_directory();
+        }
+    });
+    if app.favorite_directories.is_empty() {
         ui.label("No favorite directories configured.");
     } else {
-        ui.group(|ui| {
-            for favorite in library.favorite_directories.iter() {
-                ui.label(format!("• {}", favorite));  // 箇条書きで表示
-            }
-        });
+        let mut remove_index = None;
+        for (index, favorite) in app.favorite_directories.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("• {}", favorite));
+                if ui.button("Remove").clicked() {
+                    remove_index = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove_index {
+            app.remove_favorite_directory(index);
+        }
     }
 
     // --- 最近使用したディレクトリ一覧 ---
@@ -186,6 +199,23 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 ui.label(path);
             }
         });
+    }
+
+    if let Some(details) = app.track_details_dialog.clone() {
+        let mut open = true;
+        egui::Window::new("Track details")
+            .open(&mut open)
+            .resizable(true)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!("Title: {}", details.title));
+                ui.label(format!("Artist: {}", details.artist));
+                ui.label(format!("Album: {}", details.album));
+                ui.separator();
+                ui.label(format!("File path: {}", details.path));
+            });
+        if !open {
+            app.track_details_dialog = None;
+        }
     }
 
     // 保留中のアクションを実行

@@ -87,6 +87,87 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
     ui.separator();
     
+    ui.heading("Scan Controls");
+    ui.label("Configure scan targets and exclude paths, then press Request scan.");
+
+    ui.group(|ui| {
+        ui.label("Audio scan target path:");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut app.scan_target_input);
+            if ui.button("Add target").clicked() {
+                app.add_scan_target();
+            }
+        });
+
+        if !app.scan_targets.is_empty() {
+            let targets = app.scan_targets.clone();
+            for (index, target) in targets.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("• {}", target));
+                    if ui.button("Remove").clicked() {
+                        app.remove_scan_target(index);
+                    }
+                });
+            }
+        }
+    });
+
+    ui.group(|ui| {
+        ui.label("LRC scan target path:");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut app.scan_lrc_target_input);
+            if ui.button("Add LRC target").clicked() {
+                app.add_scan_lrc_target();
+            }
+        });
+
+        if !app.scan_lrc_targets.is_empty() {
+            let targets = app.scan_lrc_targets.clone();
+            for (index, target) in targets.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("• {}", target));
+                    if ui.button("Remove").clicked() {
+                        app.remove_scan_lrc_target(index);
+                    }
+                });
+            }
+        }
+    });
+
+    ui.group(|ui| {
+        ui.label("Exclude path:");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut app.scan_exclude_input);
+            if ui.button("Add exclude").clicked() {
+                app.add_scan_exclude();
+            }
+        });
+
+        if !app.scan_excludes.is_empty() {
+            let excludes = app.scan_excludes.clone();
+            for (index, exclude) in excludes.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("• {}", exclude));
+                    if ui.button("Remove").clicked() {
+                        app.remove_scan_exclude(index);
+                    }
+                });
+            }
+        }
+    });
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button("Start scan").clicked() {
+            app.request_scan();
+        }
+        if ui.button("Cancel scan").clicked() {
+            app.request_cancel();
+        }
+    });
+    
+    ui.separator();
+    
     // --- ライブラリクリアボタン ---
     // スキャンしたライブラリデータをすべて削除する
     ui.horizontal(|ui| {

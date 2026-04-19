@@ -130,18 +130,18 @@ pub struct GuiApp {
     pub(crate) play_artwork_source: Option<PathBuf>,
     pub(crate) lyrics_offset_ms: i64,
     pub(crate) play_status: Option<String>,
-    scan_target_input: String,
-    scan_lrc_target_input: String,
-    scan_exclude_input: String,
-    scan_targets: Vec<String>,
-    scan_lrc_targets: Vec<String>,
+    pub(crate) scan_target_input: String,
+    pub(crate) scan_lrc_target_input: String,
+    pub(crate) scan_exclude_input: String,
+    pub(crate) scan_targets: Vec<String>,
+    pub(crate) scan_lrc_targets: Vec<String>,
     pub(crate) scan_excludes: Vec<String>,
-    selected_album: Option<String>,
-    selected_artist: Option<String>,
-    selected_directory: Option<String>,
-    favorite_directories: Vec<String>,
-    favorite_directory_input: String,
-    library_expanded_directories: std::collections::HashSet<String>,
+    pub(crate) selected_album: Option<String>,
+    pub(crate) selected_artist: Option<String>,
+    pub(crate) selected_directory: Option<String>,
+    pub(crate) favorite_directories: Vec<String>,
+    pub(crate) favorite_directory_input: String,
+    pub(crate) library_expanded_directories: std::collections::HashSet<String>,
     pub(crate) playlists: Vec<PlaylistDto>,
     pub(crate) new_playlist_name: String,
     pub(crate) selected_playlist: Option<usize>,
@@ -165,15 +165,15 @@ pub struct GuiApp {
     album_artwork_pending: VecDeque<String>,
     album_artwork_queued: HashSet<String>,
     album_artwork_album_titles: Vec<String>,
-    track_details_dialog: Option<TrackDetailsDialog>,
+    pub(crate) track_details_dialog: Option<TrackDetailsDialog>,
 }
 
 #[derive(Debug, Clone)]
-struct TrackDetailsDialog {
-    path: String,
-    title: String,
-    artist: String,
-    album: String,
+pub(crate) struct TrackDetailsDialog {
+    pub(crate) path: String,
+    pub(crate) title: String,
+    pub(crate) artist: String,
+    pub(crate) album: String,
 }
 
 impl GuiApp {
@@ -986,7 +986,7 @@ impl GuiApp {
         self.library_expanded_directories.contains(path)
     }
 
-    fn add_favorite_directory(&mut self) {
+    pub(crate) fn add_favorite_directory(&mut self) {
         let dir = self.favorite_directory_input.trim().to_string();
         if dir.is_empty() || self.favorite_directories.contains(&dir) {
             return;
@@ -998,7 +998,7 @@ impl GuiApp {
         self.update_app_vm();
     }
 
-    fn remove_favorite_directory(&mut self, index: usize) {
+    pub(crate) fn remove_favorite_directory(&mut self, index: usize) {
         if index < self.favorite_directories.len() {
             self.favorite_directories.remove(index);
             self.save_state();
@@ -1691,7 +1691,7 @@ impl GuiApp {
         self.save_state();
     }
 
-    fn request_scan(&mut self) {
+    pub(crate) fn request_scan(&mut self) {
         let paths = self.scan_targets.clone();
         let lrc_paths = self.scan_lrc_targets.clone();
         if paths.is_empty() && lrc_paths.is_empty() {
@@ -1936,7 +1936,7 @@ impl GuiApp {
         self.flush_pending_seek();
     }
 
-    fn request_cancel(&mut self) {
+    pub(crate) fn request_cancel(&mut self) {
         self.last_scan_status = Some("Requested scan cancel".to_string());
         self.save_state();
         self.update_app_vm();
@@ -1960,7 +1960,7 @@ impl GuiApp {
         });
     }
 
-    fn add_scan_target(&mut self) {
+    pub(crate) fn add_scan_target(&mut self) {
         let target = self.scan_target_input.trim().to_string();
         if !target.is_empty() {
             self.scan_targets.push(target);
@@ -1970,7 +1970,7 @@ impl GuiApp {
         }
     }
 
-    fn remove_scan_target(&mut self, index: usize) {
+    pub(crate) fn remove_scan_target(&mut self, index: usize) {
         if index < self.scan_targets.len() {
             self.scan_targets.remove(index);
             self.save_state();
@@ -1978,7 +1978,7 @@ impl GuiApp {
         }
     }
 
-    fn add_scan_lrc_target(&mut self) {
+    pub(crate) fn add_scan_lrc_target(&mut self) {
         let target = self.scan_lrc_target_input.trim().to_string();
         if !target.is_empty() {
             self.scan_lrc_targets.push(target);
@@ -1988,7 +1988,7 @@ impl GuiApp {
         }
     }
 
-    fn remove_scan_lrc_target(&mut self, index: usize) {
+    pub(crate) fn remove_scan_lrc_target(&mut self, index: usize) {
         if index < self.scan_lrc_targets.len() {
             self.scan_lrc_targets.remove(index);
             self.save_state();
@@ -1996,7 +1996,7 @@ impl GuiApp {
         }
     }
 
-    fn add_scan_exclude(&mut self) {
+    pub(crate) fn add_scan_exclude(&mut self) {
         let exclude = self.scan_exclude_input.trim().to_string();
         if !exclude.is_empty() {
             self.scan_excludes.push(exclude);
@@ -2006,7 +2006,7 @@ impl GuiApp {
         }
     }
 
-    fn remove_scan_exclude(&mut self, index: usize) {
+    pub(crate) fn remove_scan_exclude(&mut self, index: usize) {
         if index < self.scan_excludes.len() {
             self.scan_excludes.remove(index);
             self.save_state();
@@ -2408,7 +2408,7 @@ impl App for GuiApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.active_tab {
-                    Tab::Library => tabs::library_tab::ui(ui, self),
+                Tab::Library => tabs::library_tab::ui(ui, self),
                 Tab::Play => tabs::play_tab::ui(ui, self),
                 Tab::Playlist => tabs::playlist_tab::ui(ui, self),
                 Tab::Album => tabs::album_tab::ui(ui, self),
@@ -2416,134 +2416,6 @@ impl App for GuiApp {
                 Tab::Queue => tabs::queue_tab::ui(ui, self),
                 Tab::Scan => tabs::scan_tab::ui(ui, self),
                 Tab::Settings => tabs::settings_tab::ui(ui, self),
-            }
-
-            if self.active_tab == Tab::Scan {
-                ui.separator();
-                ui.heading("Scan Controls");
-                ui.label("Configure scan targets and exclude paths, then press Request scan.");
-
-                ui.group(|ui| {
-                    ui.label("Audio scan target path:");
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.scan_target_input);
-                        if ui.button("Add target").clicked() {
-                            self.add_scan_target();
-                        }
-                    });
-
-                    if !self.scan_targets.is_empty() {
-                        let targets = self.scan_targets.clone();
-                        for (index, target) in targets.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("• {}", target));
-                                if ui.button("Remove").clicked() {
-                                    self.remove_scan_target(index);
-                                }
-                            });
-                        }
-                    }
-                });
-
-                ui.group(|ui| {
-                    ui.label("LRC scan target path:");
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.scan_lrc_target_input);
-                        if ui.button("Add LRC target").clicked() {
-                            self.add_scan_lrc_target();
-                        }
-                    });
-
-                    if !self.scan_lrc_targets.is_empty() {
-                        let targets = self.scan_lrc_targets.clone();
-                        for (index, target) in targets.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("• {}", target));
-                                if ui.button("Remove").clicked() {
-                                    self.remove_scan_lrc_target(index);
-                                }
-                            });
-                        }
-                    }
-                });
-
-                ui.group(|ui| {
-                    ui.label("Exclude path:");
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.scan_exclude_input);
-                        if ui.button("Add exclude").clicked() {
-                            self.add_scan_exclude();
-                        }
-                    });
-
-                    if !self.scan_excludes.is_empty() {
-                        let excludes = self.scan_excludes.clone();
-                        for (index, exclude) in excludes.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("• {}", exclude));
-                                if ui.button("Remove").clicked() {
-                                    self.remove_scan_exclude(index);
-                                }
-                            });
-                        }
-                    }
-                });
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Start scan").clicked() {
-                        self.request_scan();
-                    }
-                    if ui.button("Cancel scan").clicked() {
-                        self.request_cancel();
-                    }
-                });
-            }
-
-
-            if self.active_tab == Tab::Library {
-                ui.separator();
-                ui.heading("Favorite directories");
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.favorite_directory_input);
-                    if ui.button("Add favorite").clicked() {
-                        self.add_favorite_directory();
-                    }
-                });
-
-
-            if let Some(details) = self.track_details_dialog.clone() {
-                let mut open = true;
-                egui::Window::new("Track details")
-                    .open(&mut open)
-                    .resizable(true)
-                    .show(ctx, |ui| {
-                        ui.label(format!("Title: {}", details.title));
-                        ui.label(format!("Artist: {}", details.artist));
-                        ui.label(format!("Album: {}", details.album));
-                        ui.separator();
-                        ui.label(format!("File path: {}", details.path));
-                    });
-                if !open {
-                    self.track_details_dialog = None;
-                }
-            }
-                if self.favorite_directories.is_empty() {
-                    ui.label("No favorite directories configured.");
-                } else {
-                    let mut remove_index = None;
-                    for (index, favorite) in self.favorite_directories.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("• {}", favorite));
-                            if ui.button("Remove").clicked() {
-                                remove_index = Some(index);
-                            }
-                        });
-                    }
-                    if let Some(index) = remove_index {
-                        self.remove_favorite_directory(index);
-                    }
-                }
             }
         });
     }

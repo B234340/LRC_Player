@@ -1,7 +1,8 @@
-use crate::infrastructure::persistence::MetaCache;
+use crate::presentation::components::track_list::{
+    render_standard_track_list, TrackActivation,
+};
 use crate::presentation::egui_app::{ArtistViewMode, GuiApp};
 use eframe::egui;
-use std::collections::HashMap;
 
 /// アーティスト一覧画面のUIを描画する関数
 /// 
@@ -40,10 +41,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         .map(|(idx, p)| (idx, p.name.clone()))
         .collect();
     
-    // メタデータキャッシュを開く
-    let meta_cache = MetaCache::open_default().ok();
-    let mut track_metadata_cache: HashMap<String, (String, String)> = HashMap::new();
-
     // ヘッダー表示
     ui.heading("Artists");
     
@@ -165,134 +162,29 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                             } else {
                                 ui.label("Double left click: create queue from this list and play. Right click: common actions.");
                                 
-                                // スクロール可能なトラックリスト
-                                egui::ScrollArea::vertical()
-                                    .id_source("artist_tracks_scroll")
-                                    .auto_shrink([false, false])
-                                    .max_height(ui.available_height())
-                                    .show_rows(
-                                        ui,
-                                        track_row_height,
-                                        selected_artist_tracks.len(),
-                                        |ui, row_range| {
-                                            // 表示用トラックリストを作成
-                                            let displayed_tracks: Vec<String> = selected_artist_tracks
-                                                .iter()
-                                                .map(|track| track.title.clone())
-                                                .collect();
-                                            
-                                            for row in row_range {
-                                                let track_path = &selected_artist_tracks[row].title;
-                                                
-                                                // ファイル名を抽出
-                                                let file_name = std::path::Path::new(track_path)
-                                                    .file_name()
-                                                    .and_then(|n| n.to_str())
-                                                    .unwrap_or(track_path);
+                                let tracks: Vec<String> = selected_artist_tracks
+                                    .iter()
+                                    .map(|track| track.title.clone())
+                                    .collect();
+                                let track_list_outcome = render_standard_track_list(
+                                    ui,
+                                    app,
+                                    "artist_tracks_scroll",
+                                    &tracks,
+                                    &playlist_targets,
+                                    TrackActivation::DoubleClick,
+                                    track_row_height,
+                                    Some(ui.available_height()),
+                                    |_, display| format!("[{}] {}", display.album, display.title),
+                                );
 
-                                                // メタデータキャッシュからトラック情報（タイトル、アルバム）を取得
-                                                let (title, album) = track_metadata_cache
-                                                    .entry(track_path.clone())
-                                                    .or_insert_with(|| {
-                                                        meta_cache
-                                                            .as_ref()
-                                                            .and_then(|cache| {
-                                                                cache.track_metadata_by_location(track_path)
-                                                                    .ok()
-                                                                    .flatten()
-                                                            })
-                                                            .map(|(t, _a, al)| {
-                                                                // タイトルが空の場合はファイル名を使用
-                                                                let t = if t.trim().is_empty() {
-                                                                    file_name.to_string()
-                                                                } else {
-                                                                    t
-                                                                };
-                                                                // アルバム名が空の場合は "Unknown album" を使用
-                                                                let al = if al.trim().is_empty() {
-                                                                    "Unknown album".to_string()
-                                                                } else {
-                                                                    al
-                                                                };
-                                                                (t, al)
-                                                            })
-                                                            .unwrap_or_else(|| {
-                                                                (file_name.to_string(), "Unknown album".to_string())
-                                                            })
-                                                    })
-                                                    .clone();
-
-                                                // 表示ラベル：「[アルバム名] トラックタイトル」形式
-                                                let label = format!("[{}] {}", album, title);
-                                                
-                                                ui.horizontal(|ui| {
-                                                    // お気に入り切り替えボタン（★/☆）
-                                                    let toggle_response = ui
-                                                        .allocate_ui_with_layout(
-                                                            egui::vec2(28.0, 44.0),
-                                                            egui::Layout::top_down(egui::Align::Center),
-                                                            |ui| {
-                                                                ui.add_sized(
-                                                                    [22.0, 22.0],
-                                                                    egui::Button::new(
-                                                                        if app.is_track_favorite(track_path) { "★" } else { "☆" }
-                                                                    ),
-                                                                )
-                                                            },
-                                                        )
-                                                        .inner
-                                                        .on_hover_text("Toggle favorite");
-                                                    
-                                                    if toggle_response.clicked() {
-                                                        app.toggle_favorite_track(track_path);
-                                                    }
-                                                    
-                                                    ui.add_space(4.0);
-                                                    
-                                                    ui.vertical(|ui| {
-                                                        let response = ui.selectable_label(false, label);
-                                                        
-                                                        // ダブルクリックで再生開始
-                                                        if response.double_clicked() {
-                                                            pending_play_index = Some(row);
-                                                            pending_play_list = displayed_tracks.clone();
-                                                        }
-                                                        
-                                                        // 右クリックコンテキストメニュー
-                                                        response.context_menu(|ui| {
-                                                            if ui.button("Play now").clicked() {
-                                                                pending_play_now_path = Some(track_path.clone());
-                                                                ui.close_menu();
-                                                            }
-                                                            if ui.button("Play next").clicked() {
-                                                                pending_next_path = Some(track_path.clone());
-                                                                ui.close_menu();
-                                                            }
-                                                            if ui.button("Add to queue").clicked() {
-                                                                pending_enqueue_path = Some(track_path.clone());
-                                                                ui.close_menu();
-                                                            }
-                                                            ui.separator();
-                                                            ui.label("Add to playlist");
-                                                            // 各プレイリストへの追加メニュー
-                                                            for (target_index, target_name) in &playlist_targets {
-                                                                if ui.button(target_name).clicked() {
-                                                                    pending_add_to_playlist =
-                                                                        Some((*target_index, track_path.clone()));
-                                                                    ui.close_menu();
-                                                                }
-                                                            }
-                                                            ui.separator();
-                                                            if ui.button("Show details").clicked() {
-                                                                pending_show_details_path = Some(track_path.clone());
-                                                                ui.close_menu();
-                                                            }
-                                                        });
-                                                    });
-                                                });
-                                            }
-                                        },
-                                    );
+                                pending_play_index = track_list_outcome.play_index;
+                                pending_play_list = track_list_outcome.play_list;
+                                pending_play_now_path = track_list_outcome.play_now_path;
+                                pending_next_path = track_list_outcome.next_path;
+                                pending_enqueue_path = track_list_outcome.enqueue_path;
+                                pending_add_to_playlist = track_list_outcome.add_to_playlist;
+                                pending_show_details_path = track_list_outcome.show_details_path;
                             }
                         } else {
                             ui.label("Select an artist to view tracks.");
