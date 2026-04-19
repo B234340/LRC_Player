@@ -108,11 +108,16 @@ where
             ui.horizontal(|ui| {
                 let is_favorite = app.is_track_favorite(track);
                 let star_label = if is_favorite { "★" } else { "☆" };
+                let star_area_height = row_height.max(22.0);
+                let vertical_pad = ((star_area_height - 22.0) * 0.5).max(0.0);
                 let toggle_response = ui
                     .allocate_ui_with_layout(
-                        egui::vec2(28.0, row_height.max(22.0)),
+                        egui::vec2(28.0, star_area_height),
                         egui::Layout::top_down(egui::Align::Center),
-                        |ui| ui.add_sized([22.0, 22.0], egui::Button::new(star_label)),
+                        |ui| {
+                            ui.add_space(vertical_pad);
+                            ui.add_sized([22.0, 22.0], egui::Button::new(star_label))
+                        },
                     )
                     .inner
                     .on_hover_text("Toggle favorite");

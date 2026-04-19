@@ -1,10 +1,9 @@
 use crate::domain::model::PlaybackMode;
 use crate::infrastructure::persistence::MetaCache;
+use crate::presentation::components::track_display::{render_track_artwork, resolve_track_display};
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
-use image::io::Reader as ImageReader;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// 再生キュー画面のUIを描画する関数
@@ -67,79 +66,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
     ui.add_space(8.0);
 
-    // --- アートワーク検出関数（内部関数）---
-    /// トラックに対応するアートワーク画像を検出する
-    fn discover_artwork_for_track(path: &Path) -> Option<PathBuf> {
-        let parent = path.parent()?;
-        let stem = path.file_stem()?.to_string_lossy();
-        // 検索候補のファイル名リスト
-        let candidates = [
-            format!("{}.jpg", stem),
-            format!("{}.jpeg", stem),
-            format!("{}.png", stem),
-            format!("{}.webp", stem),
-            "folder.jpg".to_string(),
-            "cover.jpg".to_string(),
-            "front.jpg".to_string(),
-            "folder.png".to_string(),
-            "cover.png".to_string(),
-            "front.png".to_string(),
-        ];
-        for candidate in candidates.iter() {
-            let candidate_path = parent.join(candidate);
-            if candidate_path.exists() {
-                return Some(candidate_path);
-            }
-        }
-        None
-    }
-
-    // --- アートワーク読み込み関数（内部関数）---
-    /// アートワーク画像を読み込み、eguiのテクスチャとして返す
-    fn load_artwork_texture(ctx: &egui::Context, artwork_path: &Path, id: &str) -> Option<egui::TextureHandle> {
-        if let Ok(reader) = ImageReader::open(artwork_path) {
-            if let Ok(reader) = reader.with_guessed_format() {
-                if let Ok(image) = reader.decode() {
-                    let size = [image.width() as usize, image.height() as usize];
-                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                        size,
-                        &image.to_rgba8().into_vec(),
-                    );
-                    return Some(ctx.load_texture(id, color_image, egui::TextureOptions::default()));
-                }
-            }
-        }
-        None
-    }
-
-    // --- キャッシュ付きアートワーク取得関数（内部関数）---
-    /// キャッシュされたアートワークテクスチャを取得する
-    fn get_cached_artwork_texture(
-        ctx: &egui::Context,
-        artwork_path: &Path,
-        id: &str,
-    ) -> Option<egui::TextureHandle> {
-        let cache_id = egui::Id::new("queue_artwork_texture_cache");
-        let cache_key = artwork_path.to_string_lossy().to_string();
-
-        // キャッシュ確認
-        let existing = ctx.data(|data| {
-            data.get_temp::<HashMap<String, egui::TextureHandle>>(cache_id)
-                .and_then(|cache| cache.get(&cache_key).cloned())
-        });
-        if existing.is_some() {
-            return existing;
-        }
-
-        // 新規読み込みとキャッシュ保存
-        let texture = load_artwork_texture(ctx, artwork_path, id)?;
-        ctx.data_mut(|data| {
-            let cache = data.get_temp_mut_or_default::<HashMap<String, egui::TextureHandle>>(cache_id);
-            cache.insert(cache_key, texture.clone());
-        });
-        Some(texture)
-    }
-
     // --- ドラッグ移動中のガイダンス表示 ---
     if let Some(source) = app.queue_drag_source_index {
         ui.label(format!(
@@ -174,6 +100,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         .collect();
     
     let meta_cache = MetaCache::open_default().ok();
+    let mut metadata_cache: HashMap<String, (String, String, String)> = HashMap::new();
 
     // --- スクロール可能なキュー一覧 ---
     egui::ScrollArea::vertical()
@@ -182,37 +109,10 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             for (index, track) in tracks.iter().enumerate() {
                 let is_selected = app.is_queue_item_selected(index);  // 選択状態
                 let is_playing = app.current_queue_index == Some(index);  // 再生中かどうか
-                let path = std::path::Path::new(track);
-                
-                // 表示用タイトル（メタデータがない場合のフォールバック）
-                let fallback_title = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(track);
-                let _location = path
-                    .parent()
-                    .and_then(|parent| parent.to_str())
-                    .unwrap_or("");
-
-                // メタデータキャッシュから情報を取得
-                let metadata = meta_cache
-                    .as_ref()
-                    .and_then(|cache| cache.track_metadata_by_location(track).ok().flatten());
-                let title = metadata
-                    .as_ref()
-                    .map(|(title, _, _)| title.as_str())
-                    .filter(|text| !text.trim().is_empty())
-                    .unwrap_or(fallback_title);
-                let artist = metadata
-                    .as_ref()
-                    .map(|(_, artist, _)| artist.as_str())
-                    .filter(|text| !text.trim().is_empty())
-                    .unwrap_or("Unknown artist");
-                let album = metadata
-                    .as_ref()
-                    .map(|(_, _, album)| album.as_str())
-                    .filter(|text| !text.trim().is_empty())
-                    .unwrap_or("Unknown album");
+                let display = resolve_track_display(track, meta_cache.as_ref(), &mut metadata_cache);
+                let title = display.title.as_str();
+                let artist = display.artist.as_str();
+                let album = display.album.as_str();
 
                 // 状態に応じてフレームスタイルを変更
                 let mut frame = egui::Frame::group(ui.style());
@@ -302,45 +202,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                         }
 
                         // --- アートワーク表示 ---
-                        if let Some(art_path) = discover_artwork_for_track(Path::new(track)) {
-                            if let Some(texture) =
-                                get_cached_artwork_texture(ui.ctx(), &art_path, &format!("queue_art_{}", index))
-                            {
-                                ui.image(&texture, art_size);
-                            } else {
-                                // 読み込み失敗時のプレースホルダー
-                                let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
-                                let art_bg = if is_playing {
-                                    ui.visuals().selection.bg_fill
-                                } else {
-                                    ui.visuals().faint_bg_color
-                                };
-                                ui.painter().rect_filled(art_rect, 4.0, art_bg);
-                                ui.painter().text(
-                                    art_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "ART",
-                                    egui::TextStyle::Small.resolve(ui.style()),
-                                    ui.visuals().text_color(),
-                                );
-                            }
-                        } else {
-                            // アートワークなしのプレースホルダー
-                            let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
-                            let art_bg = if is_playing {
-                                ui.visuals().selection.bg_fill
-                            } else {
-                                ui.visuals().faint_bg_color
-                            };
-                            ui.painter().rect_filled(art_rect, 4.0, art_bg);
-                            ui.painter().text(
-                                art_rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                "ART",
-                                egui::TextStyle::Small.resolve(ui.style()),
-                                ui.visuals().text_color(),
-                            );
-                        }
+                        render_track_artwork(
+                            ui,
+                            track,
+                            &format!("queue_art_{}", index),
+                            art_size,
+                            is_playing,
+                        );
 
                         // --- トラック情報表示 ---
                         ui.vertical(|ui| {

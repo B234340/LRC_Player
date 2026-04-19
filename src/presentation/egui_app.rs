@@ -3,6 +3,7 @@ use crate::application::usecases::build_app_vm::build_app_vm;
 use crate::application::view_model::{AppVm, QueueVm};
 use crate::config::{Config, Language, LogLevel, Theme};
 use crate::domain::model::{PlaybackMode, PlaybackState};
+use serde::{Deserialize, Serialize};
 use crate::infrastructure::audio;
 use crate::infrastructure::decode::SymphoniaDecoder;
 use crate::ports::audio_output::{AudioFormat, AudioOutput, SampleFormat};
@@ -35,11 +36,18 @@ pub enum Tab {
     Settings,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtistViewMode {
     Artist,
     AlbumArtist,
     Composer,
+}
+
+impl Default for ArtistViewMode {
+    fn default() -> Self {
+        ArtistViewMode::Artist
+    }
 }
 
 impl ArtistViewMode {
@@ -206,6 +214,7 @@ impl GuiApp {
             queue_tracks: Vec::new(),
             selected_queue_index: None,
             queue_playback_mode: PlaybackMode::Sequential,
+            artist_view_mode: ArtistViewMode::Artist,
             favorite_directories: Vec::new(),
         };
 
@@ -228,6 +237,7 @@ impl GuiApp {
                 queue_tracks: Vec::new(),
                 selected_queue_index: None,
                 queue_playback_mode: PlaybackMode::Sequential,
+                artist_view_mode: ArtistViewMode::Artist,
                 last_play_position_ms: None,
                 favorite_directories: Vec::new(),
             })
@@ -252,6 +262,7 @@ impl GuiApp {
             queue_tracks: self.queue.tracks.clone(),
             selected_queue_index: self.selected_queue_index,
             queue_playback_mode: self.playback_mode,
+            artist_view_mode: self.artist_view_mode,
             favorite_directories: self.favorite_directories.clone(),
         };
         if let Ok(store) = StateFile::open() {
@@ -871,6 +882,7 @@ impl GuiApp {
         self.artist_view_mode = mode;
         self.selected_artist = None;
         self.update_app_vm();
+        self.save_state();
     }
 
     pub(crate) fn play_track_now(&mut self, path: &str) {
@@ -2190,7 +2202,7 @@ impl GuiApp {
             seek_key_hold_started_at: None,
             seek_key_last_step_at: None,
             queue_scroll_to_playing: active_tab == Tab::Queue,
-            artist_view_mode: ArtistViewMode::Artist,
+            artist_view_mode: state.artist_view_mode,
             scan_target_input: String::new(),
             scan_lrc_target_input: String::new(),
             scan_exclude_input: String::new(),

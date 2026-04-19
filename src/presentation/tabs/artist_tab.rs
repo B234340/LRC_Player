@@ -1,8 +1,8 @@
-use crate::presentation::components::track_list::{
-    render_standard_track_list, TrackActivation,
-};
+use crate::infrastructure::persistence::MetaCache;
+use crate::presentation::components::track_display::{render_track_artwork, resolve_track_display};
 use crate::presentation::egui_app::{ArtistViewMode, GuiApp};
 use eframe::egui;
+use std::collections::HashMap;
 
 /// アーティスト一覧画面のUIを描画する関数
 /// 
@@ -86,7 +86,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     } else {
         // レイアウトの寸法設定
         let list_row_height = 24.0_f32;  // アーティストリストの行の高さ
-        let track_row_height = 22.0_f32;  // トラックリストの行の高さ
         let body_height = ui.available_height();  // 利用可能な高さ
 
         // メインの2ペインレイアウト（左：アーティストリスト、右：トラックリスト）
@@ -161,30 +160,120 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                 ui.label("No tracks found for this artist.");
                             } else {
                                 ui.label("Double left click: create queue from this list and play. Right click: common actions.");
-                                
-                                let tracks: Vec<String> = selected_artist_tracks
-                                    .iter()
-                                    .map(|track| track.title.clone())
-                                    .collect();
-                                let track_list_outcome = render_standard_track_list(
-                                    ui,
-                                    app,
-                                    "artist_tracks_scroll",
-                                    &tracks,
-                                    &playlist_targets,
-                                    TrackActivation::DoubleClick,
-                                    track_row_height,
-                                    Some(ui.available_height()),
-                                    |_, display| format!("[{}] {}", display.album, display.title),
-                                );
+                                ui.separator();
 
-                                pending_play_index = track_list_outcome.play_index;
-                                pending_play_list = track_list_outcome.play_list;
-                                pending_play_now_path = track_list_outcome.play_now_path;
-                                pending_next_path = track_list_outcome.next_path;
-                                pending_enqueue_path = track_list_outcome.enqueue_path;
-                                pending_add_to_playlist = track_list_outcome.add_to_playlist;
-                                pending_show_details_path = track_list_outcome.show_details_path;
+                                let track_paths: Vec<String> = selected_artist_tracks
+                                    .iter()
+                                    .map(|track| track.id.clone())
+                                    .collect();
+                                let meta_cache = MetaCache::open_default().ok();
+                                let mut metadata_cache: HashMap<String, (String, String, String)> = HashMap::new();
+
+                                egui::ScrollArea::vertical()
+                                    .id_source("artist_tracks_scroll")
+                                    .auto_shrink([false, false])
+                                    .max_height(ui.available_height())
+                                    .show(ui, |ui| {
+                                        for (track_index, track_path) in track_paths.iter().enumerate() {
+                                            let display = resolve_track_display(
+                                                track_path,
+                                                meta_cache.as_ref(),
+                                                &mut metadata_cache,
+                                            );
+                                            let is_playing = app.play_path == *track_path;
+
+                                            let mut frame = egui::Frame::group(ui.style());
+                                            if is_playing {
+                                                frame = frame
+                                                    .fill(ui.visuals().selection.bg_fill)
+                                                    .stroke(egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
+                                            }
+
+                                            frame.show(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    let is_favorite = app.is_track_favorite(track_path);
+                                                    let star_label = if is_favorite { "★" } else { "☆" };
+                                                    let star_area_height = 44.0_f32;
+                                                    let vertical_pad = ((star_area_height - 22.0_f32) * 0.5).max(0.0_f32);
+                                                    let toggle_response = ui
+                                                        .allocate_ui_with_layout(
+                                                            egui::vec2(28.0, star_area_height),
+                                                            egui::Layout::top_down(egui::Align::Center),
+                                                            |ui| {
+                                                                ui.add_space(vertical_pad);
+                                                                ui.add_sized([22.0, 22.0], egui::Button::new(star_label))
+                                                            },
+                                                        )
+                                                        .inner
+                                                        .on_hover_text("Toggle favorite");
+                                                    if toggle_response.clicked() {
+                                                        app.toggle_favorite_track(track_path);
+                                                    }
+
+                                                    ui.add_space(8.0);
+                                                    render_track_artwork(
+                                                        ui,
+                                                        track_path,
+                                                        &format!("artist_track_art_{}", track_index),
+                                                        egui::vec2(44.0, 44.0),
+                                                        is_playing,
+                                                    );
+                                                    ui.add_space(8.0);
+
+                                                    ui.vertical(|ui| {
+                                                        let title_text = if is_playing {
+                                                            format!("{} [Playing]", display.title)
+                                                        } else {
+                                                            display.title.clone()
+                                                        };
+                                                        let title_size = ui.style().text_styles[&egui::TextStyle::Body].size * 1.5;
+                                                        let response = ui
+                                                            .selectable_label(false, egui::RichText::new(title_text).size(title_size))
+                                                            .on_hover_text("Double click to play. Right click for actions.");
+                                                        if response.double_clicked() {
+                                                            pending_play_index = Some(track_index);
+                                                            pending_play_list = track_paths.clone();
+                                                        }
+                                                        response.context_menu(|ui| {
+                                                            if ui.button("Play now").clicked() {
+                                                                pending_play_now_path = Some(track_path.clone());
+                                                                ui.close_menu();
+                                                            }
+                                                            if ui.button("Play next").clicked() {
+                                                                pending_next_path = Some(track_path.clone());
+                                                                ui.close_menu();
+                                                            }
+                                                            if ui.button("Add to queue").clicked() {
+                                                                pending_enqueue_path = Some(track_path.clone());
+                                                                ui.close_menu();
+                                                            }
+                                                            ui.separator();
+                                                            ui.label("Add to playlist");
+                                                            for (target_index, target_name) in &playlist_targets {
+                                                                if ui.button(target_name).clicked() {
+                                                                    pending_add_to_playlist = Some((*target_index, track_path.clone()));
+                                                                    ui.close_menu();
+                                                                }
+                                                            }
+                                                            ui.separator();
+                                                            if ui.button("Show details").clicked() {
+                                                                pending_show_details_path = Some(track_path.clone());
+                                                                ui.close_menu();
+                                                            }
+                                                        });
+                                                    });
+
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        if ui.button("Play").clicked() {
+                                                            pending_play_index = Some(track_index);
+                                                            pending_play_list = track_paths.clone();
+                                                        }
+                                                    });
+                                                });
+                                            });
+                                            ui.add_space(4.0);
+                                        }
+                                    });
                             }
                         } else {
                             ui.label("Select an artist to view tracks.");

@@ -1,116 +1,7 @@
+use crate::presentation::components::track_display::{render_track_artwork, resolve_track_display};
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
-use image::io::Reader as ImageReader;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-/// トラックに対応するアートワーク画像を検出する関数
-/// 
-/// トラックファイルと同じディレクトリから、以下の優先順位でアートワークを探す：
-/// 1. トラック名と同じベース名の画像ファイル（.jpg, .jpeg, .png, .webp）
-/// 2. 一般的なアートワークファイル名（folder.jpg, cover.jpg, front.jpg など）
-/// 
-/// # 引数
-/// * `path` - トラックファイルのパス
-/// 
-/// # 戻り値
-/// アートワークが見つかった場合はそのパス、見つからない場合は None
-fn discover_artwork_for_track(path: &Path) -> Option<PathBuf> {
-    let parent = path.parent()?;  // 親ディレクトリを取得
-    let stem = path.file_stem()?.to_string_lossy();  // 拡張子を除いたファイル名
-    
-    // 検索候補のファイル名リスト
-    let candidates = [
-        format!("{}.jpg", stem),   // トラック名.jpg
-        format!("{}.jpeg", stem),  // トラック名.jpeg
-        format!("{}.png", stem),   // トラック名.png
-        format!("{}.webp", stem),  // トラック名.webp
-        "folder.jpg".to_string(),  // フォルダ画像
-        "cover.jpg".to_string(),   // カバー画像
-        "front.jpg".to_string(),   // フロントカバー
-        "folder.png".to_string(),
-        "cover.png".to_string(),
-        "front.png".to_string(),
-    ];
-    
-    // 候補を順にチェックし、存在するものを返す
-    for candidate in candidates.iter() {
-        let candidate_path = parent.join(candidate);
-        if candidate_path.exists() {
-            return Some(candidate_path);
-        }
-    }
-    None
-}
-
-/// アートワーク画像を読み込み、eguiのテクスチャとして返す関数
-/// 
-/// # 引数
-/// * `ctx` - eguiのコンテキスト
-/// * `artwork_path` - アートワーク画像のパス
-/// * `id` - テクスチャの識別子
-/// 
-/// # 戻り値
-/// 読み込みに成功した場合は TextureHandle、失敗した場合は None
-fn load_artwork_texture(ctx: &egui::Context, artwork_path: &Path, id: &str) -> Option<egui::TextureHandle> {
-    // 画像ファイルを開く
-    if let Ok(reader) = ImageReader::open(artwork_path) {
-        // フォーマットを推測
-        if let Ok(reader) = reader.with_guessed_format() {
-            // デコード
-            if let Ok(image) = reader.decode() {
-                let size = [image.width() as usize, image.height() as usize];
-                // RGBA形式に変換してeguiのカラー画像を作成
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    size,
-                    &image.to_rgba8().into_vec(),
-                );
-                // テクスチャとして読み込み
-                return Some(ctx.load_texture(id, color_image, egui::TextureOptions::default()));
-            }
-        }
-    }
-    None
-}
-
-/// キャッシュされたアートワークテクスチャを取得する関数
-/// 
-/// メモリ内にキャッシュがあればそれを返し、なければ読み込んでキャッシュする
-/// 
-/// # 引数
-/// * `ctx` - eguiのコンテキスト
-/// * `artwork_path` - アートワーク画像のパス
-/// * `id` - テクスチャの識別子
-/// 
-/// # 戻り値
-/// キャッシュまたは新規読み込みした TextureHandle、失敗した場合は None
-fn get_cached_artwork_texture(
-    ctx: &egui::Context,
-    artwork_path: &Path,
-    id: &str,
-) -> Option<egui::TextureHandle> {
-    let cache_id = egui::Id::new("playlist_artwork_texture_cache");
-    let cache_key = artwork_path.to_string_lossy().to_string();
-
-    // キャッシュから既存のテクスチャを検索
-    let existing = ctx.data(|data| {
-        data.get_temp::<HashMap<String, egui::TextureHandle>>(cache_id)
-            .and_then(|cache| cache.get(&cache_key).cloned())
-    });
-    if existing.is_some() {
-        return existing;  // キャッシュヒット
-    }
-
-    // キャッシュミス：新規に読み込み
-    let texture = load_artwork_texture(ctx, artwork_path, id)?;
-    
-    // キャッシュに保存
-    ctx.data_mut(|data| {
-        let cache = data.get_temp_mut_or_default::<HashMap<String, egui::TextureHandle>>(cache_id);
-        cache.insert(cache_key, texture.clone());
-    });
-    Some(texture)
-}
 
 /// プレイリスト画面のUIを描画する関数
 pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
@@ -228,6 +119,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         let mut pending_show_details_path: Option<String> = None;  // 詳細表示
         
         let meta_cache = crate::infrastructure::persistence::MetaCache::open_default().ok();
+        let mut metadata_cache: HashMap<String, (String, String, String)> = HashMap::new();
         
         // プレイリスト一覧（追加先用）
         let playlist_targets: Vec<(usize, String)> = app
@@ -257,37 +149,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     .max_height(ui.available_height().max(120.0))
                     .show(ui, |ui| {
                         for (track_index, track) in playlist.tracks.iter().enumerate() {
-                            let path = std::path::Path::new(track);
-                            
-                            // 表示用の情報を取得
-                            let fallback_title = path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or(track);
-                            
-                            // メタデータキャッシュから情報を取得
-                            let metadata = meta_cache
-                                .as_ref()
-                                .and_then(|cache| cache.track_metadata_by_location(track).ok().flatten());
-                            
-                            let title = metadata
-                                .as_ref()
-                                .map(|(title, _, _)| title.as_str())
-                                .filter(|text| !text.trim().is_empty())
-                                .unwrap_or(fallback_title);
-                            
-                            let artist = metadata
-                                .as_ref()
-                                .map(|(_, artist, _)| artist.as_str())
-                                .filter(|text| !text.trim().is_empty())
-                                .unwrap_or("Unknown artist");
-                            
-                            let album = metadata
-                                .as_ref()
-                                .map(|(_, _, album)| album.as_str())
-                                .filter(|text| !text.trim().is_empty())
-                                .unwrap_or("Unknown album");
-                            
+                            let display = resolve_track_display(track, meta_cache.as_ref(), &mut metadata_cache);
                             let is_playing = app.play_path == *track;  // 現在再生中かどうか
 
                             // 再生中トラックはハイライト表示
@@ -322,45 +184,21 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     ui.add_space(4.0);
 
                                     // --- アートワーク表示 ---
-                                    if let Some(art_path) = discover_artwork_for_track(Path::new(track)) {
-                                        if let Some(texture) =
-                                            get_cached_artwork_texture(ui.ctx(), &art_path, &format!("playlist_art_{}_{}", selected_index, track_index))
-                                        {
-                                            ui.image(&texture, art_size);
-                                        } else {
-                                            // 読み込み失敗時のプレースホルダー
-                                            let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
-                                            ui.painter()
-                                                .rect_filled(art_rect, 4.0, ui.visuals().faint_bg_color);
-                                            ui.painter().text(
-                                                art_rect.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                "ART",
-                                                egui::TextStyle::Small.resolve(ui.style()),
-                                                ui.visuals().text_color(),
-                                            );
-                                        }
-                                    } else {
-                                        // アートワークが見つからない場合のプレースホルダー
-                                        let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
-                                        ui.painter()
-                                            .rect_filled(art_rect, 4.0, ui.visuals().faint_bg_color);
-                                        ui.painter().text(
-                                            art_rect.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            "ART",
-                                            egui::TextStyle::Small.resolve(ui.style()),
-                                            ui.visuals().text_color(),
-                                        );
-                                    }
+                                    render_track_artwork(
+                                        ui,
+                                        track,
+                                        &format!("playlist_art_{}_{}", selected_index, track_index),
+                                        egui::vec2(44.0, 44.0),
+                                        is_playing,
+                                    );
 
                                     // --- トラック情報表示 ---
                                     ui.vertical(|ui| {
                                         // トラックタイトル（再生中の場合は [Playing] を付加）
                                         let title_text = if is_playing {
-                                            format!("{}: {} [Playing]", track_index + 1, title)
+                                            format!("{}: {} [Playing]", track_index + 1, display.title)
                                         } else {
-                                            format!("{}: {}", track_index + 1, title)
+                                            format!("{}: {}", track_index + 1, display.title)
                                         };
                                         
                                         let response = ui.selectable_label(false, title_text);
@@ -399,8 +237,8 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                         });
 
                                         // アーティスト名とアルバム名を表示
-                                        ui.label(format!("Artist: {}", artist));
-                                        ui.label(format!("Album: {}", album));
+                                        ui.label(format!("Artist: {}", display.artist));
+                                        ui.label(format!("Album: {}", display.album));
                                     });
 
                                     // --- 右寄せ操作ボタン ---
