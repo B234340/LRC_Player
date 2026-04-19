@@ -109,6 +109,38 @@ fn highlight_width_for_line(
     highlight_width.min(full_text_width)
 }
 
+fn is_ascii_or_symbol(c: char) -> bool {
+    c.is_ascii() && !c.is_ascii_whitespace()
+}
+
+fn is_preferred_boundary(prev: char, next: char) -> bool {
+    is_ascii_or_symbol(prev) != is_ascii_or_symbol(next)
+}
+
+fn boundary_split_index(text: &str, idx: usize, ch: char, prev_char: Option<char>) -> usize {
+    if ch.is_whitespace() {
+        let next_non_ws = text[idx..].chars().skip(1).find(|c| !c.is_whitespace());
+        if let Some(next_char) = next_non_ws {
+            if next_char.is_ascii_punctuation() {
+                let next_idx = text[idx..]
+                    .char_indices()
+                    .skip(1)
+                    .find(|(_, c)| !c.is_whitespace())
+                    .map(|(off, _)| idx + off)
+                    .unwrap_or(idx);
+                return next_idx + next_char.len_utf8();
+            }
+        }
+        return idx;
+    }
+    if let Some(prev) = prev_char {
+        if is_preferred_boundary(prev, ch) && ch.is_ascii_punctuation() {
+            return idx + ch.len_utf8();
+        }
+    }
+    idx
+}
+
 fn split_into_two_rows(
     ui: &egui::Ui,
     text: &str,
@@ -134,34 +166,53 @@ fn split_into_two_rows(
     let mut fallback_whitespace_split: Option<usize> = None;
     let mut fallback_whitespace_dist = f32::MAX;
 
+    let mut prev_char: Option<char> = None;
     for (idx, ch) in text.char_indices() {
-        if ch.is_whitespace() {
-            let prefix = &text[..idx];
-            let prefix_width = ui.fonts(|fonts| {
-                let mut job = egui::text::LayoutJob::default();
-                job.append(prefix, 0.0, egui::TextFormat::simple(font.clone(), text_color));
-                fonts.layout_job(job).size().x
-            });
-            if prefix_width > max_width {
-                continue;
-            }
+        let is_candidate = if ch.is_whitespace() {
+            true
+        } else if let Some(prev) = prev_char {
+            is_preferred_boundary(prev, ch)
+        } else {
+            false
+        };
 
-            let dist = (prefix_width - center_x).abs();
-            if dist <= tolerance && dist < best_whitespace_dist {
-                best_whitespace_dist = dist;
-                best_whitespace_split = Some(idx);
-            }
-            if dist < fallback_whitespace_dist {
-                fallback_whitespace_dist = dist;
-                fallback_whitespace_split = Some(idx);
-            }
+        if !is_candidate {
+            prev_char = Some(ch);
+            continue;
         }
+
+        let split_idx = boundary_split_index(text, idx, ch, prev_char);
+        let prefix = &text[..split_idx];
+        let prefix_width = ui.fonts(|fonts| {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(prefix, 0.0, egui::TextFormat::simple(font.clone(), text_color));
+            fonts.layout_job(job).size().x
+        });
+        if prefix_width > max_width {
+            prev_char = Some(ch);
+            continue;
+        }
+
+        let dist = (prefix_width - center_x).abs();
+        if dist <= tolerance && dist < best_whitespace_dist {
+            best_whitespace_dist = dist;
+            best_whitespace_split = Some(split_idx);
+        }
+        if dist < fallback_whitespace_dist {
+            fallback_whitespace_dist = dist;
+            fallback_whitespace_split = Some(split_idx);
+        }
+        prev_char = Some(ch);
     }
 
-    if let Some(idx) = best_whitespace_split.or(fallback_whitespace_split) {
-        let ws_len = text[idx..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(0);
-        let prefix = text[..idx].trim_end().to_string();
-        let remainder = text[idx + ws_len..].trim_start().to_string();
+    if let Some(split_idx) = best_whitespace_split.or(fallback_whitespace_split) {
+        let prefix = text[..split_idx].trim_end().to_string();
+        let remainder = if split_idx < text.len() && text[split_idx..].chars().next().map(|ch| ch.is_whitespace()).unwrap_or(false) {
+            let ws_len = text[split_idx..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(0);
+            text[split_idx + ws_len..].trim_start().to_string()
+        } else {
+            text[split_idx..].to_string()
+        };
         if remainder.is_empty() {
             return vec![prefix];
         }
@@ -277,22 +328,28 @@ fn split_into_three_rows(
     let target_one = total_width / 3.0;
     let target_two = total_width * 2.0 / 3.0;
 
-    let whitespace_positions: Vec<(usize, f32)> = text
-        .char_indices()
-        .filter_map(|(idx, ch)| {
-            if ch.is_whitespace() {
-                let prefix = &text[..idx];
-                let width = ui.fonts(|fonts| {
-                    let mut job = egui::text::LayoutJob::default();
-                    job.append(prefix, 0.0, egui::TextFormat::simple(font.clone(), egui::Color32::WHITE));
-                    fonts.layout_job(job).size().x
-                });
-                Some((idx, width))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut whitespace_positions: Vec<(usize, f32)> = Vec::new();
+    let mut prev_char: Option<char> = None;
+    for (idx, ch) in text.char_indices() {
+        let is_boundary = if ch.is_whitespace() {
+            true
+        } else if let Some(prev) = prev_char {
+            is_preferred_boundary(prev, ch)
+        } else {
+            false
+        };
+        if is_boundary {
+            let split_idx = boundary_split_index(text, idx, ch, prev_char);
+            let prefix = &text[..split_idx];
+            let width = ui.fonts(|fonts| {
+                let mut job = egui::text::LayoutJob::default();
+                job.append(prefix, 0.0, egui::TextFormat::simple(font.clone(), egui::Color32::WHITE));
+                fonts.layout_job(job).size().x
+            });
+            whitespace_positions.push((split_idx, width));
+        }
+        prev_char = Some(ch);
+    }
 
     let mut best_combo: Option<(usize, usize)> = None;
     let mut best_error = f32::MAX;
