@@ -1,3 +1,4 @@
+use crate::presentation::components::track_context_menu::render_track_context_menu;
 use crate::presentation::components::track_display::{render_track_artwork, resolve_track_display};
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
@@ -209,30 +210,27 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                         
                                         // 右クリックコンテキストメニュー
                                         response.context_menu(|ui| {
-                                            if ui.button("Play now").clicked() {
-                                                pending_play_now_path = Some(track.clone());
-                                                ui.close_menu();
+                                            let menu_outcome = render_track_context_menu(
+                                                ui,
+                                                track,
+                                                &playlist_targets,
+                                                "Add to queue",
+                                                |_, _| {},
+                                            );
+                                            if let Some(path) = menu_outcome.play_now_path {
+                                                pending_play_now_path = Some(path);
                                             }
-                                            if ui.button("Play next").clicked() {
-                                                pending_next_path = Some(track.clone());
-                                                ui.close_menu();
+                                            if let Some(path) = menu_outcome.next_path {
+                                                pending_next_path = Some(path);
                                             }
-                                            if ui.button("Add to queue").clicked() {
-                                                pending_enqueue_path = Some(track.clone());
-                                                ui.close_menu();
+                                            if let Some(path) = menu_outcome.enqueue_path {
+                                                pending_enqueue_path = Some(path);
                                             }
-                                            ui.separator();
-                                            ui.label("Add to playlist");
-                                            for (target_index, target_name) in &playlist_targets {
-                                                if ui.button(target_name).clicked() {
-                                                    pending_add_to_playlist = Some((*target_index, track.clone()));
-                                                    ui.close_menu();
-                                                }
+                                            if let Some((target_index, path)) = menu_outcome.add_to_playlist {
+                                                pending_add_to_playlist = Some((target_index, path));
                                             }
-                                            ui.separator();
-                                            if ui.button("Show details").clicked() {
-                                                pending_show_details_path = Some(track.clone());
-                                                ui.close_menu();
+                                            if let Some(path) = menu_outcome.show_details_path {
+                                                pending_show_details_path = Some(path);
                                             }
                                         });
 

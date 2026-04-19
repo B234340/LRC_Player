@@ -1,4 +1,5 @@
 use crate::infrastructure::persistence::MetaCache;
+use crate::presentation::components::track_context_menu::render_track_context_menu;
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
 use std::collections::HashMap;
@@ -139,30 +140,27 @@ where
                 }
 
                 response.context_menu(|ui| {
-                    if ui.button("Play now").clicked() {
-                        outcome.play_now_path = Some(track.clone());
-                        ui.close_menu();
+                    let menu_outcome = render_track_context_menu(
+                        ui,
+                        track,
+                        playlist_targets,
+                        "Add to queue",
+                        |_, _| {},
+                    );
+                    if let Some(path) = menu_outcome.play_now_path {
+                        outcome.play_now_path = Some(path);
                     }
-                    if ui.button("Play next").clicked() {
-                        outcome.next_path = Some(track.clone());
-                        ui.close_menu();
+                    if let Some(path) = menu_outcome.next_path {
+                        outcome.next_path = Some(path);
                     }
-                    if ui.button("Add to queue").clicked() {
-                        outcome.enqueue_path = Some(track.clone());
-                        ui.close_menu();
+                    if let Some(path) = menu_outcome.enqueue_path {
+                        outcome.enqueue_path = Some(path);
                     }
-                    ui.separator();
-                    ui.label("Add to playlist");
-                    for (target_index, target_name) in playlist_targets {
-                        if ui.button(target_name).clicked() {
-                            outcome.add_to_playlist = Some((*target_index, track.clone()));
-                            ui.close_menu();
-                        }
+                    if let Some(item) = menu_outcome.add_to_playlist {
+                        outcome.add_to_playlist = Some(item);
                     }
-                    ui.separator();
-                    if ui.button("Show details").clicked() {
-                        outcome.show_details_path = Some(track.clone());
-                        ui.close_menu();
+                    if let Some(path) = menu_outcome.show_details_path {
+                        outcome.show_details_path = Some(path);
                     }
                 });
             });
