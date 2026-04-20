@@ -288,7 +288,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         // ========== 表示中のアルバムのアートワークを非同期で読み込み ==========
         if row_count > 0 {
             app.queue_album_artwork_for_visible(&visible_album_titles);
-            app.process_album_artwork_queue(ui.ctx(), 5);  // 一度に最大5枚まで処理
+            app.process_album_artwork_queue(ui.ctx(), 1);  // 一度に最大1枚まで処理
         }
 
         // ========== 選択中アルバムの表示状態確認 ==========
@@ -302,13 +302,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             if let Some(selected) = selected_album.as_deref() {
                 // --- パネル寸法の計算 ---
                 let detail_max_size = card_width * 2.0 + grid_spacing_x;
-                let panel_width = if cols <= 3 {
-                    card_width
-                } else {
-                    detail_max_size
-                }
-                .min(content_rect.width() - 20.0)
-                .max(card_width);
+                let panel_width = detail_max_size
+                    .min(content_rect.width() - 20.0)
+                    .max(card_width);
 
                 let mut panel_height = (content_rect.height() * 0.62)
                     .clamp(card_width, detail_max_size)
