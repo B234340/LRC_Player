@@ -9,6 +9,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         let toggle_label = if app.side_panel_expanded { "<" } else { ">" };
         if ui.button(toggle_label).clicked() {
             app.side_panel_expanded = !app.side_panel_expanded;
+            app.save_state();
         }
         if app.side_panel_expanded {
             ui.heading(translate("output_device", app.language));
@@ -19,7 +20,18 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         return;
     }
 
-    ui.add_space(4.0);
+    ui.separator();
+    ui.heading("Playback Info");
+    if app.play_path.trim().is_empty() {
+        ui.label("No track selected.");
+    } else {
+        ui.label(format!("Path: {}", app.play_path));
+        ui.label(format!("State: {}", app.playback_state));
+        if let Some(status) = &app.play_status {
+            ui.label(format!("Status: {}", status));
+        }
+    }
+    ui.add_space(8.0);
 
     ui.horizontal(|ui| {
         ui.label(translate("filter", app.language));

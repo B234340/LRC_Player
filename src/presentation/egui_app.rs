@@ -226,6 +226,7 @@ impl GuiApp {
             queue_playback_mode: PlaybackMode::Sequential,
             artist_view_mode: ArtistViewMode::Artist,
             lrc_overlay_enabled: false,
+            side_panel_expanded: true,
             favorite_directories: Vec::new(),
         };
 
@@ -250,6 +251,7 @@ impl GuiApp {
                 queue_playback_mode: PlaybackMode::Sequential,
                 artist_view_mode: ArtistViewMode::Artist,
                 lrc_overlay_enabled: false,
+                side_panel_expanded: true,
                 last_play_position_ms: None,
                 favorite_directories: Vec::new(),
             })
@@ -276,6 +278,7 @@ impl GuiApp {
             queue_playback_mode: self.playback_mode,
             artist_view_mode: self.artist_view_mode,
             lrc_overlay_enabled: self.lrc_overlay_enabled,
+            side_panel_expanded: self.side_panel_expanded,
             favorite_directories: self.favorite_directories.clone(),
         };
         if let Ok(store) = StateFile::open() {
@@ -1745,6 +1748,18 @@ impl GuiApp {
         }
 
         self.lyrics_files = Lyrics::discover_for_track(&self.play_path, &self.scan_lrc_targets);
+        self.lyrics_files.sort_by(|a, b| {
+            let a_rank = Lyrics::from_lrc(a)
+                .map(|lyrics| lyrics.display_priority_rank())
+                .unwrap_or(0);
+            let b_rank = Lyrics::from_lrc(b)
+                .map(|lyrics| lyrics.display_priority_rank())
+                .unwrap_or(0);
+
+            b_rank
+                .cmp(&a_rank)
+                .then_with(|| a.file_name().cmp(&b.file_name()))
+        });
         self.selected_lyrics_index = None;
         self.loaded_lyrics = None;
         if let Some(_) = self.lyrics_files.get(0) {
@@ -2346,7 +2361,7 @@ impl GuiApp {
             seek_key_last_step_at: None,
             queue_scroll_to_playing: active_tab == Tab::Queue,
             artist_view_mode: state.artist_view_mode,
-            side_panel_expanded: true,
+            side_panel_expanded: state.side_panel_expanded,
             scan_target_input: String::new(),
             scan_lrc_target_input: String::new(),
             scan_exclude_input: String::new(),

@@ -1,4 +1,5 @@
 use crate::domain::services::DedupService;
+use crate::infrastructure::lyrics::Lyrics;
 use crate::infrastructure::persistence::MetaCache;
 use crate::infrastructure::scan::file_scanner::FileScanner;
 use anyhow::Result;
@@ -524,6 +525,13 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                                 .await;
                                         }
                                     } else if scanner.is_lyrics_file(&file_path) {
+                                        let has_timestamps = Lyrics::from_lrc(&file_path)
+                                            .map(|lyrics| !lyrics.lines.is_empty())
+                                            .unwrap_or(false);
+                                        if !has_timestamps {
+                                            continue;
+                                        }
+
                                         if let Ok(meta) = std::fs::metadata(&file_path) {
                                             let size = meta.len() as i64;
                                             let mtime = meta

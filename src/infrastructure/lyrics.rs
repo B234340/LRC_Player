@@ -4,9 +4,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LyricTagKind {
+    Bracket,
+    Angle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LyricSegment {
     pub time_ms: u64,
     pub text: String,
+    pub tag_kind: LyricTagKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +29,26 @@ pub struct Lyrics {
 }
 
 impl Lyrics {
+    pub fn display_priority_rank(&self) -> u8 {
+        if self.has_enhanced_segments() {
+            3
+        } else if self.has_char_level_segments() {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn has_enhanced_segments(&self) -> bool {
+        self.lines
+            .iter()
+            .any(|line| line.segments.iter().any(|seg| seg.tag_kind == LyricTagKind::Angle))
+    }
+
+    fn has_char_level_segments(&self) -> bool {
+        self.lines.iter().any(|line| line.segments.len() > 1)
+    }
+
     pub fn from_lrc<P: AsRef<Path>>(path: P) -> Result<Self> {
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("reading lyrics file {}", path.as_ref().display()))?;
@@ -48,10 +75,10 @@ impl Lyrics {
 
         while i < line.len() {
             let remaining = &line[i..];
-            let closing = if remaining.starts_with('[') {
-                ']'
+            let (closing, tag_kind) = if remaining.starts_with('[') {
+                (']', LyricTagKind::Bracket)
             } else if remaining.starts_with('<') {
-                '>'
+                ('>', LyricTagKind::Angle)
             } else {
                 break;
             };
@@ -66,7 +93,11 @@ impl Lyrics {
                         .map(|offset| content_start + offset)
                         .unwrap_or(line.len());
                     let segment_text = line[content_start..next_tag_offset].to_string();
-                    segments.push(LyricSegment { time_ms: ms, text: segment_text });
+                    segments.push(LyricSegment {
+                        time_ms: ms,
+                        text: segment_text,
+                        tag_kind,
+                    });
                     i = next_tag_offset;
                     continue;
                 }

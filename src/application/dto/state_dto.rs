@@ -22,6 +22,10 @@ where
     }
 }
 
+fn default_side_panel_expanded() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateDto {
     pub last_tab: Option<String>,
@@ -58,6 +62,9 @@ pub struct StateDto {
     pub artist_view_mode: crate::presentation::egui_app::ArtistViewMode,
     #[serde(default)]
     pub lrc_overlay_enabled: bool,
+
+    #[serde(default = "default_side_panel_expanded")]
+    pub side_panel_expanded: bool,
 
     #[serde(default)]
     pub favorite_directories: Vec<String>,
