@@ -140,9 +140,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         if let Some(texture) = display_texture {
             let available = ui.available_size();
             // アートワークの表示サイズを計算
-            // - 画面サイズの90%を最大とする
+            // - 画面サイズの100%を最大とする
             // - 最小320px、最大1080pxの範囲に収める
-            let max_side = (available.x.min(available.y) * 0.9).clamp(320.0, 1080.0);
+            let max_side = (available.x.min(available.y) * 1.0).clamp(320.0, 1080.0);
             let mut image_size = texture.size_vec2();
             let scale = (max_side / image_size.x).min(max_side / image_size.y);
             image_size *= scale;

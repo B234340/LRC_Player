@@ -1,7 +1,7 @@
 use crate::infrastructure::persistence::MetaCache;
 use crate::presentation::components::track_context_menu::render_track_context_menu;
 use crate::presentation::components::track_display::{
-    render_track_artwork_with_metadata_first,
+    render_track_artwork_with_file_first,
     resolve_track_display,
 };
 use crate::presentation::egui_app::{ArtistViewMode, GuiApp};
@@ -244,7 +244,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                                     ui.add_space(8.0);
                                                     
                                                     // --- アートワーク表示（44x44のサムネイル）---
-                                                    render_track_artwork_with_metadata_first(
+                                                    render_track_artwork_with_file_first(
                                                         ui,
                                                         track_path,
                                                         &format!("artist_track_art_{}", track_index),

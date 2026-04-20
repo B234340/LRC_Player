@@ -1476,12 +1476,18 @@ impl GuiApp {
 
             if self.lrc_overlay_enabled {
                 if need_blur_texture {
-                    self.play_artwork_blur_handle = self.load_blurred_artwork_texture_from_image(
-                        ctx,
-                        artwork_image,
-                        "play_artwork_blur",
-                    );
-                    self.play_artwork_blur_source = self.play_artwork_blur_handle.as_ref().map(|_| artwork_source.clone());
+                    // 初回ロード時の引っかかりを抑えるため、通常アートを先に表示して
+                    // ぼかし版は次フレームで生成する。
+                    if need_regular_texture {
+                        ctx.request_repaint_after(Duration::from_millis(16));
+                    } else {
+                        self.play_artwork_blur_handle = self.load_blurred_artwork_texture_from_image(
+                            ctx,
+                            artwork_image,
+                            "play_artwork_blur",
+                        );
+                        self.play_artwork_blur_source = self.play_artwork_blur_handle.as_ref().map(|_| artwork_source.clone());
+                    }
                 }
             } else {
                 self.play_artwork_blur_handle = None;
@@ -1532,6 +1538,8 @@ impl GuiApp {
         id: &str,
     ) -> Option<egui::TextureHandle> {
         let image = self.crop_image_to_square(image);
+        // ぼかし背景は高解像度が不要なので縮小してから処理し、初回生成コストを抑える。
+        let image = image.thumbnail(512, 512);
         let blurred = image::imageops::blur(&image, 10.0);
         self.load_artwork_texture_from_image(
             ctx,
@@ -1657,7 +1665,12 @@ impl GuiApp {
                 reader.decode()
             })();
 
-            if let Ok(image) = image_result {
+            let image = match image_result {
+                Ok(image) => Some(image),
+                Err(_) => self.extract_embedded_artwork(&path),
+            };
+
+            if let Some(image) = image {
                 let size = [image.width() as usize, image.height() as usize];
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
                     size,

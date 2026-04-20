@@ -396,6 +396,43 @@ pub fn render_track_artwork_with_metadata_first(
     );
 }
 
+pub fn render_track_artwork_with_file_first(
+    ui: &mut egui::Ui,
+    track_path: &str,
+    texture_id: &str,
+    art_size: egui::Vec2,
+    is_playing: bool,
+) {
+    let art_bg = if is_playing {
+        ui.visuals().selection.bg_fill
+    } else {
+        ui.visuals().faint_bg_color
+    };
+
+    let path = Path::new(track_path);
+    if let Some(art_path) = discover_artwork_for_track(path) {
+        if let Some(texture) = get_cached_artwork_texture(ui.ctx(), &art_path, texture_id) {
+            ui.image(&texture, art_size);
+            return;
+        }
+    }
+
+    if let Some(texture) = get_cached_embedded_artwork_texture(ui.ctx(), path, texture_id) {
+        ui.image(&texture, art_size);
+        return;
+    }
+
+    let (art_rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
+    ui.painter().rect_filled(art_rect, 4.0, art_bg);
+    ui.painter().text(
+        art_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "ART",
+        egui::TextStyle::Small.resolve(ui.style()),
+        ui.visuals().text_color(),
+    );
+}
+
 /// トラックの表示情報（タイトル、アーティスト、アルバム）を解決する。
 /// 
 /// 以下の順序で情報を取得する：
