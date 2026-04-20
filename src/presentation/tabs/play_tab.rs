@@ -17,9 +17,7 @@ use std::time::{Duration, Instant};
 pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     // ========== ヘッダー部分 ==========
     ui.heading("Play");
-    ui.label("Enter a file path or select a queued track, then press Play.");
-    ui.add_space(4.0);
-    
+
     // キーボードショートカットの処理を登録
     // - スペースキー：再生/一時停止の切り替え
     // - ←/→キー：10秒単位でのシーク（長押しで連続シーク）
@@ -80,7 +78,10 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         app.save_state();
     }
 
-    // ========== LRCオーバーレイ設定 ==========
+    // ========== 歌詞表示セクション ==========
+    ui.separator();
+    ui.heading("Lyrics");
+
     // LRCオーバーレイ：アルバムアートワーク上に歌詞を重ねて表示する機能
     let mut lrc_overlay_changed = false;
     ui.horizontal(|ui| {
@@ -91,10 +92,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     if lrc_overlay_changed {
         app.save_state();
     }
-
-    // ========== 歌詞表示セクション ==========
-    ui.separator();
-    ui.heading("Lyrics");
     
     if app.lyrics_files.is_empty() {
         ui.label("No lyrics files discovered for the current track.");
@@ -139,10 +136,41 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
         if let Some(texture) = display_texture {
             let available = ui.available_size();
-            // アートワークの表示サイズを計算
-            // - 画面サイズの100%を最大とする
-            // - 最小320px、最大1080pxの範囲に収める
-            let max_side = (available.x.min(available.y) * 1.0).clamp(320.0, 1080.0);
+            // 画面内で他UIを除いた残り領域をアートワークに使うため、
+            // 下部のコントロールとラベルの高さを見積もる。
+            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+            let item_spacing = ui.spacing().item_spacing.y;
+            let button_height = ui.spacing().interact_size.y;
+            let separator_height = 8.0;
+            let mut reserved_rows = 1.0; // Exists ラベル
+            if app.play_title.is_some() {
+                reserved_rows += 1.0;
+            }
+            if app.play_artist.is_some() {
+                reserved_rows += 1.0;
+            }
+            if app.play_album.is_some() {
+                reserved_rows += 1.0;
+            }
+            if app.play_path.is_empty() == false {
+                reserved_rows += 1.0; // Filename
+            }
+            reserved_rows += 1.0; // Duration / unknown
+            reserved_rows += 1.0; // Lyrics offset row
+            reserved_rows += 1.0; // Slider row
+            reserved_rows += 1.0; // Current position
+            reserved_rows += 1.0; // Queue selection label
+            reserved_rows += 1.0; // Queue count label
+
+            let reserved_vertical = 12.0
+                + reserved_rows * (line_height + item_spacing)
+                + button_height
+                + separator_height * 3.0
+                + item_spacing * 2.0;
+
+            let max_side = available.x
+                .min((available.y - reserved_vertical).max(100.0))
+                .clamp(100.0, 1080.0);
             let mut image_size = texture.size_vec2();
             let scale = (max_side / image_size.x).min(max_side / image_size.y);
             image_size *= scale;
