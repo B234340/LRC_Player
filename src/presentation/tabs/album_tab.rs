@@ -165,9 +165,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         let mut grid_visible_rect: Option<egui::Rect> = None;   // 表示中のグリッド領域
 
         // ========== カードレイアウトの寸法設定 ==========
-        let card_width = 185.0_f32;           // カードの幅
-        let grid_spacing_x = 10.0_f32;        // カード間の横方向余白
-        let grid_spacing_y = 10.0_f32;        // カード間の縦方向余白
+        let card_width = 210.0_f32;           // カードの幅
+        let grid_spacing_x = 15.0_f32;        // カード間の横方向余白
+        let grid_spacing_y = 15.0_f32;        // カード間の縦方向余白
         
         // Frame::groupは内部マージンを追加するため、右端のクリッピングを避けるための余裕分
         let card_outer_extra_x = 16.0_f32;
@@ -218,9 +218,10 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
                             // カードの描画
                             let card_response = frame.show(ui, |ui| {
+                                ui.set_width(card_width);
                                 ui.set_min_width(card_width);
                                 ui.set_max_width(card_width);
-                                ui.vertical(|ui| {
+                                ui.vertical_centered(|ui| {
                                     // --- アルバムアートワークの表示 ---
                                     let art_size = egui::vec2(card_width - 16.0, card_width - 16.0);
                                     if let Some(texture) = app.album_artwork_texture(album.title.as_str()) {
