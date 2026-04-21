@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
     use lrc_player::application::dto::StateDto;
+    use lrc_player::domain::model::PlaybackMode;
     use lrc_player::infrastructure::persistence::state_file::StateFile;
-    use anyhow::Result;
-    use lrc_player::application::repositories::state_repository::*;
+    use lrc_player::presentation::egui_app::ArtistViewMode;
     use tempfile::tempdir;
 
     #[test]
@@ -21,9 +21,14 @@ mod tests {
             scan_parsed: None,
             scan_registered: None,
             scan_targets: Vec::new(),
+            scan_lrc_targets: Vec::new(),
             scan_excludes: Vec::new(),
             queue_tracks: Vec::new(),
             selected_queue_index: None,
+            queue_playback_mode: PlaybackMode::Sequential,
+            artist_view_mode: ArtistViewMode::Artist,
+            lrc_overlay_enabled: false,
+            side_panel_expanded: true,
             favorite_directories: Vec::new(),
         };
         store.save(&original).unwrap();

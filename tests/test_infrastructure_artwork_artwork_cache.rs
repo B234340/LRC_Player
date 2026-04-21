@@ -1,11 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use anyhow::{Context, Result};
-    use image::{io::Reader as ImageReader, DynamicImage};
-    use std::collections::{HashMap, VecDeque};
-    use std::path::Path;
-    use lrc_player::infrastructure::artwork::artwork_cache::*;
     use image::ImageBuffer;
+    use lrc_player::infrastructure::artwork::artwork_cache::*;
     use tempfile::tempdir;
 
     #[test]

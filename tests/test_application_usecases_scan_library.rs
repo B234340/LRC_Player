@@ -1,9 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use lrc_player::application::repositories::ScanGateway;
-    use lrc_player::infrastructure::scan::{ScanHandle, ScanOptions};
-    use anyhow::Result;
-    use std::path::PathBuf;
     use lrc_player::application::usecases::scan_library::*;
     use lrc_player::infrastructure::persistence::MetaCache;
     use lrc_player::infrastructure::scan::ScanCoordinator;

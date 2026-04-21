@@ -2,8 +2,7 @@
 mod tests {
     use std::fs;
     use std::fs::File;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use lrc_player::infrastructure::scan::file_scanner::*;
     use tempfile::tempdir;
 

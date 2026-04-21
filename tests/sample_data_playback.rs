@@ -23,7 +23,7 @@ impl TestOutput {
 
 impl AudioOutput for TestOutput {
     fn start(&mut self, format: AudioFormat) -> anyhow::Result<AudioFormat> {
-        self.format = Some(format.clone());
+        self.format = Some(format);
         Ok(format)
     }
 
@@ -82,7 +82,7 @@ fn sample_data_directory_access_and_playback() {
         })
         .collect();
 
-    assert!(lrc_files.len() >= 1, "sample_data directory must contain at least one .lrc file");
+    assert!(!lrc_files.is_empty(), "sample_data directory must contain at least one .lrc file");
 
     let first_lrc = &lrc_files[0];
     let contents = std::fs::read_to_string(first_lrc).unwrap();
@@ -131,7 +131,7 @@ fn sample_data_lrc_metadata_and_playback() {
 
     write_wav(&track_path, &[0, 32767, -32768, 12345, 0, 0], 44100, 1);
 
-    let discovered = Lyrics::discover_for_track(&track_path);
+    let discovered = Lyrics::discover_for_track(&track_path, &[]);
     assert_eq!(discovered.len(), 1);
     assert_eq!(discovered[0], lrc_path.canonicalize().unwrap());
 

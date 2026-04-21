@@ -1,8 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use lrc_player::infrastructure::scan::io_worker::{spawn_io_worker, Progress, ScanHandle, ScanOptions};
-    use anyhow::Result;
-    use tokio::sync::broadcast;
+    use lrc_player::infrastructure::scan::io_worker::ScanOptions;
     use lrc_player::infrastructure::scan::scan_worker::*;
     use std::fs::File;
     use tempfile::tempdir;

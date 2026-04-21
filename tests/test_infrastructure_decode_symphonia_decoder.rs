@@ -1,13 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
     use std::path::Path;
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::default::get_probe;
-    use lrc_player::infrastructure::decode::DecodedSource;
     use lrc_player::infrastructure::decode::symphonia_decoder::*;
     use std::fs::File;
     use std::io::Write;

@@ -1,11 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use lrc_player::application::dto::LibraryDirectoryDto;
-    use anyhow::Context;
-    use directories::ProjectDirs;
-    use rusqlite::{params, Connection, OpenFlags};
-    use std::collections::HashSet;
-    use std::path::{Path, PathBuf, MAIN_SEPARATOR};
     use lrc_player::infrastructure::persistence::meta_cache::*;
 
     #[test]
@@ -101,6 +95,8 @@ mod tests {
                 "track-1",
                 Some("Song 1"),
                 Some("Artist"),
+                None,
+                None,
                 Some("Album"),
                 None,
                 100,
@@ -153,6 +149,8 @@ mod tests {
                 "track-a",
                 Some("Song A"),
                 Some("Artist A"),
+                None,
+                None,
                 Some("Album X"),
                 None,
                 100,
@@ -163,6 +161,8 @@ mod tests {
                 "track-b",
                 Some("Song B"),
                 Some("Artist B"),
+                None,
+                None,
                 Some("Album X"),
                 None,
                 101,
@@ -173,6 +173,8 @@ mod tests {
                 "track-c",
                 Some("Song C"),
                 Some("Artist C"),
+                None,
+                None,
                 Some("Album Y"),
                 None,
                 102,
@@ -281,6 +283,8 @@ mod tests {
                 "track-a",
                 Some("Song A"),
                 Some("Artist B"),
+                None,
+                None,
                 Some("Album X"),
                 None,
                 100,
@@ -291,6 +295,8 @@ mod tests {
                 "track-b",
                 Some("Song B"),
                 Some("Artist A"),
+                None,
+                None,
                 Some("Album Y"),
                 None,
                 101,
@@ -301,6 +307,8 @@ mod tests {
                 "track-c",
                 Some("Song C"),
                 Some("Artist B"),
+                None,
+                None,
                 Some("Album X"),
                 None,
                 102,
@@ -323,6 +331,8 @@ mod tests {
                 "track-a",
                 Some("Song A"),
                 Some("Artist A"),
+                None,
+                None,
                 Some("Album X"),
                 None,
                 100,
@@ -333,6 +343,8 @@ mod tests {
                 "track-b",
                 Some("Song B"),
                 Some("Artist A"),
+                None,
+                None,
                 Some("Album Y"),
                 None,
                 101,
@@ -343,6 +355,8 @@ mod tests {
                 "track-c",
                 Some("Song C"),
                 Some("Artist B"),
+                None,
+                None,
                 Some("Album X"),
                 None,
                 102,
@@ -369,6 +383,8 @@ mod tests {
                 "track-a",
                 Some("Song A"),
                 Some("Artist A"),
+                None,
+                None,
                 Some("Album A"),
                 None,
                 100,
@@ -392,6 +408,8 @@ mod tests {
                 "track-b",
                 Some("Song B"),
                 Some("Artist B"),
+                None,
+                None,
                 Some("Album B"),
                 None,
                 101,

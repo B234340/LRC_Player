@@ -11,18 +11,13 @@ pub enum PlaybackState {
     Seeking,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PlaybackMode {
+    #[default]
     Sequential,
     RepeatOne,
     RepeatAll,
     Shuffle,
-}
-
-impl Default for PlaybackMode {
-    fn default() -> Self {
-        PlaybackMode::Sequential
-    }
 }
 
 impl fmt::Display for PlaybackMode {

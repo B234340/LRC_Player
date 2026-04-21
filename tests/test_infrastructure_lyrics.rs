@@ -2,7 +2,6 @@
 mod tests {
     use std::fs::File;
     use std::io::Write;
-    use std::path::PathBuf;
     use lrc_player::infrastructure::lyrics::*;
     use tempfile::tempdir;
 
@@ -44,7 +43,7 @@ mod tests {
         let lyric = dir.path().join("track.lrc");
         File::create(&lyric).unwrap();
 
-        let found = Lyrics::discover_for_track(&track);
+        let found = Lyrics::discover_for_track(&track, &[]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].file_name().unwrap(), "track.lrc");
     }

@@ -837,7 +837,7 @@ pub fn render_lrc_overlay(
                 let adjusted_time_ms =
                     adjusted_highlight_time_ms(lyrics, *line_index, current_time_ms);
                 current_line_remaining =
-                    highlight_width_for_line(ui, &line, adjusted_time_ms, font.clone());
+                    highlight_width_for_line(ui, line, adjusted_time_ms, font.clone());
             }
 
             let mut remaining = current_line_remaining;

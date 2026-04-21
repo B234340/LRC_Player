@@ -252,7 +252,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                 }
                                 
                                 // 右クリックコンテキストメニュー
-                                let response = response.context_menu(|ui| {
+                                response.clone().context_menu(|ui| {
                                     let menu_outcome = render_track_context_menu(
                                         ui,
                                         track,

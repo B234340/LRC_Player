@@ -14,6 +14,14 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::default::get_probe;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
+type AudioTagMeta = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
     pub fast: bool,
@@ -102,13 +110,7 @@ pub struct IoWorkerHandle {
 
 fn extract_audio_tags(
     path: &PathBuf,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-) {
+) -> AudioTagMeta {
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(_) => return (None, None, None, None, None),

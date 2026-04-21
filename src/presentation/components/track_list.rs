@@ -136,6 +136,7 @@ fn resolve_track_display(
 /// 
 /// # 戻り値
 /// ユーザー操作の結果を表す `TrackListOutcome`
+#[allow(clippy::too_many_arguments)]
 pub fn render_standard_track_list<F>(
     ui: &mut egui::Ui,
     app: &mut GuiApp,

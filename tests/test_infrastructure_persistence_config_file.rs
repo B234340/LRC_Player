@@ -1,10 +1,6 @@
 #[cfg(test)]
 mod tests {
     use lrc_player::config::{Config, Language, LogLevel, Theme};
-    use lrc_player::infrastructure::persistence::json_store::JsonStore;
-    use anyhow::{Context, Result};
-    use directories::ProjectDirs;
-    use std::path::{Path, PathBuf};
     use lrc_player::infrastructure::persistence::config_file::*;
     use tempfile::tempdir;
 

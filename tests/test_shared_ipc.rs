@@ -19,6 +19,7 @@
 
                 let request = ScanRequest {
                     paths: vec!["/tmp/scan1".into()],
+                    lrc_paths: Vec::new(),
                     excludes: Vec::new(),
                     cancel: false,
                 };

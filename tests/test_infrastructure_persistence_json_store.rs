@@ -1,11 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use anyhow::{Context, Result};
     use serde::{Deserialize, Serialize};
-    use std::fs;
-    use std::fs::File;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
     use lrc_player::infrastructure::persistence::json_store::*;
     use tempfile::tempdir;
 

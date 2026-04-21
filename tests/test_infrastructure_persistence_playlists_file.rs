@@ -1,10 +1,6 @@
 #[cfg(test)]
 mod tests {
     use lrc_player::application::dto::PlaylistDto;
-    use lrc_player::infrastructure::persistence::json_store::JsonStore;
-    use anyhow::{Context, Result};
-    use directories::ProjectDirs;
-    use std::path::{Path, PathBuf};
     use lrc_player::infrastructure::persistence::playlists_file::*;
     use tempfile::tempdir;
 

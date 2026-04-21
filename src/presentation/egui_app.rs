@@ -42,18 +42,13 @@ pub enum Tab {
     Settings,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtistViewMode {
+    #[default]
     Artist,
     AlbumArtist,
     Composer,
-}
-
-impl Default for ArtistViewMode {
-    fn default() -> Self {
-        ArtistViewMode::Artist
-    }
 }
 
 impl ArtistViewMode {
@@ -195,6 +190,7 @@ pub(crate) struct TrackDetailsDialog {
 }
 
 impl GuiApp {
+    #[allow(clippy::too_many_arguments)]
     fn default_app_vm(
         active_tab: Tab,
         config: &Config,
@@ -219,7 +215,7 @@ impl GuiApp {
             scan_parsed: None,
             scan_registered: None,
             scan_targets,
-            scan_lrc_targets: scan_lrc_targets,
+            scan_lrc_targets,
             scan_excludes,
             queue_tracks: Vec::new(),
             selected_queue_index: None,
@@ -506,7 +502,7 @@ impl GuiApp {
         indices.sort_unstable();
         indices.dedup();
         let current_removed = current_index
-            .map(|current| indices.iter().any(|&i| i == current))
+            .map(|current| indices.contains(&current))
             .unwrap_or(false);
 
         indices.reverse();
@@ -1289,7 +1285,7 @@ impl GuiApp {
         let index = self
             .current_queue_index
             .or(self.selected_queue_index)
-            .or_else(|| if self.queue.tracks.is_empty() { None } else { Some(0) });
+            .or(if self.queue.tracks.is_empty() { None } else { Some(0) });
         if let Some(index) = index {
             if let Some(path) = self.queue.tracks.get(index).cloned() {
                 self.select_queue_item_single(index);
@@ -1775,7 +1771,7 @@ impl GuiApp {
         });
         self.selected_lyrics_index = None;
         self.loaded_lyrics = None;
-        if let Some(_) = self.lyrics_files.get(0) {
+        if !self.lyrics_files.is_empty() {
             self.load_lyrics_file(0);
         }
     }
@@ -2101,19 +2097,15 @@ impl GuiApp {
                     self.request_play();
                     return;
                 }
-                if playback_failed {
-                    if self.current_queue_index.is_some() || self.selected_queue_index.is_some() {
-                        self.play_status = Some("Playback failed, skipping to next queued track".to_string());
-                        self.play_next();
-                        return;
-                    }
+                if playback_failed && (self.current_queue_index.is_some() || self.selected_queue_index.is_some()) {
+                    self.play_status = Some("Playback failed, skipping to next queued track".to_string());
+                    self.play_next();
+                    return;
                 }
-                if playback_finished {
-                    if self.current_queue_index.is_some() || self.selected_queue_index.is_some() {
-                        self.play_status = Some("Track finished, advancing to next queued track".to_string());
-                        self.play_next();
-                        return;
-                    }
+                if playback_finished && (self.current_queue_index.is_some() || self.selected_queue_index.is_some()) {
+                    self.play_status = Some("Track finished, advancing to next queued track".to_string());
+                    self.play_next();
+                    return;
                 }
             }
         }

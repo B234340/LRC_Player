@@ -1,10 +1,8 @@
 #[cfg(test)]
 mod tests {
     use lrc_player::application::dto::StateDto;
-    use lrc_player::infrastructure::persistence::json_store::JsonStore;
-    use anyhow::{Context, Result};
-    use directories::ProjectDirs;
-    use std::path::{Path, PathBuf};
+    use lrc_player::domain::model::PlaybackMode;
+    use lrc_player::presentation::egui_app::ArtistViewMode;
     use lrc_player::infrastructure::persistence::state_file::*;
     use tempfile::tempdir;
 
@@ -23,9 +21,14 @@ mod tests {
             scan_parsed: None,
             scan_registered: None,
             scan_targets: Vec::new(),
+            scan_lrc_targets: Vec::new(),
             scan_excludes: Vec::new(),
             queue_tracks: vec!["/tmp/track1.mp3".into(), "/tmp/track2.mp3".into()],
             selected_queue_index: Some(1),
+            queue_playback_mode: PlaybackMode::Sequential,
+            artist_view_mode: ArtistViewMode::Artist,
+            lrc_overlay_enabled: false,
+            side_panel_expanded: true,
             favorite_directories: Vec::new(),
         };
         file.save(&original).unwrap();

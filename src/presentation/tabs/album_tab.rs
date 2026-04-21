@@ -183,7 +183,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             .max(1.0) as usize;
 
         // 総行数を計算
-        let row_count = (albums.len() + cols - 1) / cols;
+        let row_count = albums.len().div_ceil(cols);
         let mut visible_album_titles: Vec<String> = Vec::new();  // 表示中のアルバムタイトル一覧
 
         // ========== スクロール可能なアルバムカードグリッドの表示 ==========

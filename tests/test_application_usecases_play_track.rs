@@ -1,9 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use lrc_player::application::ports::{AppAudioFormat, AudioOutputPort, DecoderPort, SampleFormat};
-    use lrc_player::infrastructure::audio::stream_adapter::StreamConverter;
+    use lrc_player::application::ports::AppAudioFormat;
     use anyhow::Result;
-    use std::path::PathBuf;
     use lrc_player::application::usecases::play_track::*;
     use lrc_player::infrastructure::decode::SymphoniaDecoder;
     use lrc_player::ports::audio_output::AudioOutput;
@@ -27,7 +25,7 @@ mod tests {
 
     impl AudioOutput for TestOutput {
         fn start(&mut self, format: AppAudioFormat) -> Result<AppAudioFormat> {
-            self.format = Some(format.clone());
+            self.format = Some(format);
             Ok(format)
         }
 

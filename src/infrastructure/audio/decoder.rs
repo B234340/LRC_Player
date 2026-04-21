@@ -1,11 +1,69 @@
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::default::get_probe;
+
+fn open_audio_source(
+    path: &Path,
+) -> Result<(
+    Box<dyn symphonia::core::formats::FormatReader>,
+    u32,
+    u16,
+    Box<dyn symphonia::core::codecs::Decoder>,
+)> {
+    let src = std::fs::File::open(path)?;
+    let mss = symphonia::core::io::MediaSourceStream::new(Box::new(src), Default::default());
+    let probe = get_probe().format(
+        &Default::default(),
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    )?;
+    let format = probe.format;
+
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.sample_rate.is_some())
+        .ok_or_else(|| anyhow::anyhow!("no audio track found"))?;
+    let codec_params = &track.codec_params;
+    let sample_rate = codec_params
+        .sample_rate
+        .ok_or_else(|| anyhow::anyhow!("sample rate unknown"))?
+        as u32;
+    let channels = codec_params
+        .channels
+        .as_ref()
+        .map(|c| c.count() as u16)
+        .unwrap_or(2);
+
+    let decoder = symphonia::default::get_codecs().make(codec_params, &DecoderOptions::default())?;
+    Ok((format, sample_rate, channels, decoder))
+}
+
+fn decode_packet_to_samples(
+    packet: &symphonia::core::formats::Packet,
+    decoder: &mut dyn symphonia::core::codecs::Decoder,
+) -> std::result::Result<Vec<f32>, symphonia::core::errors::Error> {
+    let audio_buf = decoder.decode(packet)?;
+    let frames = audio_buf.frames();
+    let mut sb = SampleBuffer::<f32>::new(
+        frames as symphonia::core::units::Duration,
+        *audio_buf.spec(),
+    );
+    sb.copy_interleaved_ref(audio_buf);
+    Ok(sb.samples().to_vec())
+}
 
 /// Spawn a decoder thread that decodes `path`, converts/resamples to the target format,
 /// and sends `Arc<Vec<f32>>` buffers directly to the provided `producer_tx`. Buffers are
 /// obtained from `pool` when provided to avoid allocations.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_decode_to_producer(
     path: PathBuf,
     chunk_frames: usize,
@@ -17,44 +75,10 @@ pub fn spawn_decode_to_producer(
     start_ms: Option<u64>,
     stop_rx: Receiver<()>,
 ) -> std::thread::JoinHandle<anyhow::Result<()>> {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::default::get_probe;
-
     std::thread::spawn(move || {
         let res: Result<()> = (|| {
-            let src = std::fs::File::open(&path)?;
-            let mss =
-                symphonia::core::io::MediaSourceStream::new(Box::new(src), Default::default());
-            let probe = get_probe().format(
-                &Default::default(),
-                mss,
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
-            )?;
-            let mut format = probe.format;
-
-            // Find first audio track
-            let track = format
-                .tracks()
-                .iter()
-                .find(|t| t.codec_params.sample_rate.is_some())
-                .ok_or_else(|| anyhow::anyhow!("no audio track found"))?;
-            let codec_params = &track.codec_params;
-            let sample_rate = codec_params
-                .sample_rate
-                .ok_or_else(|| anyhow::anyhow!("sample rate unknown"))?
-                as u32;
-            let channels = codec_params
-                .channels
-                .as_ref()
-                .map(|c| c.count() as u16)
-                .unwrap_or(2);
-
-            let mut decoder =
-                symphonia::default::get_codecs().make(codec_params, &DecoderOptions::default())?;
+            let (mut format, sample_rate, channels, mut decoder) =
+                open_audio_source(&path)?;
 
             // converter from src -> target
             let mut conv = crate::infrastructure::audio::stream_adapter::StreamConverter::new(
@@ -72,22 +96,15 @@ pub fn spawn_decode_to_producer(
 
             let mut samples_skipped = 0usize;
             if let Some(start_ms) = start_ms {
-                let target_frames = (start_ms as u64).saturating_mul(sample_rate as u64) / 1000;
+                let target_frames = start_ms.saturating_mul(sample_rate as u64) / 1000;
                 let target_samples = target_frames.saturating_mul(channels as u64) as usize;
                 while samples_skipped < target_samples {
                     if stop_rx.try_recv().is_ok() {
                         break;
                     }
                     match format.next_packet() {
-                        Ok(packet) => match decoder.decode(&packet) {
-                            Ok(audio_buf) => {
-                                let frames = audio_buf.frames();
-                                let mut sb = SampleBuffer::<f32>::new(
-                                    frames as symphonia::core::units::Duration,
-                                    *audio_buf.spec(),
-                                );
-                                sb.copy_interleaved_ref(audio_buf);
-                                let samples = sb.samples();
+                        Ok(packet) => match decode_packet_to_samples(&packet, decoder.as_mut()) {
+                            Ok(samples) => {
                                 let to_skip = (target_samples - samples_skipped).min(samples.len());
                                 samples_skipped += to_skip;
                                 if samples_skipped >= target_samples {
@@ -101,6 +118,8 @@ pub fn spawn_decode_to_producer(
                         Err(e) => return Err(anyhow::anyhow!(e.to_string())),
                     }
                 }
+                acc.clear();
+                read_idx = 0;
             }
 
             let mut stop_requested = false;
@@ -110,15 +129,9 @@ pub fn spawn_decode_to_producer(
                     break;
                 }
                 match format.next_packet() {
-                    Ok(packet) => match decoder.decode(&packet) {
-                        Ok(audio_buf) => {
-                            let frames = audio_buf.frames();
-                            let mut sb = SampleBuffer::<f32>::new(
-                                frames as symphonia::core::units::Duration,
-                                *audio_buf.spec(),
-                            );
-                            sb.copy_interleaved_ref(audio_buf);
-                            acc.extend_from_slice(sb.samples());
+                    Ok(packet) => match decode_packet_to_samples(&packet, decoder.as_mut()) {
+                        Ok(samples) => {
+                            acc.extend_from_slice(&samples);
 
                             while acc.len().saturating_sub(read_idx) >= src_target_len {
                                 let chunk_end = read_idx + src_target_len;
@@ -194,47 +207,12 @@ pub fn spawn_decode_stream(
     path: PathBuf,
     chunk_frames: usize,
 ) -> tokio::sync::mpsc::UnboundedReceiver<Result<DecodedChunk>> {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::default::get_probe;
-
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
     std::thread::spawn(move || {
         // All symphonia calls are done on this blocking thread; send chunks via the unbounded sender.
         let res: Result<()> = (|| {
-            let src = std::fs::File::open(&path)?;
-            let mss =
-                symphonia::core::io::MediaSourceStream::new(Box::new(src), Default::default());
-            let probe = get_probe().format(
-                &Default::default(),
-                mss,
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
-            )?;
-            let mut format = probe.format;
-
-            // Find first audio track with sample rate
-            let track = format
-                .tracks()
-                .iter()
-                .find(|t| t.codec_params.sample_rate.is_some())
-                .ok_or_else(|| anyhow::anyhow!("no audio track found"))?;
-            let codec_params = &track.codec_params;
-            let sample_rate = codec_params
-                .sample_rate
-                .ok_or_else(|| anyhow::anyhow!("sample rate unknown"))?
-                as u32;
-            let channels = codec_params
-                .channels
-                .as_ref()
-                .map(|c| c.count() as u16)
-                .unwrap_or(2);
-
-            let mut decoder =
-                symphonia::default::get_codecs().make(codec_params, &DecoderOptions::default())?;
+            let (mut format, sample_rate, channels, mut decoder) = open_audio_source(&path)?;
 
             // accumulator for interleaved samples
             let mut acc: Vec<f32> = Vec::new();
@@ -243,15 +221,9 @@ pub fn spawn_decode_stream(
 
             loop {
                 match format.next_packet() {
-                    Ok(packet) => match decoder.decode(&packet) {
-                        Ok(audio_buf) => {
-                            let frames = audio_buf.frames();
-                            let mut sb = SampleBuffer::<f32>::new(
-                                frames as symphonia::core::units::Duration,
-                                *audio_buf.spec(),
-                            );
-                            sb.copy_interleaved_ref(audio_buf);
-                            acc.extend_from_slice(sb.samples());
+                    Ok(packet) => match decode_packet_to_samples(&packet, decoder.as_mut()) {
+                        Ok(samples) => {
+                            acc.extend_from_slice(&samples);
 
                             while acc.len().saturating_sub(read_idx) >= target_len {
                                 let chunk_end = read_idx + target_len;

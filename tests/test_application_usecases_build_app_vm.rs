@@ -1,8 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use lrc_player::application::view_model::{AppVm, QueueVm};
+    use lrc_player::application::view_model::QueueVm;
     use lrc_player::application::usecases::build_app_vm::*;
     use lrc_player::application::dto::{LibraryDto, PlaylistDto, SettingsDto, StateDto};
+    use lrc_player::domain::model::PlaybackMode;
+    use lrc_player::presentation::egui_app::ArtistViewMode;
 
     #[test]
     fn builds_app_vm_from_dtos() {
@@ -19,6 +21,11 @@ mod tests {
             scan_excludes: vec!["/tmp/music/temp".into()],
             queue_tracks: vec!["/tmp/track1.mp3".into(), "/tmp/track2.mp3".into()],
             selected_queue_index: Some(0),
+            scan_lrc_targets: Vec::new(),
+            queue_playback_mode: PlaybackMode::Sequential,
+            artist_view_mode: ArtistViewMode::Artist,
+            lrc_overlay_enabled: false,
+            side_panel_expanded: true,
             favorite_directories: Vec::new(),
         };
         let playlists = vec![PlaylistDto {

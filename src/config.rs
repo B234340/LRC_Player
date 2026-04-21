@@ -13,34 +13,24 @@ pub enum Language {
     Zh,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
+    #[default]
     System,
     Light,
     Dark,
 }
 
-impl Default for Theme {
-    fn default() -> Self {
-        Theme::System
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
+    #[default]
     Info,
     Error,
     Warn,
     Debug,
     Trace,
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        LogLevel::Info
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -94,7 +84,7 @@ impl Config {
     pub fn set_taps_for_device(&mut self, device: String, taps: usize) {
         self.device_settings
             .entry(device)
-            .or_insert_with(DeviceSettings::default)
+            .or_default()
             .resampler_taps = taps;
     }
 

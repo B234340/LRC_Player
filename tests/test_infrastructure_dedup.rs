@@ -1,11 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
-    use blake3::Hasher;
-    use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom};
-    use std::path::PathBuf;
-    use tokio::sync::{mpsc, oneshot};
     use lrc_player::infrastructure::dedup::*;
     use std::io::Write;
     use tempfile::NamedTempFile;

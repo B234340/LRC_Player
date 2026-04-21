@@ -1,17 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use lrc_player::domain::services::DedupService;
     use lrc_player::infrastructure::persistence::MetaCache;
-    use lrc_player::infrastructure::scan::file_scanner::FileScanner;
-    use anyhow::Result;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::default::get_probe;
-    use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
     use lrc_player::infrastructure::scan::io_worker::*;
     use std::fs::File;
     use tempfile::tempdir;
