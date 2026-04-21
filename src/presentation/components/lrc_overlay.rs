@@ -10,14 +10,14 @@ const TIMING_GAP_SPACE_SCALE: f32 = 0.1;
 const TIMING_GAP_SPACE_CHAR: char = '\u{2009}'; // thin space
 
 /// 現在の再生時間に対応する歌詞の行インデックスを検索する関数
-/// 
+///
 /// # 引数
 /// * `lyrics` - 歌詞データ（LRCフォーマットをパースした構造体）
 /// * `current_time_ms` - 現在の再生時間（ミリ秒単位）
-/// 
+///
 /// # 戻り値
 /// 現在の再生時間に対応する歌詞行のインデックス。見つからない場合はNone
-/// 
+///
 /// # アルゴリズム
 /// 歌詞行を後ろから検索し、現在時刻以下の最大のタイムスタンプを持つ行を見つける
 /// これにより、曲の途中で一時停止した場合でも適切な行を表示できる
@@ -87,8 +87,7 @@ fn timing_gap_spaces(delta_ms: u64) -> usize {
     if delta_ms < TIMING_GAP_MS_PER_SPACE {
         0
     } else {
-        (delta_ms / TIMING_GAP_MS_PER_SPACE)
-            .min(TIMING_GAP_MAX_SPACES as u64) as usize
+        (delta_ms / TIMING_GAP_MS_PER_SPACE).min(TIMING_GAP_MAX_SPACES as u64) as usize
     }
 }
 
@@ -125,13 +124,13 @@ fn timed_display_text(line: &crate::infrastructure::lyrics::LyricLine) -> String
 /// 歌詞行のハイライト表示幅を計算する関数
 /// 歌詞のセグメント情報に基づいて、現在の再生位置に応じた進行状況を幅として返す
 /// カラオケのような進行表示を実現するための補助関数
-/// 
+///
 /// # 引数
 /// * `ui` - eguiのUIビルダー（フォントレイアウト計算に必要）
 /// * `line` - 歌詞行データ（テキストとタイミング情報を含む）
 /// * `current_time_ms` - 現在の再生時間（ミリ秒）
 /// * `font_id` - 使用するフォント（テキスト幅計算に使用）
-/// 
+///
 /// # 戻り値
 /// ハイライト表示する幅（ピクセル単位）
 /// セグメントの進行度に応じて、部分的にハイライトされる
@@ -147,7 +146,11 @@ fn highlight_width_for_line(
     // テキスト全体の幅を計算（ハイライト最大値の基準）
     let full_text_width = ui.fonts(|fonts| {
         let mut job = egui::text::LayoutJob::default();
-        job.append(&display_text, 0.0, egui::TextFormat::simple(font_id.clone(), text_color));
+        job.append(
+            &display_text,
+            0.0,
+            egui::TextFormat::simple(font_id.clone(), text_color),
+        );
         fonts.layout_job(job).size().x
     });
 
@@ -173,7 +176,11 @@ fn highlight_width_for_line(
 
         let width = ui.fonts(|fonts| {
             let mut job = egui::text::LayoutJob::default();
-            job.append(&timed_segment_text, 0.0, egui::TextFormat::simple(font_id.clone(), text_color));
+            job.append(
+                &timed_segment_text,
+                0.0,
+                egui::TextFormat::simple(font_id.clone(), text_color),
+            );
             fonts.layout_job(job).size().x
         });
 
@@ -261,7 +268,11 @@ fn split_into_two_rows(
     let text_color = egui::Color32::WHITE;
     let total_width = ui.fonts(|fonts| {
         let mut job = egui::text::LayoutJob::default();
-        job.append(text, 0.0, egui::TextFormat::simple(font.clone(), text_color));
+        job.append(
+            text,
+            0.0,
+            egui::TextFormat::simple(font.clone(), text_color),
+        );
         fonts.layout_job(job).size().x
     });
 
@@ -296,7 +307,11 @@ fn split_into_two_rows(
         let prefix = &text[..split_idx];
         let prefix_width = ui.fonts(|fonts| {
             let mut job = egui::text::LayoutJob::default();
-            job.append(prefix, 0.0, egui::TextFormat::simple(font.clone(), text_color));
+            job.append(
+                prefix,
+                0.0,
+                egui::TextFormat::simple(font.clone(), text_color),
+            );
             fonts.layout_job(job).size().x
         });
         if prefix_width > max_width {
@@ -318,8 +333,18 @@ fn split_into_two_rows(
 
     if let Some(split_idx) = best_whitespace_split.or(fallback_whitespace_split) {
         let prefix = text[..split_idx].trim_end().to_string();
-        let remainder = if split_idx < text.len() && text[split_idx..].chars().next().map(|ch| ch.is_whitespace()).unwrap_or(false) {
-            let ws_len = text[split_idx..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(0);
+        let remainder = if split_idx < text.len()
+            && text[split_idx..]
+                .chars()
+                .next()
+                .map(|ch| ch.is_whitespace())
+                .unwrap_or(false)
+        {
+            let ws_len = text[split_idx..]
+                .chars()
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(0);
             text[split_idx + ws_len..].trim_start().to_string()
         } else {
             text[split_idx..].to_string()
@@ -337,7 +362,11 @@ fn split_into_two_rows(
         let prefix = &text[..idx + ch.len_utf8()];
         let prefix_width = ui.fonts(|fonts| {
             let mut job = egui::text::LayoutJob::default();
-            job.append(prefix, 0.0, egui::TextFormat::simple(font.clone(), text_color));
+            job.append(
+                prefix,
+                0.0,
+                egui::TextFormat::simple(font.clone(), text_color),
+            );
             fonts.layout_job(job).size().x
         });
         if prefix_width > max_width {
@@ -366,7 +395,11 @@ fn split_into_two_rows(
         let candidate = &text[..idx + ch.len_utf8()];
         let width = ui.fonts(|fonts| {
             let mut job = egui::text::LayoutJob::default();
-            job.append(candidate, 0.0, egui::TextFormat::simple(font.clone(), text_color));
+            job.append(
+                candidate,
+                0.0,
+                egui::TextFormat::simple(font.clone(), text_color),
+            );
             fonts.layout_job(job).size().x
         });
         if width > max_width {
@@ -402,7 +435,11 @@ fn find_split_at_char_width(
         let candidate = &text[..idx + ch.len_utf8()];
         let width = ui.fonts(|fonts| {
             let mut job = egui::text::LayoutJob::default();
-            job.append(candidate, 0.0, egui::TextFormat::simple(font.clone(), egui::Color32::WHITE));
+            job.append(
+                candidate,
+                0.0,
+                egui::TextFormat::simple(font.clone(), egui::Color32::WHITE),
+            );
             fonts.layout_job(job).size().x
         });
 
@@ -428,7 +465,11 @@ fn split_into_three_rows(
 ) -> Option<Vec<String>> {
     let total_width = ui.fonts(|fonts| {
         let mut job = egui::text::LayoutJob::default();
-        job.append(text, 0.0, egui::TextFormat::simple(font.clone(), egui::Color32::WHITE));
+        job.append(
+            text,
+            0.0,
+            egui::TextFormat::simple(font.clone(), egui::Color32::WHITE),
+        );
         fonts.layout_job(job).size().x
     });
 
@@ -454,7 +495,11 @@ fn split_into_three_rows(
             let prefix = &text[..split_idx];
             let width = ui.fonts(|fonts| {
                 let mut job = egui::text::LayoutJob::default();
-                job.append(prefix, 0.0, egui::TextFormat::simple(font.clone(), egui::Color32::WHITE));
+                job.append(
+                    prefix,
+                    0.0,
+                    egui::TextFormat::simple(font.clone(), egui::Color32::WHITE),
+                );
                 fonts.layout_job(job).size().x
             });
             whitespace_positions.push((split_idx, width));
@@ -504,13 +549,8 @@ fn split_into_three_rows(
     let first_split = find_split_at_char_width(ui, text, font.clone(), target_one, max_width);
     if let Some(first_len) = first_split {
         let remainder = &text[first_len..];
-        let second_split = find_split_at_char_width(
-            ui,
-            remainder,
-            font.clone(),
-            target_one,
-            max_width,
-        );
+        let second_split =
+            find_split_at_char_width(ui, remainder, font.clone(), target_one, max_width);
         if let Some(offset) = second_split {
             let second_len = first_len + offset;
             let first = text[..first_len].to_string();
@@ -523,12 +563,7 @@ fn split_into_three_rows(
     None
 }
 
-fn split_into_rows(
-    ui: &egui::Ui,
-    text: &str,
-    font: egui::FontId,
-    max_width: f32,
-) -> Vec<String> {
+fn split_into_rows(ui: &egui::Ui, text: &str, font: egui::FontId, max_width: f32) -> Vec<String> {
     let rows = split_into_two_rows(ui, text, font.clone(), max_width);
     if rows.len() != 2 {
         return rows;
@@ -537,7 +572,11 @@ fn split_into_rows(
     let remainder = &rows[1];
     let remainder_width = ui.fonts(|fonts| {
         let mut job = egui::text::LayoutJob::default();
-        job.append(remainder, 0.0, egui::TextFormat::simple(font.clone(), egui::Color32::WHITE));
+        job.append(
+            remainder,
+            0.0,
+            egui::TextFormat::simple(font.clone(), egui::Color32::WHITE),
+        );
         fonts.layout_job(job).size().x
     });
 
@@ -557,18 +596,23 @@ fn split_into_rows(
 /// LRCオーバーレイを描画する関数
 /// アルバムアートの上に歌詞を半透明のオーバーレイとして表示する
 /// ミュージックビデオのような視覚効果を実現
-/// 
+///
 /// # 引数
 /// * `ui` - eguiのUIビルダー
 /// * `rect` - 描画領域の矩形（通常はアルバムアート画像の領域）
 /// * `lyrics` - 歌詞データ
 /// * `current_time_ms` - 現在の再生時間（ミリ秒）
-pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, current_time_ms: u64) {
+pub fn render_lrc_overlay(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    lyrics: &Lyrics,
+    current_time_ms: u64,
+) {
     let highlighted_index = find_current_lyric_line_index(lyrics, current_time_ms);
     let animated_center_line = highlighted_index
         .map(|index| animated_center_line_index(lyrics, current_time_ms, index))
         .unwrap_or(0.0);
-    let center_index = animated_center_line.round() as usize;
+    let center_index = highlighted_index.unwrap_or(0);
     let start = center_index.saturating_sub(3);
     let end = (center_index + 3).min(lyrics.lines.len().saturating_sub(1));
     let mut overlay_lines = Vec::new();
@@ -599,6 +643,7 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
         fonts.layout_job(job).size().y
     });
     let extra_spacing = non_highlight_line_height; // ハイライト行の前後に1行分のスペースを追加
+    let group_spacing = line_spacing + extra_spacing;
 
     // 各行の Galley（テキストレイアウト情報）を先に作成してトータル高さを計算する
     // これにより中央揃えが正確になる
@@ -620,12 +665,17 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
         let is_current_line = highlighted_index == Some(absolute_index);
         for (row_index, row_text) in row_texts.into_iter().enumerate() {
             let mut job = egui::text::LayoutJob::default();
-            job.append(&row_text, 0.0, egui::TextFormat::simple(font.clone(), text_color));
+            job.append(
+                &row_text,
+                0.0,
+                egui::TextFormat::simple(font.clone(), text_color),
+            );
             job.wrap.max_width = wrap_width;
             job.break_on_newline = true;
 
             let galley = ui.ctx().fonts(|fonts| fonts.layout_job(job));
-            let align_right = (row_count == 2 && row_index == 1) || (row_count == 3 && row_index == 2);
+            let align_right =
+                (row_count == 2 && row_index == 1) || (row_count == 3 && row_index == 2);
             let align_center = row_count == 3 && row_index == 1;
             render_rows.push((
                 galley,
@@ -641,32 +691,81 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
         }
     }
 
-    // 行間スペースを含めた総高さを計算
-    let mut total_height = 0.0;
+    let mut row_tops = Vec::with_capacity(render_rows.len());
+    let mut current_row_y = 0.0;
     for i in 0..render_rows.len() {
+        row_tops.push(current_row_y);
         let galley_size = render_rows[i].0.size();
-        total_height += galley_size.y;
+        current_row_y += galley_size.y;
         if i + 1 < render_rows.len() {
-            let current_is_current = render_rows[i].2;
-            let next_is_current = render_rows[i + 1].2;
-            total_height += line_spacing + if current_is_current || next_is_current {
-                extra_spacing
+            let current_line_index = render_rows[i].6;
+            let next_line_index = render_rows[i + 1].6;
+            current_row_y += if current_line_index == next_line_index {
+                line_spacing
             } else {
-                0.0
+                group_spacing
             };
         }
     }
 
-    // 中央揃えで描画開始位置を計算
-    let mut y = rect.center().y - total_height / 2.0;
+    let mut group_positions = Vec::new();
+    let mut group_start = 0;
+    while group_start < render_rows.len() {
+        let line_index = render_rows[group_start].6;
+        let group_top = row_tops[group_start];
+        let mut group_height = 0.0;
+        let mut idx = group_start;
+        while idx < render_rows.len() && render_rows[idx].6 == line_index {
+            group_height += render_rows[idx].0.size().y;
+            if idx + 1 < render_rows.len() && render_rows[idx + 1].6 == line_index {
+                group_height += line_spacing;
+            }
+            idx += 1;
+        }
+        group_positions.push((line_index, group_top, group_height));
+        group_start = idx;
+    }
+
+    let current_group_offset = highlighted_index.and_then(|current_index| {
+        group_positions
+            .iter()
+            .find(|(line_index, _, _)| *line_index == current_index)
+            .map(|(_, top, height)| rect.center().y - height / 2.0 - top)
+    });
+    let next_group_offset = highlighted_index.and_then(|current_index| {
+        group_positions
+            .iter()
+            .find(|(line_index, _, _)| *line_index == current_index + 1)
+            .map(|(_, top, height)| rect.center().y - height / 2.0 - top)
+    });
+
+    let y_offset = if let Some(current_index) = highlighted_index {
+        let base_offset = current_group_offset.unwrap_or(0.0);
+        let target_offset = next_group_offset.unwrap_or(base_offset);
+        let t = (animated_center_line - current_index as f32).clamp(0.0, 1.0);
+        base_offset + (target_offset - base_offset) * t
+    } else {
+        0.0
+    };
+
     let mut current_highlight_line_index: Option<usize> = None;
     let mut current_line_remaining: f32 = 0.0;
     for i in 0..render_rows.len() {
-        let (galley, line, is_current, font, align_right, align_center, line_index, row_index, row_count) = &render_rows[i];
+        let (
+            galley,
+            line,
+            is_current,
+            font,
+            align_right,
+            align_center,
+            line_index,
+            row_index,
+            row_count,
+        ) = &render_rows[i];
         let galley_size = galley.size();
         let base_x = rect.min.x + 12.0;
         let center_x = rect.min.x + 12.0 + (wrap_width - galley_size.x) / 2.0;
-        let mut text_pos = egui::pos2(center_x, y);
+        let mut text_pos = egui::pos2(center_x, y_offset + row_tops[i]);
         let is_next = highlighted_index.map(|idx| idx + 1) == Some(*line_index);
         if *is_current && *row_count > 1 {
             let target_x = if *row_index == 0 {
@@ -706,8 +805,10 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
         if *is_current {
             if current_highlight_line_index != Some(*line_index) {
                 current_highlight_line_index = Some(*line_index);
-                let adjusted_time_ms = adjusted_highlight_time_ms(lyrics, *line_index, current_time_ms);
-                current_line_remaining = highlight_width_for_line(ui, &line, adjusted_time_ms, font.clone());
+                let adjusted_time_ms =
+                    adjusted_highlight_time_ms(lyrics, *line_index, current_time_ms);
+                current_line_remaining =
+                    highlight_width_for_line(ui, &line, adjusted_time_ms, font.clone());
             }
 
             let mut remaining = current_line_remaining;
@@ -735,18 +836,5 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
 
         // テキストを描画
         ui.painter().galley(text_pos, galley.clone());
-
-        // 次の行のY位置を更新
-        y += galley_size.y;
-        if i + 1 < render_rows.len() {
-            let current_is_current = render_rows[i].2;
-            let next_is_current = render_rows[i + 1].2;
-            y += line_spacing + if current_is_current || next_is_current {
-                extra_spacing
-            } else {
-                0.0
-            };
-        }
     }
 }
-
