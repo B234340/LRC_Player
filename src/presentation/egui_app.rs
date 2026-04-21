@@ -20,7 +20,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardVisualKey};
 use symphonia::default::get_probe;
 use crate::localization::translate;
-use crate::presentation::components::play_actions;
+use crate::presentation::components::{play_actions, queue_actions};
 use crate::presentation::side_panel::output;
 use crate::presentation::tabs;
 use crate::shared::ipc as ipc_mod;
@@ -113,9 +113,9 @@ pub struct GuiApp {
     playback_status_receiver: Option<Receiver<String>>,
     playback_cancel_sender: Option<Sender<()>>,
     playback_thread_handle: Option<std::thread::JoinHandle<()>>,
-    playback_start_instant: Option<Instant>,
+    pub(crate) playback_start_instant: Option<Instant>,
     playback_start_ms: u64,
-    pending_play_request: bool,
+    pub(crate) pending_play_request: bool,
     active_output_device_name: Option<String>,
     last_seen_default_output_device_name: Option<String>,
     last_default_device_poll_at: Option<Instant>,
@@ -161,7 +161,7 @@ pub struct GuiApp {
     pub(crate) queue_item_input: String,
     pub(crate) selected_queue_index: Option<usize>,
     pub(crate) selected_queue_indices: Vec<usize>,
-    queue_selection_anchor: Option<usize>,
+    pub(crate) queue_selection_anchor: Option<usize>,
     pub(crate) queue_handle_hold_index: Option<usize>,
     pub(crate) queue_handle_hold_started_at: Option<Instant>,
     pub(crate) queue_drag_source_index: Option<usize>,
@@ -422,19 +422,11 @@ impl GuiApp {
     }
 
     pub(crate) fn add_queue_item(&mut self) {
-        let item = self.queue_item_input.trim().to_string();
-        if item.is_empty() {
-            return;
-        }
-        self.queue.tracks.push(item);
-        self.queue_item_input.clear();
-        self.update_app_vm();
+        queue_actions::add_queue_item(self);
     }
 
     pub(crate) fn clear_queue_selection(&mut self) {
-        self.selected_queue_index = None;
-        self.selected_queue_indices.clear();
-        self.queue_selection_anchor = None;
+        queue_actions::clear_queue_selection(self);
     }
 
     pub(crate) fn clear_library(&mut self) {
@@ -450,303 +442,47 @@ impl GuiApp {
     }
 
     pub(crate) fn select_queue_item_single(&mut self, index: usize) {
-        self.selected_queue_index = Some(index);
-        self.selected_queue_indices.clear();
-        self.selected_queue_indices.push(index);
-        self.queue_selection_anchor = Some(index);
+        queue_actions::select_queue_item_single(self, index);
     }
 
     pub(crate) fn toggle_queue_item_selection(&mut self, index: usize) {
-        if let Some(pos) = self.selected_queue_indices.iter().position(|&i| i == index) {
-            self.selected_queue_indices.remove(pos);
-            self.selected_queue_index = self.selected_queue_indices.last().copied();
-            if self.selected_queue_indices.is_empty() {
-                self.queue_selection_anchor = None;
-            }
-        } else {
-            self.selected_queue_indices.push(index);
-            self.selected_queue_index = Some(index);
-            if self.queue_selection_anchor.is_none() {
-                self.queue_selection_anchor = Some(index);
-            }
-        }
+        queue_actions::toggle_queue_item_selection(self, index);
     }
 
     pub(crate) fn select_queue_item_range_to(&mut self, index: usize) {
-        let anchor = self.queue_selection_anchor.or(self.selected_queue_index).unwrap_or(index);
-        let (start, end) = if anchor <= index {
-            (anchor, index)
-        } else {
-            (index, anchor)
-        };
-        self.selected_queue_indices = (start..=end).collect();
-        self.selected_queue_index = Some(index);
-        self.queue_selection_anchor = Some(anchor);
+        queue_actions::select_queue_item_range_to(self, index);
     }
 
     pub(crate) fn remove_selected_queue_items(&mut self) {
-        if self.selected_queue_indices.is_empty() {
-            if let Some(index) = self.selected_queue_index {
-                self.remove_queue_item(index);
-            }
-            return;
-        }
-
-        let current_index = self.current_queue_index;
-        let mut indices = self.selected_queue_indices.clone();
-        indices.sort_unstable();
-        indices.dedup();
-        let current_removed = current_index
-            .map(|current| indices.contains(&current))
-            .unwrap_or(false);
-
-        indices.reverse();
-        for index in indices.iter().copied() {
-            if index < self.queue.tracks.len() {
-                self.queue.tracks.remove(index);
-            }
-        }
-
-        let removed_before_current = current_index.map(|old_current| {
-            indices.iter().filter(|&&removed| removed < old_current).count()
-        });
-
-        self.clear_queue_selection();
-
-        if current_removed {
-            if self.queue.tracks.is_empty() {
-                self.clear_queue();
-                self.stop_playback_and_clear_play_tab();
-            } else if let Some(old_index) = current_index {
-                let next_index = if old_index < self.queue.tracks.len() {
-                    old_index
-                } else {
-                    self.queue.tracks.len() - 1
-                };
-                self.select_queue_item_single(next_index);
-                match self.playback_state {
-                    PlaybackState::Paused => {
-                        self.load_selected_queue_item_paused(next_index);
-                    }
-                    PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
-                        self.play_selected_queue_item();
-                    }
-                    PlaybackState::Stopped => {
-                        self.load_selected_queue_item_stopped(next_index);
-                    }
-                }
-            }
-        } else if let Some(old_current) = current_index {
-            let shift = removed_before_current.unwrap_or(0);
-            self.current_queue_index = Some(old_current.saturating_sub(shift));
-        }
-
-        self.update_app_vm();
+        queue_actions::remove_selected_queue_items(self);
     }
 
     pub(crate) fn clear_queue_handle_hold(&mut self) {
-        self.queue_handle_hold_index = None;
-        self.queue_handle_hold_started_at = None;
+        queue_actions::clear_queue_handle_hold(self);
     }
 
     pub(crate) fn cancel_queue_drag(&mut self) {
-        self.queue_drag_source_index = None;
-        self.clear_queue_handle_hold();
+        queue_actions::cancel_queue_drag(self);
     }
 
     pub(crate) fn move_queue_item_to(&mut self, from: usize, to: usize) {
-        if from >= self.queue.tracks.len() || to >= self.queue.tracks.len() || from == to {
-            return;
-        }
-
-        let item = self.queue.tracks.remove(from);
-        let insert_at = if to > from { to - 1 } else { to };
-        self.queue.tracks.insert(insert_at, item);
-
-        let remap_index = |idx: usize| {
-            if idx == from {
-                insert_at
-            } else if from < insert_at {
-                if idx > from && idx <= insert_at {
-                    idx - 1
-                } else {
-                    idx
-                }
-            } else if insert_at < from {
-                if idx >= insert_at && idx < from {
-                    idx + 1
-                } else {
-                    idx
-                }
-            } else {
-                idx
-            }
-        };
-
-        self.selected_queue_indices = self
-            .selected_queue_indices
-            .iter()
-            .copied()
-            .map(remap_index)
-            .collect();
-        self.selected_queue_indices.sort_unstable();
-        self.selected_queue_indices.dedup();
-
-        self.selected_queue_index = self.selected_queue_index.map(remap_index);
-        self.queue_selection_anchor = self.queue_selection_anchor.map(remap_index);
-        self.current_queue_index = self.current_queue_index.map(remap_index);
-
-        self.clear_queue_selection();
-        self.update_app_vm();
+        queue_actions::move_queue_item_to(self, from, to);
     }
 
     pub(crate) fn remove_queue_item(&mut self, index: usize) {
-        if index < self.queue.tracks.len() {
-            let current_removed = self.current_queue_index == Some(index);
-            self.queue.tracks.remove(index);
-            self.selected_queue_indices = self
-                .selected_queue_indices
-                .iter()
-                .filter_map(|&i| {
-                    if i == index {
-                        None
-                    } else if i > index {
-                        Some(i - 1)
-                    } else {
-                        Some(i)
-                    }
-                })
-                .collect();
-            if self.selected_queue_index == Some(index) {
-                self.selected_queue_index = self.selected_queue_indices.last().copied();
-            } else if let Some(selected) = self.selected_queue_index {
-                if selected > index {
-                    self.selected_queue_index = Some(selected - 1);
-                }
-            }
-            if let Some(anchor) = self.queue_selection_anchor {
-                self.queue_selection_anchor = if anchor == index {
-                    self.selected_queue_index
-                } else if anchor > index {
-                    Some(anchor - 1)
-                } else {
-                    Some(anchor)
-                };
-            }
-
-            if current_removed {
-                if self.queue.tracks.is_empty() {
-                    self.clear_queue();
-                    self.stop_playback_and_clear_play_tab();
-                } else {
-                    let next_index = if index < self.queue.tracks.len() {
-                        index
-                    } else {
-                        self.queue.tracks.len() - 1
-                    };
-                    self.select_queue_item_single(next_index);
-                    match self.playback_state {
-                        PlaybackState::Paused => {
-                            self.load_selected_queue_item_paused(next_index);
-                        }
-                        PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
-                            self.play_selected_queue_item();
-                        }
-                        PlaybackState::Stopped => {
-                            self.load_selected_queue_item_stopped(next_index);
-                        }
-                    }
-                }
-            } else {
-                self.current_queue_index = if let Some(current) = self.current_queue_index {
-                    if current > index {
-                        Some(current - 1)
-                    } else {
-                        Some(current)
-                    }
-                } else {
-                    None
-                };
-            }
-
-            self.update_app_vm();
-        }
+        queue_actions::remove_queue_item(self, index);
     }
 
     pub(crate) fn move_queue_item_up(&mut self, index: usize) {
-        if index == 0 || index >= self.queue.tracks.len() {
-            return;
-        }
-        self.queue.tracks.swap(index, index - 1);
-        self.select_queue_item_single(index - 1);
-        self.update_app_vm();
+        queue_actions::move_queue_item_up(self, index);
     }
 
     pub(crate) fn move_queue_item_down(&mut self, index: usize) {
-        if index + 1 >= self.queue.tracks.len() {
-            return;
-        }
-        self.queue.tracks.swap(index, index + 1);
-        self.select_queue_item_single(index + 1);
-        self.update_app_vm();
+        queue_actions::move_queue_item_down(self, index);
     }
 
     pub(crate) fn clear_queue(&mut self) {
-        self.queue.tracks.clear();
-        self.clear_queue_selection();
-        self.cancel_queue_drag();
-        self.current_queue_index = None;
-        self.update_app_vm();
-    }
-
-    fn stop_playback_and_clear_play_tab(&mut self) {
-        self.signal_playback_stop();
-        self.playback_state = PlaybackState::Stopped;
-        self.play_status = Some("Playback stopped".to_string());
-        self.play_path.clear();
-        self.play_position_ms = 0;
-        self.play_duration_ms = None;
-        self.play_title = None;
-        self.play_artist = None;
-        self.play_album = None;
-        self.play_artwork_handle = None;
-        self.play_artwork_source = None;
-        self.lyrics_files.clear();
-        self.loaded_lyrics = None;
-        self.selected_lyrics_index = None;
-        self.lyrics_offset_ms = 0;
-        self.playback_start_instant = None;
-        self.pending_play_request = false;
-    }
-
-    fn load_selected_queue_item_paused(&mut self, index: usize) {
-        if let Some(path) = self.queue.tracks.get(index).cloned() {
-            self.select_queue_item_single(index);
-            self.current_queue_index = Some(index);
-            self.play_path = path;
-            self.play_position_ms = 0;
-            self.playback_state = PlaybackState::Paused;
-            self.play_status = Some("Paused at start of selected track".to_string());
-            self.discover_lyrics_for_current_play_path();
-            self.refresh_play_metadata();
-            self.playback_start_instant = None;
-            self.pending_play_request = false;
-        }
-    }
-
-    fn load_selected_queue_item_stopped(&mut self, index: usize) {
-        if let Some(path) = self.queue.tracks.get(index).cloned() {
-            self.select_queue_item_single(index);
-            self.current_queue_index = Some(index);
-            self.play_path = path;
-            self.play_position_ms = 0;
-            self.playback_state = PlaybackState::Stopped;
-            self.play_status = Some("Stopped at start of selected track".to_string());
-            self.discover_lyrics_for_current_play_path();
-            self.refresh_play_metadata();
-            self.playback_start_instant = None;
-            self.pending_play_request = false;
-        }
+        queue_actions::clear_queue(self);
     }
 
     pub(crate) fn select_album(&mut self, album: Option<String>) {
@@ -812,7 +548,7 @@ impl GuiApp {
         }
     }
 
-    fn signal_playback_stop(&mut self) {
+    pub(crate) fn signal_playback_stop(&mut self) {
         if let Some(tx) = self.playback_cancel_sender.take() {
             let _ = tx.send(());
         }
@@ -823,7 +559,7 @@ impl GuiApp {
         let _ = self.playback_thread_handle.take();
     }
 
-    fn update_playback_position_from_clock(&mut self) {
+    pub(crate) fn update_playback_position_from_clock(&mut self) {
         if let Some(start_instant) = self.playback_start_instant {
             let elapsed = start_instant.elapsed();
             let elapsed_ms = elapsed.as_millis() as u64;
@@ -834,15 +570,6 @@ impl GuiApp {
                 self.play_position_ms = position;
             }
         }
-    }
-
-    pub(crate) fn pause_playback(&mut self) {
-        self.update_playback_position_from_clock();
-        self.signal_playback_stop();
-        self.playback_state = PlaybackState::Paused;
-        self.play_status = Some("Paused".to_string());
-        self.playback_start_instant = None;
-        self.pending_play_request = false;
     }
 
     fn monitor_default_output_device_hotplug(&mut self) {
@@ -1030,10 +757,6 @@ impl GuiApp {
 
     pub(crate) fn seek_to_position(&mut self) {
         play_actions::seek_to_position(self);
-    }
-
-    pub(crate) fn play_current_queue_item(&mut self) {
-        play_actions::play_current_queue_item(self);
     }
 
     pub(crate) fn play_next(&mut self) {

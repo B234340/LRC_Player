@@ -139,15 +139,24 @@ pub fn play_previous(app: &mut GuiApp) {
     }
 }
 
+pub fn pause_playback(app: &mut GuiApp) {
+    app.update_playback_position_from_clock();
+    app.signal_playback_stop();
+    app.playback_state = PlaybackState::Paused;
+    app.play_status = Some("Paused".to_string());
+    app.playback_start_instant = None;
+    app.pending_play_request = false;
+}
+
 pub fn toggle_play_pause(app: &mut GuiApp) {
     match app.playback_state {
         PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
-            app.pause_playback();
+            pause_playback(app);
         }
         PlaybackState::Paused | PlaybackState::Stopped => {
             if app.play_path.trim().is_empty() {
                 if !app.queue.tracks.is_empty() {
-                    app.play_current_queue_item();
+                    play_current_queue_item(app);
                     return;
                 }
                 app.play_status = Some("No track loaded".to_string());
