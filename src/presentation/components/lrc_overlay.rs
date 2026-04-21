@@ -626,7 +626,7 @@ pub fn render_lrc_overlay(
 
     // フォントサイズを計算（画面サイズに応じて動的に調整）
     let base_font_size = rect.height() * 0.04;
-    let heading_font_size = base_font_size * 1.5; // 現在行は大きく
+    let heading_font_size = base_font_size * 1.75; // 現在行は大きく
     let body_font_size = base_font_size;
     let wrap_width = rect.width() - 24.0; // 左右のパディングを確保
     let non_highlight_line_height = ui.ctx().fonts(|fonts| {
@@ -845,7 +845,13 @@ pub fn render_lrc_overlay(
             current_line_remaining = remaining;
         }
 
-        // テキストを描画
+        // 太字らしい見た目にするため、現在行は複製描画で重みを付ける
+        if *is_current {
+            let bold_offsets = [egui::vec2(-0.6, 0.0), egui::vec2(0.6, 0.0)];
+            for offset in bold_offsets {
+                ui.painter().galley(text_pos + offset, galley.clone());
+            }
+        }
         ui.painter().galley(text_pos, galley.clone());
     }
 }
