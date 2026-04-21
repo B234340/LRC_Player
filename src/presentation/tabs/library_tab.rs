@@ -1,5 +1,5 @@
 use crate::application::view_model::LibraryDirectoryVm;
-use crate::presentation::components::track_context_menu::render_track_context_menu;
+use crate::presentation::components::track_list::{render_standard_track_list, TrackActivation};
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
 
@@ -134,69 +134,32 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         } else {
             ui.group(|ui| {
                 ui.label("Left click: create queue from this list and play. Right click: common actions.");
-                
-                // トラック一覧を順に表示
-                for (index, track) in library.selected_directory_tracks.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        // --- お気に入り切り替えボタン（★/☆）---
-                        ui.vertical_centered(|ui| {
-                            let is_favorite = app.is_track_favorite(&track.title);
-                            let star_label = if is_favorite { "★" } else { "☆" };
-                            if ui
-                                .add_sized([22.0, 22.0], egui::Button::new(star_label))
-                                .on_hover_text("Toggle favorite")  // ホバー時のツールチップ
-                                .clicked()
-                            {
-                                app.toggle_favorite_track(&track.title);  // お気に入り状態を切り替え
-                            }
-                        });
-                        
-                        ui.add_space(4.0);  // 星ボタンとラベルの間隔
-                        
-                        // --- トラック選択ラベル ---
-                        ui.vertical(|ui| {
-                            let response = ui.selectable_label(false, &track.title);
-                            
-                            // 左クリック：リスト全体を再生キューに設定して再生開始
-                            if response.clicked() {
-                                pending_play_index = Some(index);
-                                pending_play_list = library
-                                    .selected_directory_tracks
-                                    .iter()
-                                    .map(|row| row.title.clone())
-                                    .collect();
-                            }
-                            
-                            // 右クリック：コンテキストメニューを表示
-                            response.context_menu(|ui| {
-                                let menu_outcome = render_track_context_menu(
-                                    ui,
-                                    &track.title,
-                                    &playlist_targets,
-                                    "Add to queue",  // キュー追加ボタンのラベル
-                                    |_, _| {},        // 追加メニュー項目なし
-                                );
-                                
-                                // メニュー操作の結果を収集
-                                if let Some(path) = menu_outcome.play_now_path {
-                                    pending_play_now_path = Some(path);
-                                }
-                                if let Some(path) = menu_outcome.next_path {
-                                    pending_next_path = Some(path);
-                                }
-                                if let Some(path) = menu_outcome.enqueue_path {
-                                    pending_enqueue_path = Some(path);
-                                }
-                                if let Some((target_index, path)) = menu_outcome.add_to_playlist {
-                                    pending_add_to_playlist = Some((target_index, path));
-                                }
-                                if let Some(path) = menu_outcome.show_details_path {
-                                    pending_show_details_path = Some(path);
-                                }
-                            });
-                        });
-                    });
-                }
+
+                let track_paths: Vec<String> = library
+                    .selected_directory_tracks
+                    .iter()
+                    .map(|row| row.id.clone())
+                    .collect();
+
+                let track_list_outcome = render_standard_track_list(
+                    ui,
+                    app,
+                    "library_directory_tracks",
+                    &track_paths,
+                    &playlist_targets,
+                    TrackActivation::SingleClick,
+                    24.0,
+                    Some(ui.available_height()),
+                    |_index, display| display.title.clone(),
+                );
+
+                pending_play_index = track_list_outcome.play_index;
+                pending_play_list = track_list_outcome.play_list;
+                pending_play_now_path = track_list_outcome.play_now_path;
+                pending_next_path = track_list_outcome.next_path;
+                pending_enqueue_path = track_list_outcome.enqueue_path;
+                pending_add_to_playlist = track_list_outcome.add_to_playlist;
+                pending_show_details_path = track_list_outcome.show_details_path;
             });
         }
     }

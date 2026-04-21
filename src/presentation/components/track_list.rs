@@ -42,6 +42,8 @@ pub struct TrackListOutcome {
     pub enqueue_path: Option<String>,
     /// プレイリストへの追加操作（プレイリストインデックス, トラックパス）
     pub add_to_playlist: Option<(usize, String)>,
+    /// 削除操作が発生したトラックのインデックス
+    pub remove_index: Option<usize>,
     /// 「詳細を表示」が選択されたトラックのパス
     pub show_details_path: Option<String>,
 }
@@ -260,4 +262,151 @@ where
     });
 
     outcome // ユーザー操作の結果を返却
+}
+
+/// アートワーク付きのトラックリストを描画する。
+///
+/// この関数は `render_standard_track_list` と同様の機能を提供しつつ、
+/// 各行にアートワークと汎用の右端アクションを追加できます。
+///
+/// # 引数
+/// * `ui` - egui の UI ビルダー
+/// * `app` - アプリケーション状態
+/// * `id_source` - スクロールエリアの識別子
+/// * `tracks` - 表示するトラックパスのリスト
+/// * `playlist_targets` - 追加先プレイリストの候補リスト
+/// * `activation` - クリック動作によるアクティベーション方法
+/// * `row_height` - 各行の高さ
+/// * `max_height` - リスト全体の最大高さ
+/// * `label_for` - 各トラック行のラベルを生成するクロージャ
+/// * `artwork_renderer` - アートワークを描画する関数
+/// * `trailing_actions` - 各行の右端に追加アクションを描画するクロージャ
+#[allow(clippy::too_many_arguments)]
+pub fn render_track_list_with_artwork<F, R>(
+    ui: &mut egui::Ui,
+    app: &mut GuiApp,
+    id_source: &str,
+    tracks: &[String],
+    playlist_targets: &[(usize, String)],
+    activation: TrackActivation,
+    row_height: f32,
+    max_height: Option<f32>,
+    mut label_for: F,
+    artwork_renderer: fn(&mut egui::Ui, &str, &str, egui::Vec2, bool),
+    mut trailing_actions: R,
+) -> TrackListOutcome
+where
+    F: FnMut(usize, &TrackDisplay) -> String,
+    R: FnMut(&mut egui::Ui, usize, &TrackDisplay, &str, &mut TrackListOutcome),
+{
+    let mut outcome = TrackListOutcome::default();
+    let mut metadata_cache: HashMap<String, (String, String, String)> = HashMap::new();
+    let meta_cache = MetaCache::open_default().ok();
+    let displayed_tracks = tracks.to_vec();
+
+    let mut render_rows = |ui: &mut egui::Ui| {
+        for (index, track) in tracks.iter().enumerate() {
+            let display = resolve_track_display(track, meta_cache.as_ref(), &mut metadata_cache);
+            let label = label_for(index, &display);
+            let is_playing = app.play_path == *track;
+
+            let mut frame = egui::Frame::group(ui.style());
+            if is_playing {
+                frame = frame
+                    .fill(ui.visuals().selection.bg_fill)
+                    .stroke(egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
+            }
+
+            frame.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let art_size = egui::vec2(row_height, row_height);
+                    let star_area_height = art_size.y;
+                    let vertical_pad = ((star_area_height - 22.0) * 0.5).max(0.0);
+
+                    let is_favorite = app.is_track_favorite(track);
+                    let star_label = if is_favorite { "★" } else { "☆" };
+                    let toggle_response = ui
+                        .allocate_ui_with_layout(
+                            egui::vec2(28.0, star_area_height),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                ui.add_space(vertical_pad);
+                                ui.add_sized([22.0, 22.0], egui::Button::new(star_label))
+                            },
+                        )
+                        .inner
+                        .on_hover_text("Toggle favorite");
+
+                    if toggle_response.clicked() {
+                        app.toggle_favorite_track(track);
+                    }
+
+                    ui.add_space(8.0);
+
+                    artwork_renderer(ui, track, &format!("artwork_{}_{}", id_source, index), art_size, is_playing);
+                    ui.add_space(8.0);
+
+                    ui.vertical(|ui| {
+                        let response = ui
+                            .selectable_label(false, label)
+                            .on_hover_text("Double click to play. Right click for actions.");
+
+                        let activated = match activation {
+                            TrackActivation::SingleClick => response.clicked(),
+                            TrackActivation::DoubleClick => response.double_clicked(),
+                        };
+
+                        if activated {
+                            outcome.play_index = Some(index);
+                            outcome.play_list = displayed_tracks.clone();
+                        }
+
+                        response.context_menu(|ui| {
+                            let menu_outcome = render_track_context_menu(
+                                ui,
+                                track,
+                                playlist_targets,
+                                "Add to queue",
+                                |_, _| {},
+                            );
+
+                            if let Some(path) = menu_outcome.play_now_path {
+                                outcome.play_now_path = Some(path);
+                            }
+                            if let Some(path) = menu_outcome.next_path {
+                                outcome.next_path = Some(path);
+                            }
+                            if let Some(path) = menu_outcome.enqueue_path {
+                                outcome.enqueue_path = Some(path);
+                            }
+                            if let Some(item) = menu_outcome.add_to_playlist {
+                                outcome.add_to_playlist = Some(item);
+                            }
+                            if let Some(path) = menu_outcome.show_details_path {
+                                outcome.show_details_path = Some(path);
+                            }
+                        });
+                    });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        trailing_actions(ui, index, &display, track, &mut outcome);
+                    });
+                });
+            });
+
+            ui.add_space(4.0);
+        }
+    };
+
+    let mut area = egui::ScrollArea::vertical()
+        .id_source(id_source)
+        .auto_shrink([false, false]);
+    if let Some(height) = max_height {
+        area = area.max_height(height);
+    }
+    area.show(ui, |ui| {
+        render_rows(ui);
+    });
+
+    outcome
 }

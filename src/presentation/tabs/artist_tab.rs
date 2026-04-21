@@ -1,12 +1,7 @@
-use crate::infrastructure::persistence::MetaCache;
-use crate::presentation::components::track_context_menu::render_track_context_menu;
-use crate::presentation::components::track_display::{
-    render_track_artwork_with_file_first,
-    resolve_track_display,
-};
+use crate::presentation::components::track_display::render_track_artwork_with_file_first;
+use crate::presentation::components::track_list::{render_track_list_with_artwork, TrackActivation};
 use crate::presentation::egui_app::{ArtistViewMode, GuiApp};
 use eframe::egui;
-use std::collections::HashMap;
 
 /// アーティスト一覧画面のUIを描画する関数
 /// 
@@ -184,135 +179,44 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                 ui.label("Double left click: create queue from this list and play. Right click: common actions.");
                                 ui.separator();
 
-                                // トラックパスのリストを作成
                                 let track_paths: Vec<String> = selected_artist_tracks
                                     .iter()
                                     .map(|track| track.id.clone())
                                     .collect();
-                                
-                                // メタデータキャッシュの準備
-                                let meta_cache = MetaCache::open_default().ok();
-                                let mut metadata_cache: HashMap<String, (String, String, String)> = HashMap::new();
+                                let current_play_path = app.play_path.clone();
 
-                                // スクロール可能なトラックリスト
-                                egui::ScrollArea::vertical()
-                                    .id_source("artist_tracks_scroll")
-                                    .auto_shrink([false, false])
-                                    .max_height(ui.available_height())
-                                    .show_rows(ui, 52.0, track_paths.len(), |ui, row_range| {
-                                        for track_index in row_range {
-                                            let track_path = &track_paths[track_index];
-                                            // トラックの表示情報を解決
-                                            let display = resolve_track_display(
-                                                track_path,
-                                                meta_cache.as_ref(),
-                                                &mut metadata_cache,
-                                            );
-                                            let is_playing = app.play_path == *track_path;  // 現在再生中かどうか
-
-                                            // 再生中トラックはハイライト表示
-                                            let mut frame = egui::Frame::group(ui.style());
-                                            if is_playing {
-                                                frame = frame
-                                                    .fill(ui.visuals().selection.bg_fill)
-                                                    .stroke(egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
-                                            }
-
-                                            frame.show(ui, |ui| {
-                                                ui.horizontal(|ui| {
-                                                    // --- お気に入り切り替えボタン（★/☆）---
-                                                    let is_favorite = app.is_track_favorite(track_path);
-                                                    let star_label = if is_favorite { "★" } else { "☆" };
-                                                    let star_area_height = 44.0_f32;
-                                                    let vertical_pad = ((star_area_height - 22.0_f32) * 0.5).max(0.0_f32);
-                                                    let toggle_response = ui
-                                                        .allocate_ui_with_layout(
-                                                            egui::vec2(28.0, star_area_height),
-                                                            egui::Layout::top_down(egui::Align::Center),
-                                                            |ui| {
-                                                                ui.add_space(vertical_pad);
-                                                                ui.add_sized([22.0, 22.0], egui::Button::new(star_label))
-                                                            },
-                                                        )
-                                                        .inner
-                                                        .on_hover_text("Toggle favorite");
-                                                    
-                                                    if toggle_response.clicked() {
-                                                        app.toggle_favorite_track(track_path);
-                                                    }
-
-                                                    ui.add_space(8.0);
-                                                    
-                                                    // --- アートワーク表示（44x44のサムネイル）---
-                                                    render_track_artwork_with_file_first(
-                                                        ui,
-                                                        track_path,
-                                                        &format!("artist_track_art_{}", track_index),
-                                                        egui::vec2(44.0, 44.0),
-                                                        is_playing,
-                                                    );
-                                                    ui.add_space(8.0);
-
-                                                    // --- トラック情報表示 ---
-                                                    ui.vertical(|ui| {
-                                                        // トラックタイトル（再生中の場合は [Playing] を付加）
-                                                        let title_text = if is_playing {
-                                                            format!("{} [Playing]", display.title)
-                                                        } else {
-                                                            display.title.clone()
-                                                        };
-                                                        
-                                                        // タイトルは通常より大きめのフォントサイズで表示
-                                                        let title_size = ui.style().text_styles[&egui::TextStyle::Body].size * 1.5;
-                                                        let response = ui
-                                                            .selectable_label(false, egui::RichText::new(title_text).size(title_size))
-                                                            .on_hover_text("Double click to play. Right click for actions.");
-                                                        
-                                                        // ダブルクリックで再生開始
-                                                        if response.double_clicked() {
-                                                            pending_play_index = Some(track_index);
-                                                            pending_play_list = track_paths.clone();
-                                                        }
-                                                        
-                                                        // 右クリックコンテキストメニュー
-                                                        response.context_menu(|ui| {
-                                                            let menu_outcome = render_track_context_menu(
-                                                                ui,
-                                                                track_path,
-                                                                &playlist_targets,
-                                                                "Add to queue",
-                                                                |_, _| {},
-                                                            );
-                                                            if let Some(path) = menu_outcome.play_now_path {
-                                                                pending_play_now_path = Some(path);
-                                                            }
-                                                            if let Some(path) = menu_outcome.next_path {
-                                                                pending_next_path = Some(path);
-                                                            }
-                                                            if let Some(path) = menu_outcome.enqueue_path {
-                                                                pending_enqueue_path = Some(path);
-                                                            }
-                                                            if let Some((target_index, path)) = menu_outcome.add_to_playlist {
-                                                                pending_add_to_playlist = Some((target_index, path));
-                                                            }
-                                                            if let Some(path) = menu_outcome.show_details_path {
-                                                                pending_show_details_path = Some(path);
-                                                            }
-                                                        });
-                                                    });
-
-                                                    // --- 右寄せ操作ボタン（Play）---
-                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                        if ui.button("Play").clicked() {
-                                                            pending_play_index = Some(track_index);
-                                                            pending_play_list = track_paths.clone();
-                                                        }
-                                                    });
-                                                });
-                                            });
-                                            ui.add_space(4.0);  // トラック間の余白
+                                let track_list_outcome = render_track_list_with_artwork(
+                                    ui,
+                                    app,
+                                    "artist_tracks_scroll",
+                                    &track_paths,
+                                    &playlist_targets,
+                                    TrackActivation::DoubleClick,
+                                    44.0,
+                                    Some(ui.available_height()),
+                                    |index, display| {
+                                        if current_play_path == display.path {
+                                            format!("{}: {} [Playing]", index + 1, display.title)
+                                        } else {
+                                            format!("{}: {}", index + 1, display.title)
                                         }
-                                    });
+                                    },
+                                    render_track_artwork_with_file_first,
+                                    |ui, index, _display, _track_path, outcome| {
+                                        if ui.button("Play").clicked() {
+                                            outcome.play_index = Some(index);
+                                            outcome.play_list = track_paths.clone();
+                                        }
+                                    },
+                                );
+
+                                pending_play_index = track_list_outcome.play_index;
+                                pending_play_list = track_list_outcome.play_list;
+                                pending_play_now_path = track_list_outcome.play_now_path;
+                                pending_next_path = track_list_outcome.next_path;
+                                pending_enqueue_path = track_list_outcome.enqueue_path;
+                                pending_add_to_playlist = track_list_outcome.add_to_playlist;
+                                pending_show_details_path = track_list_outcome.show_details_path;
                             }
                         } else {
                             // アーティストが選択されていない場合のメッセージ
