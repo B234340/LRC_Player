@@ -25,29 +25,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.label("Space: play/pause, ←/→: seek 10s (hold for continuous seek)");
     ui.separator();
 
-    // ========== 再生コントロールボタン ==========
-    ui.horizontal(|ui| {
-        // 「前の曲」ボタン：キューまたは履歴から前の曲を再生
-        if ui.button("Previous").clicked() {
-            app.play_previous();
-        }
-        
-        // 再生/一時停止ボタン：現在の状態に応じてラベルを動的に変更
-        let play_label = match app.playback_state {
-            crate::domain::model::PlaybackState::Playing => "Pause",   // 再生中 → 一時停止
-            crate::domain::model::PlaybackState::Paused => "Resume",   // 一時停止中 → 再開
-            _ => "Play",  // 停止中/バッファリング中など → 再生開始
-        };
-        if ui.button(play_label).clicked() {
-            app.toggle_play_pause();  // 再生状態を切り替え
-        }
-        
-        // 「次の曲」ボタン：キューまたは次のファイルを再生
-        if ui.button("Next").clicked() {
-            app.play_next();
-        }
-    });
-
     // ========== 再生モード選択 ==========
     // 再生モードの種類：
     // - Sequential：順番に再生（最後まで再生したら停止）
@@ -159,6 +136,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             reserved_rows += 1.0; // Lyrics offset row
             reserved_rows += 1.0; // Slider row
             reserved_rows += 1.0; // Current position
+            reserved_rows += 1.0; // Play comand
             reserved_rows += 1.0; // Queue selection label
             reserved_rows += 1.0; // Queue count label
 
@@ -275,6 +253,29 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             ui.label("Duration: unknown. Discover metadata to enable seek.");
         }
     }
+
+    // ========== 再生コントロールボタン ==========
+    ui.horizontal(|ui| {
+        // 「前の曲」ボタン：キューまたは履歴から前の曲を再生
+        if ui.button("Previous").clicked() {
+            app.play_previous();
+        }
+        
+        // 再生/一時停止ボタン：現在の状態に応じてラベルを動的に変更
+        let play_label = match app.playback_state {
+            crate::domain::model::PlaybackState::Playing => "Pause",   // 再生中 → 一時停止
+            crate::domain::model::PlaybackState::Paused => "Resume",   // 一時停止中 → 再開
+            _ => "Play",  // 停止中/バッファリング中など → 再生開始
+        };
+        if ui.button(play_label).clicked() {
+            app.toggle_play_pause();  // 再生状態を切り替え
+        }
+        
+        // 「次の曲」ボタン：キューまたは次のファイルを再生
+        if ui.button("Next").clicked() {
+            app.play_next();
+        }
+    });
 
     ui.separator();
     

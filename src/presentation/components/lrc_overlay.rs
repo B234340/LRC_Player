@@ -583,8 +583,8 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
     ui.painter().rect_filled(rect, 0.0, background);
 
     // フォントサイズを計算（画面サイズに応じて動的に調整）
-    let base_font_size = (rect.height() * 0.04).clamp(16.0, 44.0);
-    let heading_font_size = (base_font_size * 2.5).clamp(18.0, 52.0); // 現在行は大きく
+    let base_font_size = rect.height() * 0.04;
+    let heading_font_size = base_font_size * 2.0; // 現在行は大きく
     let body_font_size = base_font_size;
     let wrap_width = rect.width() - 48.0; // 左右のパディングを確保
     let line_spacing = 6.0;
