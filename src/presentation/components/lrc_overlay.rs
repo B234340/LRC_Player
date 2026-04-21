@@ -564,29 +564,40 @@ fn split_into_three_rows(
 }
 
 fn split_into_rows(ui: &egui::Ui, text: &str, font: egui::FontId, max_width: f32) -> Vec<String> {
-    let rows = split_into_two_rows(ui, text, font.clone(), max_width);
-    if rows.len() != 2 {
-        return rows;
-    }
+    let mut rows = Vec::new();
 
-    let remainder = &rows[1];
-    let remainder_width = ui.fonts(|fonts| {
-        let mut job = egui::text::LayoutJob::default();
-        job.append(
-            remainder,
-            0.0,
-            egui::TextFormat::simple(font.clone(), egui::Color32::WHITE),
-        );
-        fonts.layout_job(job).size().x
-    });
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            rows.push(String::new());
+            continue;
+        }
 
-    if remainder_width <= max_width {
-        return rows;
-    }
+        let paragraph_rows = split_into_two_rows(ui, paragraph, font.clone(), max_width);
+        if paragraph_rows.len() == 2 {
+            let remainder = &paragraph_rows[1];
+            let remainder_width = ui.fonts(|fonts| {
+                let mut job = egui::text::LayoutJob::default();
+                job.append(
+                    remainder,
+                    0.0,
+                    egui::TextFormat::simple(font.clone(), egui::Color32::WHITE),
+                );
+                fonts.layout_job(job).size().x
+            });
 
-    if let Some(three_rows) = split_into_three_rows(ui, text, font.clone(), max_width) {
-        if three_rows.len() == 3 {
-            return three_rows;
+            if remainder_width <= max_width {
+                rows.extend(paragraph_rows);
+            } else if let Some(three_rows) = split_into_three_rows(ui, paragraph, font.clone(), max_width) {
+                if three_rows.len() == 3 {
+                    rows.extend(three_rows);
+                } else {
+                    rows.extend(paragraph_rows);
+                }
+            } else {
+                rows.extend(paragraph_rows);
+            }
+        } else {
+            rows.extend(paragraph_rows);
         }
     }
 
