@@ -1,3 +1,9 @@
+//! プレイリスト構造の基本操作を提供するモジュール。
+//!
+//! - プレイリストの追加/削除/並び替え
+//! - プレイリスト一覧の正規化
+//! - プレイリストの永続化
+
 use crate::application::dto::PlaylistDto;
 use crate::infrastructure::persistence::PlaylistsFile;
 use crate::presentation::egui_app::GuiApp;

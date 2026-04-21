@@ -1,3 +1,9 @@
+//! 再生/シークに関する操作を提供するモジュール。
+//!
+//! - 再生状態の切り替え
+//! - シーク位置の管理
+//! - 再生キューの再生制御
+
 use crate::domain::model::{PlaybackMode, PlaybackState};
 use crate::presentation::egui_app::GuiApp;
 use rand::seq::IteratorRandom;
@@ -23,6 +29,18 @@ pub fn play_selected_queue_item(app: &mut GuiApp) {
             app.request_play();
         }
     }
+}
+
+pub fn perform_play_track_now(app: &mut GuiApp, path: &str) {
+    if path.trim().is_empty() {
+        return;
+    }
+    app.play_path = path.to_string();
+    app.play_position_ms = 0;
+    app.playback_state = PlaybackState::Buffering;
+    app.discover_lyrics_for_current_play_path();
+    app.refresh_play_metadata();
+    app.request_play();
 }
 
 pub fn seek_to_position(app: &mut GuiApp) {

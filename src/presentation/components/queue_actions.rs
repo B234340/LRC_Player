@@ -1,3 +1,10 @@
+//! キュー管理に関する操作を提供するモジュール。
+//!
+//! - キュー内の選択状態管理
+//! - キュー項目の移動/削除
+//! - キューへのトラック挿入
+//! - 再生中のキュー状態調整
+
 use crate::domain::model::PlaybackState;
 use crate::presentation::components::play_actions;
 use crate::presentation::egui_app::GuiApp;
@@ -23,6 +30,51 @@ pub fn select_queue_item_single(app: &mut GuiApp, index: usize) {
     app.selected_queue_indices.clear();
     app.selected_queue_indices.push(index);
     app.queue_selection_anchor = Some(index);
+}
+
+/// 指定トラックをキュー末尾に追加する。
+pub fn perform_enqueue_track_path(app: &mut GuiApp, path: &str) {
+    let item = path.trim();
+    if item.is_empty() {
+        return;
+    }
+    app.queue.tracks.push(item.to_string());
+    app.update_app_vm();
+}
+
+/// 次に再生する位置にトラックを挿入する。
+pub fn perform_add_track_next_in_queue(app: &mut GuiApp, track: &str) {
+    let item = track.trim();
+    if item.is_empty() {
+        return;
+    }
+
+    let insert_at = app
+        .current_queue_index
+        .or(app.selected_queue_index)
+        .map(|index| (index + 1).min(app.queue.tracks.len()))
+        .unwrap_or(app.queue.tracks.len());
+
+    app.queue.tracks.insert(insert_at, item.to_string());
+    app.update_app_vm();
+}
+
+/// 表示中のリストを再生キューに設定し、指定トラックを選択して再生開始する。
+pub fn perform_play_from_displayed_list(
+    app: &mut GuiApp,
+    displayed_tracks: &[String],
+    clicked_index: usize,
+) {
+    if displayed_tracks.is_empty() || clicked_index >= displayed_tracks.len() {
+        return;
+    }
+
+    app.queue.tracks = displayed_tracks.to_vec();
+    app.current_queue_index = None;
+    clear_queue_selection(app);
+    select_queue_item_single(app, clicked_index);
+    app.update_app_vm();
+    play_actions::play_selected_queue_item(app);
 }
 
 pub fn toggle_queue_item_selection(app: &mut GuiApp, index: usize) {

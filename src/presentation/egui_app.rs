@@ -20,10 +20,15 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardVisualKey};
 use symphonia::default::get_probe;
 use crate::localization::translate;
-use crate::presentation::components::{play_actions, playlist_actions, queue_actions};
+use crate::presentation::components::{
+    library_actions,
+    play_actions,
+    playlist_actions,
+    queue_actions,
+    scan_actions,
+};
 use crate::presentation::side_panel::output;
 use crate::presentation::tabs;
-use crate::shared::ipc as ipc_mod;
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::{egui, App, CreationContext};
 use fontdb::{Database, Family, Source, Style};
@@ -170,7 +175,7 @@ pub struct GuiApp {
     pub(crate) theme: Theme,
     pub(crate) log_level: LogLevel,
     pub(crate) language: Language,
-    last_scan_status: Option<String>,
+    pub(crate) last_scan_status: Option<String>,
     album_meta_cache: Option<MetaCache>,
     album_artwork_path_cache: HashMap<String, Option<PathBuf>>,
     album_artwork_texture_cache: HashMap<String, egui::TextureHandle>,
@@ -332,15 +337,7 @@ impl GuiApp {
     }
 
     pub(crate) fn clear_library(&mut self) {
-        if let Ok(cache) = MetaCache::open_default() {
-            let _ = cache.clear_library();
-        }
-        self.clear_album_artwork_cache();
-        self.selected_album = None;
-        self.selected_artist = None;
-        self.selected_directory = None;
-        self.last_scan_status = Some("Library cleared".to_string());
-        self.update_app_vm();
+        library_actions::clear_library(self);
     }
 
     pub(crate) fn select_queue_item_single(&mut self, index: usize) {
@@ -388,66 +385,35 @@ impl GuiApp {
     }
 
     pub(crate) fn select_album(&mut self, album: Option<String>) {
-        self.selected_album = album;
-        self.selected_artist = None;
-        self.selected_directory = None;
-        self.update_app_vm();
+        library_actions::select_album(self, album);
     }
 
     pub(crate) fn select_artist(&mut self, artist: Option<String>) {
-        self.selected_artist = artist;
-        self.selected_album = None;
-        self.selected_directory = None;
-        self.update_app_vm();
+        library_actions::select_artist(self, artist);
     }
 
     pub(crate) fn set_artist_view_mode(&mut self, mode: ArtistViewMode) {
-        if self.artist_view_mode == mode {
-            return;
-        }
-        self.artist_view_mode = mode;
-        self.selected_artist = None;
-        self.update_app_vm();
-        self.save_state();
+        library_actions::set_artist_view_mode(self, mode);
     }
 
     pub(crate) fn select_directory(&mut self, directory: Option<String>) {
-        self.selected_directory = directory;
-        self.selected_album = None;
-        self.selected_artist = None;
-        self.update_app_vm();
+        library_actions::select_directory(self, directory);
     }
 
     pub(crate) fn toggle_library_directory_expanded(&mut self, path: &str) {
-        if self.library_expanded_directories.contains(path) {
-            self.library_expanded_directories.remove(path);
-        } else {
-            self.library_expanded_directories.insert(path.to_string());
-        }
+        library_actions::toggle_library_directory_expanded(self, path);
     }
 
     pub(crate) fn is_library_directory_expanded(&self, path: &str) -> bool {
-        self.library_expanded_directories.contains(path)
+        library_actions::is_library_directory_expanded(self, path)
     }
 
     pub(crate) fn add_favorite_directory(&mut self) {
-        let dir = self.favorite_directory_input.trim().to_string();
-        if dir.is_empty() || self.favorite_directories.contains(&dir) {
-            return;
-        }
-
-        self.favorite_directories.push(dir);
-        self.favorite_directory_input.clear();
-        self.save_state();
-        self.update_app_vm();
+        library_actions::add_favorite_directory(self);
     }
 
     pub(crate) fn remove_favorite_directory(&mut self, index: usize) {
-        if index < self.favorite_directories.len() {
-            self.favorite_directories.remove(index);
-            self.save_state();
-            self.update_app_vm();
-        }
+        library_actions::remove_favorite_directory(self, index);
     }
 
     pub(crate) fn signal_playback_stop(&mut self) {
@@ -847,7 +813,7 @@ impl GuiApp {
         image::load_from_memory(&artwork_visual.data).ok()
     }
 
-    fn clear_album_artwork_cache(&mut self) {
+    pub(crate) fn clear_album_artwork_cache(&mut self) {
         self.album_artwork_path_cache.clear();
         self.album_artwork_texture_cache.clear();
         self.album_artwork_pending.clear();
@@ -1157,36 +1123,7 @@ impl GuiApp {
     }
 
     pub(crate) fn request_scan(&mut self) {
-        let paths = self.scan_targets.clone();
-        let lrc_paths = self.scan_lrc_targets.clone();
-        if paths.is_empty() && lrc_paths.is_empty() {
-            self.last_scan_status = Some("No scan targets configured".to_string());
-            self.save_state();
-            self.update_app_vm();
-            return;
-        }
-
-        self.last_scan_status = Some("Requested scan".to_string());
-        self.save_state();
-        self.update_app_vm();
-
-        let socket = ipc_mod::default_socket_path();
-        let request = ipc_mod::ScanRequest {
-            paths,
-            lrc_paths,
-            excludes: self.scan_excludes.clone(),
-            cancel: false,
-        };
-        std::thread::spawn(move || {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                let _ = rt.block_on(async move {
-                    ipc_mod::send_scan_request(&socket, &request).await
-                });
-            }
-        });
+        scan_actions::request_scan(self);
     }
 
     pub(crate) fn request_play(&mut self) {
@@ -1398,81 +1335,31 @@ impl GuiApp {
     }
 
     pub(crate) fn request_cancel(&mut self) {
-        self.last_scan_status = Some("Requested scan cancel".to_string());
-        self.save_state();
-        self.update_app_vm();
-
-        let socket = ipc_mod::default_socket_path();
-        let request = ipc_mod::ScanRequest {
-            paths: Vec::new(),
-            lrc_paths: Vec::new(),
-            excludes: self.scan_excludes.clone(),
-            cancel: true,
-        };
-        std::thread::spawn(move || {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                let _ = rt.block_on(async move {
-                    ipc_mod::send_scan_request(&socket, &request).await
-                });
-            }
-        });
+        scan_actions::request_cancel(self);
     }
 
     pub(crate) fn add_scan_target(&mut self) {
-        let target = self.scan_target_input.trim().to_string();
-        if !target.is_empty() {
-            self.scan_targets.push(target);
-            self.scan_target_input.clear();
-            self.save_state();
-            self.update_app_vm();
-        }
+        scan_actions::add_scan_target(self);
     }
 
     pub(crate) fn remove_scan_target(&mut self, index: usize) {
-        if index < self.scan_targets.len() {
-            self.scan_targets.remove(index);
-            self.save_state();
-            self.update_app_vm();
-        }
+        scan_actions::remove_scan_target(self, index);
     }
 
     pub(crate) fn add_scan_lrc_target(&mut self) {
-        let target = self.scan_lrc_target_input.trim().to_string();
-        if !target.is_empty() {
-            self.scan_lrc_targets.push(target);
-            self.scan_lrc_target_input.clear();
-            self.save_state();
-            self.update_app_vm();
-        }
+        scan_actions::add_scan_lrc_target(self);
     }
 
     pub(crate) fn remove_scan_lrc_target(&mut self, index: usize) {
-        if index < self.scan_lrc_targets.len() {
-            self.scan_lrc_targets.remove(index);
-            self.save_state();
-            self.update_app_vm();
-        }
+        scan_actions::remove_scan_lrc_target(self, index);
     }
 
     pub(crate) fn add_scan_exclude(&mut self) {
-        let exclude = self.scan_exclude_input.trim().to_string();
-        if !exclude.is_empty() {
-            self.scan_excludes.push(exclude);
-            self.scan_exclude_input.clear();
-            self.save_state();
-            self.update_app_vm();
-        }
+        scan_actions::add_scan_exclude(self);
     }
 
     pub(crate) fn remove_scan_exclude(&mut self, index: usize) {
-        if index < self.scan_excludes.len() {
-            self.scan_excludes.remove(index);
-            self.save_state();
-            self.update_app_vm();
-        }
+        scan_actions::remove_scan_exclude(self, index);
     }
 
     fn setup_fonts(cc: &CreationContext<'_>) {

@@ -1,9 +1,11 @@
 use crate::domain::model::PlaybackMode;
 use crate::infrastructure::persistence::MetaCache;
-use crate::presentation::components::track_actions::{
+use crate::presentation::components::queue_actions::{
     perform_add_track_next_in_queue,
-    perform_add_track_to_playlist,
     perform_enqueue_track_path,
+};
+use crate::presentation::components::track_actions::{
+    perform_add_track_to_playlist,
     perform_open_track_details,
 };
 use crate::presentation::components::track_display::render_track_artwork;
