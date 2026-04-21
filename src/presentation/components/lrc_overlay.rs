@@ -1,8 +1,8 @@
 use crate::infrastructure::lyrics::Lyrics;
 use eframe::egui;
 
-const LINE_SWITCH_ANIMATION_MS: u64 = 200;
-const HIGHLIGHT_START_DELAY_MS: u64 = 150;
+const LINE_SWITCH_ANIMATION_MS: u64 = 250;
+const HIGHLIGHT_START_DELAY_MS: u64 = 100;
 const HIGHLIGHT_EARLY_FINISH_MS: u64 = LINE_SWITCH_ANIMATION_MS + HIGHLIGHT_START_DELAY_MS;
 const TIMING_GAP_MS_PER_SPACE: u64 = 100;
 const TIMING_GAP_MAX_SPACES: usize = 10;
@@ -582,7 +582,7 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
 
     // フォントサイズを計算（画面サイズに応じて動的に調整）
     let base_font_size = rect.height() * 0.04;
-    let heading_font_size = base_font_size * 1.75; // 現在行は大きく
+    let heading_font_size = base_font_size * 1.5; // 現在行は大きく
     let body_font_size = base_font_size;
     let wrap_width = rect.width() - 24.0; // 左右のパディングを確保
     let line_spacing = base_font_size * 0.2;
@@ -613,8 +613,11 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
         let text_color = egui::Color32::from_white_alpha(alpha);
 
         let display_text = timed_display_text(&line);
-        let row_texts = split_into_rows(ui, &display_text, font.clone(), wrap_width);
+        // 行の分割はハイライト時に決定し、非ハイライトでも同じ分割を使う。
+        let split_font = egui::FontId::proportional(heading_font_size);
+        let row_texts = split_into_rows(ui, &display_text, split_font, wrap_width);
         let row_count = row_texts.len();
+        let is_current_line = highlighted_index == Some(absolute_index);
         for (row_index, row_text) in row_texts.into_iter().enumerate() {
             let mut job = egui::text::LayoutJob::default();
             job.append(&row_text, 0.0, egui::TextFormat::simple(font.clone(), text_color));
@@ -627,11 +630,13 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
             render_rows.push((
                 galley,
                 line.clone(),
-                highlighted_index == Some(absolute_index),
+                is_current_line,
                 font.clone(),
                 align_right,
                 align_center,
                 absolute_index,
+                row_index,
+                row_count,
             ));
         }
     }
@@ -657,13 +662,44 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
     let mut current_highlight_line_index: Option<usize> = None;
     let mut current_line_remaining: f32 = 0.0;
     for i in 0..render_rows.len() {
-        let (galley, line, is_current, font, align_right, align_center, line_index) = &render_rows[i];
+        let (galley, line, is_current, font, align_right, align_center, line_index, row_index, row_count) = &render_rows[i];
         let galley_size = galley.size();
-        let mut text_pos = egui::pos2(rect.min.x + 12.0, y);
-        if *align_right {
-            text_pos.x = rect.min.x + 12.0 + wrap_width - galley_size.x;
-        } else if *align_center {
-            text_pos.x = rect.min.x + 12.0 + (wrap_width - galley_size.x) / 2.0;
+        let base_x = rect.min.x + 12.0;
+        let center_x = rect.min.x + 12.0 + (wrap_width - galley_size.x) / 2.0;
+        let mut text_pos = egui::pos2(center_x, y);
+        let is_next = highlighted_index.map(|idx| idx + 1) == Some(*line_index);
+        if *is_current && *row_count > 1 {
+            let target_x = if *row_index == 0 {
+                base_x
+            } else if *align_center {
+                center_x
+            } else if *align_right {
+                rect.min.x + 12.0 + wrap_width - galley_size.x
+            } else {
+                center_x
+            };
+            if animated_center_line > (*line_index) as f32 {
+                let progress = (animated_center_line - (*line_index) as f32).clamp(0.0, 1.0);
+                let ease = progress * progress * (3.0 - 2.0 * progress);
+                text_pos.x = target_x + (center_x - target_x) * ease;
+            } else {
+                text_pos.x = target_x;
+            }
+        } else if is_next && *row_count > 1 {
+            let target_x = if *row_index == 0 {
+                base_x
+            } else if *align_center {
+                center_x
+            } else if *align_right {
+                rect.min.x + 12.0 + wrap_width - galley_size.x
+            } else {
+                center_x
+            };
+            let start_x = center_x;
+            let distance = (*line_index as f32 - animated_center_line).abs();
+            let emphasis = (1.0_f32 - distance).clamp(0.0, 1.0);
+            let ease = emphasis * emphasis * (3.0 - 2.0 * emphasis);
+            text_pos.x = start_x + (target_x - start_x) * ease;
         }
 
         // 現在行の場合は、進行度に応じたハイライトを描画
