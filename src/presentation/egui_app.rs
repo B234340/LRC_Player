@@ -20,7 +20,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardVisualKey};
 use symphonia::default::get_probe;
 use crate::localization::translate;
-use crate::presentation::components::{play_actions, queue_actions};
+use crate::presentation::components::{play_actions, playlist_actions, queue_actions};
 use crate::presentation::side_panel::output;
 use crate::presentation::tabs;
 use crate::shared::ipc as ipc_mod;
@@ -300,125 +300,27 @@ impl GuiApp {
     }
 
     pub(crate) fn normalize_playlists(playlists: Vec<PlaylistDto>) -> Vec<PlaylistDto> {
-        let mut favorite_tracks: Vec<String> = Vec::new();
-        let mut seen_tracks: HashSet<String> = HashSet::new();
-        let mut favorite_id: Option<String> = None;
-        let mut others: Vec<PlaylistDto> = Vec::new();
-
-        for playlist in playlists {
-            if playlist.name.eq_ignore_ascii_case("favorite") {
-                if favorite_id.is_none() {
-                    favorite_id = Some(playlist.id.clone());
-                }
-                for track in playlist.tracks {
-                    if seen_tracks.insert(track.clone()) {
-                        favorite_tracks.push(track);
-                    }
-                }
-            } else {
-                others.push(playlist);
-            }
-        }
-
-        let favorite = PlaylistDto {
-            id: favorite_id.unwrap_or_else(|| "playlist-favorite".to_string()),
-            name: "favorite".to_string(),
-            tracks: favorite_tracks,
-        };
-
-        let mut normalized = Vec::with_capacity(others.len() + 1);
-        normalized.push(favorite);
-        normalized.extend(others);
-        normalized
+        playlist_actions::normalize_playlists(playlists)
     }
 
     pub(crate) fn save_playlists(&self) {
-        if let Ok(file) = PlaylistsFile::open() {
-            let _ = file.save(&self.playlists);
-        }
+        playlist_actions::save_playlists(self);
     }
 
     pub(crate) fn add_playlist(&mut self) {
-        let name = self.new_playlist_name.trim().to_string();
-        if name.is_empty() {
-            return;
-        }
-        if name.eq_ignore_ascii_case("favorite") {
-            return;
-        }
-        if self
-            .playlists
-            .iter()
-            .any(|playlist| playlist.name.eq_ignore_ascii_case(&name))
-        {
-            return;
-        }
-
-        let id = format!(
-            "playlist-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        );
-
-        self.playlists.push(PlaylistDto { id, name, tracks: Vec::new() });
-        self.new_playlist_name.clear();
-        self.save_playlists();
-        self.update_app_vm();
+        playlist_actions::add_playlist(self);
     }
 
     pub(crate) fn remove_playlist(&mut self, index: usize) {
-        if index < self.playlists.len()
-            && !self.playlists[index].name.eq_ignore_ascii_case("favorite")
-        {
-            self.playlists.remove(index);
-            if self.selected_playlist == Some(index) {
-                self.selected_playlist = None;
-            }
-            self.save_playlists();
-            self.update_app_vm();
-        }
+        playlist_actions::remove_playlist(self, index);
     }
 
     pub(crate) fn move_playlist_up(&mut self, index: usize) {
-        if index <= 1 || index >= self.playlists.len() {
-            return;
-        }
-        if self.playlists[index - 1].name.eq_ignore_ascii_case("favorite") {
-            return;
-        }
-
-        self.playlists.swap(index - 1, index);
-        if let Some(selected) = self.selected_playlist {
-            if selected == index {
-                self.selected_playlist = Some(index - 1);
-            } else if selected == index - 1 {
-                self.selected_playlist = Some(index);
-            }
-        }
-        self.save_playlists();
-        self.update_app_vm();
+        playlist_actions::move_playlist_up(self, index);
     }
 
     pub(crate) fn move_playlist_down(&mut self, index: usize) {
-        if index == 0 || index + 1 >= self.playlists.len() {
-            return;
-        }
-        if self.playlists[index].name.eq_ignore_ascii_case("favorite") {
-            return;
-        }
-
-        self.playlists.swap(index, index + 1);
-        if let Some(selected) = self.selected_playlist {
-            if selected == index {
-                self.selected_playlist = Some(index + 1);
-            } else if selected == index + 1 {
-                self.selected_playlist = Some(index);
-            }
-        }
-        self.save_playlists();
-        self.update_app_vm();
+        playlist_actions::move_playlist_down(self, index);
     }
 
     pub(crate) fn add_queue_item(&mut self) {
