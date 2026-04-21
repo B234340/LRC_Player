@@ -114,40 +114,59 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         if let Some(texture) = display_texture {
             let available = ui.available_size();
             // 画面内で他UIを除いた残り領域をアートワークに使うため、
-            // 下部のコントロールとラベルの高さを見積もる。
-            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+            // 下部の各ウィジェットの実際の高さを計算する。
+            let text_height = ui.text_style_height(&egui::TextStyle::Body);
             let item_spacing = ui.spacing().item_spacing.y;
-            let button_height = ui.spacing().interact_size.y;
+            let control_height = ui.spacing().interact_size.y.max(text_height);
             let separator_height = 8.0;
-            let mut reserved_rows = 1.0; // Exists ラベル
+            let mut bottom_height = 0.0;
+
+            // Exists ラベル
+            bottom_height += text_height;
+
+            // タイトル / アーティスト / アルバム / ファイル名
             if app.play_title.is_some() {
-                reserved_rows += 1.0;
+                bottom_height += text_height + item_spacing;
             }
             if app.play_artist.is_some() {
-                reserved_rows += 1.0;
+                bottom_height += text_height + item_spacing;
             }
             if app.play_album.is_some() {
-                reserved_rows += 1.0;
+                bottom_height += text_height + item_spacing;
             }
-            if app.play_path.is_empty() == false {
-                reserved_rows += 1.0; // Filename
+            if !app.play_path.is_empty() {
+                bottom_height += text_height + item_spacing;
             }
-            reserved_rows += 1.0; // Duration / unknown
-            reserved_rows += 1.0; // Lyrics offset row
-            reserved_rows += 1.0; // Slider row
-            reserved_rows += 1.0; // Current position
-            reserved_rows += 1.0; // Play comand
-            reserved_rows += 1.0; // Queue selection label
-            reserved_rows += 1.0; // Queue count label
 
-            let reserved_vertical = 12.0
-                + reserved_rows * (line_height + item_spacing)
-                + button_height
-                + separator_height * 3.0
-                + item_spacing * 2.0;
+            // Duration / unknown
+            bottom_height += text_height + item_spacing;
+
+            // Lyrics offset row
+            bottom_height += control_height + item_spacing;
+
+            // Seek slider row
+            bottom_height += control_height + item_spacing;
+
+            // Current position label
+            bottom_height += text_height + item_spacing;
+
+            // Queue selection label
+            bottom_height += text_height + item_spacing;
+
+            // Queue command buttons
+            bottom_height += control_height + item_spacing;
+
+            // Queue count label
+            bottom_height += text_height;
+
+            // 分離線の高さ
+            bottom_height += separator_height * 3.0;
+
+            // アートワーク直後の余白
+            bottom_height += 12.0;
 
             let max_side = available.x
-                .min((available.y - reserved_vertical).max(100.0))
+                .min((available.y - bottom_height).max(100.0))
                 .clamp(100.0, 1080.0);
             let mut image_size = texture.size_vec2();
             let scale = (max_side / image_size.x).min(max_side / image_size.y);
