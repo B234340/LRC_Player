@@ -629,7 +629,6 @@ pub fn render_lrc_overlay(
     let heading_font_size = base_font_size * 1.5; // 現在行は大きく
     let body_font_size = base_font_size;
     let wrap_width = rect.width() - 24.0; // 左右のパディングを確保
-    let line_spacing = base_font_size * 0.2;
     let non_highlight_line_height = ui.ctx().fonts(|fonts| {
         let mut job = egui::text::LayoutJob::default();
         job.append(
@@ -642,8 +641,8 @@ pub fn render_lrc_overlay(
         );
         fonts.layout_job(job).size().y
     });
-    let extra_spacing = non_highlight_line_height; // ハイライト行の前後に1行分のスペースを追加
-    let group_spacing = line_spacing + extra_spacing;
+    let normal_spacing = non_highlight_line_height * 0.2; // 通常行の前後に0.2行分のスペースを追加
+    let highlight_spacing = non_highlight_line_height; // ハイライト行前後に1行分のスペースを追加
 
     // 各行の Galley（テキストレイアウト情報）を先に作成してトータル高さを計算する
     // これにより中央揃えが正確になる
@@ -691,6 +690,22 @@ pub fn render_lrc_overlay(
         }
     }
 
+    // 行間は、中央付近に来る行ほど normal -> highlight へ滑らかに拡大する。
+    let boundary_spacing = |left_line_index: usize, right_line_index: usize| {
+        if left_line_index == right_line_index {
+            return normal_spacing;
+        }
+
+        let left_dist = (left_line_index as f32 - animated_center_line).abs();
+        let right_dist = (right_line_index as f32 - animated_center_line).abs();
+        let left_emphasis = (1.0 - left_dist).clamp(0.0, 1.0);
+        let right_emphasis = (1.0 - right_dist).clamp(0.0, 1.0);
+        let t = left_emphasis.max(right_emphasis);
+        let eased_t = t * t * (3.0 - 2.0 * t);
+
+        normal_spacing + (highlight_spacing - normal_spacing) * eased_t
+    };
+
     let mut row_tops = Vec::with_capacity(render_rows.len());
     let mut current_row_y = 0.0;
     for i in 0..render_rows.len() {
@@ -700,11 +715,7 @@ pub fn render_lrc_overlay(
         if i + 1 < render_rows.len() {
             let current_line_index = render_rows[i].6;
             let next_line_index = render_rows[i + 1].6;
-            current_row_y += if current_line_index == next_line_index {
-                line_spacing
-            } else {
-                group_spacing
-            };
+            current_row_y += boundary_spacing(current_line_index, next_line_index);
         }
     }
 
@@ -718,7 +729,7 @@ pub fn render_lrc_overlay(
         while idx < render_rows.len() && render_rows[idx].6 == line_index {
             group_height += render_rows[idx].0.size().y;
             if idx + 1 < render_rows.len() && render_rows[idx + 1].6 == line_index {
-                group_height += line_spacing;
+                group_height += normal_spacing;
             }
             idx += 1;
         }
