@@ -584,10 +584,10 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
 
     // フォントサイズを計算（画面サイズに応じて動的に調整）
     let base_font_size = rect.height() * 0.04;
-    let heading_font_size = base_font_size * 2.0; // 現在行は大きく
+    let heading_font_size = base_font_size * 1.75; // 現在行は大きく
     let body_font_size = base_font_size;
-    let wrap_width = rect.width() - 48.0; // 左右のパディングを確保
-    let line_spacing = 6.0;
+    let wrap_width = rect.width() - 24.0; // 左右のパディングを確保
+    let line_spacing = base_font_size * 0.2;
     let non_highlight_line_height = ui.ctx().fonts(|fonts| {
         let mut job = egui::text::LayoutJob::default();
         job.append(
@@ -661,11 +661,11 @@ pub fn render_lrc_overlay(ui: &mut egui::Ui, rect: egui::Rect, lyrics: &Lyrics, 
     for i in 0..render_rows.len() {
         let (galley, line, is_current, font, align_right, align_center, line_index) = &render_rows[i];
         let galley_size = galley.size();
-        let mut text_pos = egui::pos2(rect.min.x + 24.0, y);
+        let mut text_pos = egui::pos2(rect.min.x + 12.0, y);
         if *align_right {
-            text_pos.x = rect.min.x + 24.0 + wrap_width - galley_size.x;
+            text_pos.x = rect.min.x + 12.0 + wrap_width - galley_size.x;
         } else if *align_center {
-            text_pos.x = rect.min.x + 24.0 + (wrap_width - galley_size.x) / 2.0;
+            text_pos.x = rect.min.x + 12.0 + (wrap_width - galley_size.x) / 2.0;
         }
 
         // 現在行の場合は、進行度に応じたハイライトを描画
