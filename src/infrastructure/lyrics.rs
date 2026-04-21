@@ -66,6 +66,19 @@ impl Lyrics {
         }
 
         lines.sort_by_key(|line| line.time_ms);
+        if let Some(first_line) = lines.first() {
+            if first_line.time_ms > 0 {
+                lines.insert(
+                    0,
+                    LyricLine {
+                        time_ms: 0,
+                        text: String::new(),
+                        segments: Vec::new(),
+                    },
+                );
+            }
+        }
+
         Ok(Self { lines })
     }
 
