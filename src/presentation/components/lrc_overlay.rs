@@ -143,7 +143,7 @@ fn highlight_width_for_line(
 ) -> f32 {
     let text_color = ui.style().visuals.text_color();
     let display_text = timed_display_text(line);
-    
+
     // テキスト全体の幅を計算（ハイライト最大値の基準）
     let full_text_width = ui.fonts(|fonts| {
         let mut job = egui::text::LayoutJob::default();
@@ -156,61 +156,59 @@ fn highlight_width_for_line(
         return full_text_width;
     }
 
-    let mut prefix_text = String::new();
-    let mut highlight_width = 0.0;
-    
-    // 各セグメントを順に処理
+    let mut segment_end_times: Vec<Option<u64>> = Vec::with_capacity(line.segments.len());
+    let mut segment_widths: Vec<f32> = Vec::with_capacity(line.segments.len());
+
     for (seg_index, segment) in line.segments.iter().enumerate() {
-        let seg_start = segment.time_ms;
         let next_segment = line.segments.get(seg_index + 1);
         let seg_end = next_segment.map(|next| next.time_ms);
         let gap_spaces = next_segment
-            .map(|next| timing_gap_spaces(next.time_ms.saturating_sub(seg_start)))
+            .map(|next| timing_gap_spaces(next.time_ms.saturating_sub(segment.time_ms)))
             .unwrap_or(0);
+
         let mut timed_segment_text = segment.text.clone();
         if gap_spaces > 0 {
             timed_segment_text.push_str(&scaled_gap_text(gap_spaces));
         }
 
-        // 現在時間がセグメント終了を過ぎている場合は、そのセグメントのテキストをprefixに追加
-        // （既に完全に表示済みの部分）
+        let width = ui.fonts(|fonts| {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(&timed_segment_text, 0.0, egui::TextFormat::simple(font_id.clone(), text_color));
+            fonts.layout_job(job).size().x
+        });
+
+        segment_end_times.push(seg_end);
+        segment_widths.push(width);
+    }
+
+    let mut prefix_width = 0.0;
+    let mut highlight_width = 0.0;
+
+    for (seg_index, segment) in line.segments.iter().enumerate() {
+        let seg_start = segment.time_ms;
+        let seg_end = segment_end_times[seg_index];
+        let segment_width = segment_widths[seg_index];
+
         if let Some(end_ms) = seg_end {
             if current_time_ms >= end_ms {
-                prefix_text.push_str(&timed_segment_text);
+                prefix_width += segment_width;
                 continue;
             }
         }
 
-        // prefix部分の描画幅を計算（既に表示済みの固定部分）
-        let prefix_width = ui.fonts(|fonts| {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(&prefix_text, 0.0, egui::TextFormat::simple(font_id.clone(), text_color));
-            fonts.layout_job(job).size().x
-        });
-
-        // 現在のセグメント内での進行度に応じてハイライト幅を計算
         if current_time_ms < seg_start {
-            // まだセグメントが始まっていない場合
             highlight_width = prefix_width;
         } else if let Some(end_ms) = seg_end {
-            // セグメント内の場合：経過時間の割合に応じて幅を計算
             let elapsed = current_time_ms.saturating_sub(seg_start);
             let duration = end_ms.saturating_sub(seg_start).max(1);
             let ratio = (elapsed as f32 / duration as f32).clamp(0.0, 1.0);
-            let segment_width = ui.fonts(|fonts| {
-                let mut job = egui::text::LayoutJob::default();
-                job.append(&timed_segment_text, 0.0, egui::TextFormat::simple(font_id.clone(), text_color));
-                fonts.layout_job(job).size().x
-            });
             highlight_width = prefix_width + segment_width * ratio;
         } else {
-            // 最終セグメントの場合（終了時間が不明）は全体をハイライト
             highlight_width = full_text_width;
         }
         break;
     }
 
-    // 全体幅を超えないように制限（丸め誤差対策）
     highlight_width.min(full_text_width)
 }
 
