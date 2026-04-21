@@ -20,14 +20,13 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardVisualKey};
 use symphonia::default::get_probe;
 use crate::localization::translate;
+use crate::presentation::components::play_actions;
 use crate::presentation::side_panel::output;
 use crate::presentation::tabs;
 use crate::shared::ipc as ipc_mod;
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::{egui, App, CreationContext};
 use fontdb::{Database, Family, Source, Style};
-use rand::seq::IteratorRandom;
-use rand::thread_rng;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,9 +119,9 @@ pub struct GuiApp {
     active_output_device_name: Option<String>,
     last_seen_default_output_device_name: Option<String>,
     last_default_device_poll_at: Option<Instant>,
-    playback_state_before_seek: Option<PlaybackState>,
-    pending_seek_ms: Option<u64>,
-    seek_last_change_at: Option<Instant>,
+    pub(crate) playback_state_before_seek: Option<PlaybackState>,
+    pub(crate) pending_seek_ms: Option<u64>,
+    pub(crate) seek_last_change_at: Option<Instant>,
     seek_interacting: bool,
     seek_long_press_start: Option<Instant>,
     seek_key_hold_direction: i8,
@@ -837,7 +836,7 @@ impl GuiApp {
         }
     }
 
-    fn pause_playback(&mut self) {
+    pub(crate) fn pause_playback(&mut self) {
         self.update_playback_position_from_clock();
         self.signal_playback_stop();
         self.playback_state = PlaybackState::Paused;
@@ -997,9 +996,7 @@ impl GuiApp {
     }
 
     pub(crate) fn queue_seek_position(&mut self, position_ms: u64) {
-        self.play_position_ms = position_ms;
-        self.pending_seek_ms = Some(position_ms);
-        self.seek_last_change_at = Some(Instant::now());
+        play_actions::queue_seek_position(self, position_ms);
     }
 
     fn flush_pending_seek(&mut self) {
@@ -1028,153 +1025,27 @@ impl GuiApp {
     }
 
     pub(crate) fn play_selected_queue_item(&mut self) {
-        if let Some(index) = self.selected_queue_index {
-            if let Some(path) = self.queue.tracks.get(index).cloned() {
-                self.select_queue_item_single(index);
-                self.current_queue_index = Some(index);
-                self.play_path = path;
-                self.play_position_ms = 0;
-                self.playback_state = PlaybackState::Buffering;
-                self.discover_lyrics_for_current_play_path();
-                self.refresh_play_metadata();
-                self.request_play();
-            }
-        }
+        play_actions::play_selected_queue_item(self);
     }
 
     pub(crate) fn seek_to_position(&mut self) {
-        if self.play_path.trim().is_empty() {
-            return;
-        }
-        if self.play_duration_ms.is_none() {
-            self.refresh_play_metadata();
-        }
-
-        let target_ms = self.play_position_ms;
-        match self.playback_state {
-            PlaybackState::Stopped | PlaybackState::Paused => {
-                self.play_status = Some(format!("Seek position updated: {} ms", target_ms));
-            }
-            _ => {
-                self.playback_state_before_seek = Some(self.playback_state);
-                self.playback_state = PlaybackState::Seeking;
-                self.play_status = Some(format!("Seeking to {} ms", target_ms));
-                self.request_play();
-            }
-        }
+        play_actions::seek_to_position(self);
     }
 
     pub(crate) fn play_current_queue_item(&mut self) {
-        let index = self
-            .current_queue_index
-            .or(self.selected_queue_index)
-            .or(if self.queue.tracks.is_empty() { None } else { Some(0) });
-        if let Some(index) = index {
-            if let Some(path) = self.queue.tracks.get(index).cloned() {
-                self.select_queue_item_single(index);
-                self.current_queue_index = Some(index);
-                self.play_path = path;
-                self.playback_state = PlaybackState::Buffering;
-                self.discover_lyrics_for_current_play_path();
-                self.refresh_play_metadata();
-                self.request_play();
-            }
-        }
+        play_actions::play_current_queue_item(self);
     }
 
     pub(crate) fn play_next(&mut self) {
-        let len = self.queue.tracks.len();
-        if len == 0 {
-            return;
-        }
-        let current = self
-            .current_queue_index
-            .or(self.selected_queue_index)
-            .unwrap_or(0);
-
-        let next_index = match self.playback_mode {
-            PlaybackMode::Sequential => current.checked_add(1).filter(|&index| index < len),
-            PlaybackMode::RepeatOne => Some(current),
-            PlaybackMode::RepeatAll => {
-                if current + 1 < len {
-                    Some(current + 1)
-                } else {
-                    Some(0)
-                }
-            }
-            PlaybackMode::Shuffle => {
-                let mut rng = thread_rng();
-                let choices: Vec<usize> = (0..len).filter(|&i| i != current).collect();
-                if choices.is_empty() {
-                    Some(current)
-                } else {
-                    choices.into_iter().choose(&mut rng)
-                }
-            }
-        };
-
-        if let Some(index) = next_index {
-            self.select_queue_item_single(index);
-            self.play_selected_queue_item();
-        }
+        play_actions::play_next(self);
     }
 
     pub(crate) fn play_previous(&mut self) {
-        let len = self.queue.tracks.len();
-        if len == 0 {
-            return;
-        }
-        let current = self
-            .current_queue_index
-            .or(self.selected_queue_index)
-            .unwrap_or(0);
-
-        let prev_index = match self.playback_mode {
-            PlaybackMode::Sequential => current.checked_sub(1),
-            PlaybackMode::RepeatOne => Some(current),
-            PlaybackMode::RepeatAll => {
-                if current == 0 {
-                    Some(len - 1)
-                } else {
-                    Some(current - 1)
-                }
-            }
-            PlaybackMode::Shuffle => {
-                let mut rng = thread_rng();
-                let choices: Vec<usize> = (0..len).filter(|&i| i != current).collect();
-                if choices.is_empty() {
-                    Some(current)
-                } else {
-                    choices.into_iter().choose(&mut rng)
-                }
-            }
-        };
-
-        if let Some(index) = prev_index {
-            self.select_queue_item_single(index);
-            self.play_selected_queue_item();
-        }
+        play_actions::play_previous(self);
     }
 
     pub(crate) fn toggle_play_pause(&mut self) {
-        match self.playback_state {
-            PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
-                self.pause_playback();
-            }
-            PlaybackState::Paused | PlaybackState::Stopped => {
-                if self.play_path.trim().is_empty() {
-                    if !self.queue.tracks.is_empty() {
-                        self.play_current_queue_item();
-                        return;
-                    }
-                    self.play_status = Some("No track loaded".to_string());
-                    return;
-                }
-                self.playback_state = PlaybackState::Buffering;
-                self.play_status = Some("Resuming playback".to_string());
-                self.request_play();
-            }
-        }
+        play_actions::toggle_play_pause(self);
     }
 
     pub(crate) fn refresh_play_metadata(&mut self) {
