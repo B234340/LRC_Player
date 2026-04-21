@@ -1874,6 +1874,13 @@ impl GuiApp {
         self.save_state();
     }
 
+    pub(crate) fn switch_to_play_tab(&mut self) {
+        if self.active_tab != Tab::Play {
+            self.active_tab = Tab::Play;
+            self.update_app_vm();
+        }
+    }
+
     pub(crate) fn request_scan(&mut self) {
         let paths = self.scan_targets.clone();
         let lrc_paths = self.scan_lrc_targets.clone();

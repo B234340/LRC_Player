@@ -470,6 +470,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     // トラックリストからの再生（ダブルクリック）
     if let Some(index) = pending_play_index {
         app.play_from_displayed_list(&pending_play_list, index);
+        app.switch_to_play_tab();
     }
     // コンテキストメニューからの各アクション
     if let Some(path) = pending_play_now_path {
