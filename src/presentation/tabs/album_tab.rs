@@ -1,3 +1,11 @@
+use crate::presentation::components::track_actions::{
+    perform_add_track_next_in_queue,
+    perform_add_track_to_playlist,
+    perform_enqueue_track_path,
+    perform_open_track_details,
+    perform_play_from_displayed_list,
+    perform_play_track_now,
+};
 use crate::presentation::components::track_list::{
     render_standard_track_list, TrackActivation,
 };
@@ -469,23 +477,23 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     }
     // トラックリストからの再生（ダブルクリック）
     if let Some(index) = pending_play_index {
-        app.play_from_displayed_list(&pending_play_list, index);
+        perform_play_from_displayed_list(&mut *app, &pending_play_list, index);
         app.switch_to_play_tab();
     }
     // コンテキストメニューからの各アクション
     if let Some(path) = pending_play_now_path {
-        app.play_track_now(&path);
+        perform_play_track_now(&mut *app, &path);
     }
     if let Some(path) = pending_next_path {
-        app.add_track_next_in_queue(&path);
+        perform_add_track_next_in_queue(&mut *app, &path);
     }
     if let Some(path) = pending_enqueue_path {
-        app.enqueue_track_path(&path);
+        perform_enqueue_track_path(&mut *app, &path);
     }
     if let Some((target_index, track)) = pending_add_to_playlist {
-        app.add_track_to_playlist(target_index, &track);
+        perform_add_track_to_playlist(&mut *app, target_index, &track);
     }
     if let Some(path) = pending_show_details_path {
-        app.open_track_details(&path);
+        perform_open_track_details(&mut *app, &path);
     }
 }

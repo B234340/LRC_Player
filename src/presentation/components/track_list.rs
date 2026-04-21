@@ -1,4 +1,5 @@
 use crate::infrastructure::persistence::MetaCache;
+use crate::presentation::components::track_actions::perform_toggle_favorite_action;
 use crate::presentation::components::track_context_menu::render_track_context_menu;
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
@@ -356,7 +357,7 @@ where
                         .on_hover_text("Toggle favorite");
 
                     if toggle_response.clicked() {
-                        app.toggle_favorite_track(track);
+                        perform_toggle_favorite_action(app, track);
                     }
 
                     ui.add_space(8.0);

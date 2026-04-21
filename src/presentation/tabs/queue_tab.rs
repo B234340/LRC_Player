@@ -1,5 +1,11 @@
 use crate::domain::model::PlaybackMode;
 use crate::infrastructure::persistence::MetaCache;
+use crate::presentation::components::track_actions::{
+    perform_add_track_next_in_queue,
+    perform_add_track_to_playlist,
+    perform_enqueue_track_path,
+    perform_open_track_details,
+};
 use crate::presentation::components::track_display::render_track_artwork;
 use crate::presentation::components::track_list::{render_track_list_with_artwork, TrackActivation};
 use crate::presentation::egui_app::GuiApp;
@@ -138,18 +144,18 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         move |_, index, _, _| selected_queue_indices_for_row.contains(&index),
         render_track_artwork,
         |ui, app, index, _, _| {
-            let art_size = egui::vec2(44.0, 44.0);
             let handle_label = if app.queue_drag_source_index == Some(index) {
                 "⇅"
             } else {
                 "☰"
             };
             let handle_size = 18.0_f32;
-            let handle_pad_y = ((art_size.y - handle_size) * 0.5).max(0.0);
+            let handle_area_height = 54.0_f32;
+            let handle_pad_y = ((handle_area_height - handle_size) * 0.5).max(0.0);
 
             let handle_response = ui
                 .allocate_ui_with_layout(
-                    egui::vec2(20.0, art_size.y),
+                    egui::vec2(20.0, handle_area_height),
                     egui::Layout::top_down(egui::Align::Center),
                     |ui| {
                         ui.add_space(handle_pad_y);
@@ -285,18 +291,18 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         app.play_selected_queue_item();
     }
     if let Some(path) = pending_next_path {
-        app.add_track_next_in_queue(&path);
+        perform_add_track_next_in_queue(&mut *app, &path);
     }
     if let Some(path) = pending_enqueue_path {
-        app.enqueue_track_path(&path);
+        perform_enqueue_track_path(&mut *app, &path);
     }
     if let Some((target_index, tracks_to_add)) = pending_add_to_playlist {
         for track in tracks_to_add {
-            app.add_track_to_playlist(target_index, &track);
+            perform_add_track_to_playlist(&mut *app, target_index, &track);
         }
     }
     if let Some(path) = pending_show_details_path {
-        app.open_track_details(&path);
+        perform_open_track_details(&mut *app, &path);
     }
 
     // --- 一括操作ボタン ---

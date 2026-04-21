@@ -1,4 +1,12 @@
 use crate::application::view_model::LibraryDirectoryVm;
+use crate::presentation::components::track_actions::{
+    perform_add_track_next_in_queue,
+    perform_add_track_to_playlist,
+    perform_enqueue_track_path,
+    perform_open_track_details,
+    perform_play_from_displayed_list,
+    perform_play_track_now,
+};
 use crate::presentation::components::track_list::{render_standard_track_list, TrackActivation};
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
@@ -207,22 +215,22 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         app.select_directory(Some(path));  // ディレクトリを選択
     }
     if let Some(index) = pending_play_index {
-        app.play_from_displayed_list(&pending_play_list, index);  // リストから再生開始
+        perform_play_from_displayed_list(&mut *app, &pending_play_list, index);  // リストから再生開始
     }
     if let Some(path) = pending_play_now_path {
-        app.play_track_now(&path);  // 即時再生
+        perform_play_track_now(&mut *app, &path);  // 即時再生
     }
     if let Some(path) = pending_next_path {
-        app.add_track_next_in_queue(&path);  // 次に再生するトラックとしてキューに追加
+        perform_add_track_next_in_queue(&mut *app, &path);  // 次に再生するトラックとしてキューに追加
     }
     if let Some(path) = pending_enqueue_path {
-        app.enqueue_track_path(&path);  // キュー末尾に追加
+        perform_enqueue_track_path(&mut *app, &path);  // キュー末尾に追加
     }
     if let Some((target_index, track)) = pending_add_to_playlist {
-        app.add_track_to_playlist(target_index, &track);  // 指定プレイリストに追加
+        perform_add_track_to_playlist(&mut *app, target_index, &track);  // 指定プレイリストに追加
     }
     if let Some(path) = pending_show_details_path {
-        app.open_track_details(&path);  // 詳細ダイアログを開く
+        perform_open_track_details(&mut *app, &path);  // 詳細ダイアログを開く
     }
 }
 
