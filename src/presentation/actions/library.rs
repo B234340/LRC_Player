@@ -6,7 +6,7 @@
 //! - お気に入りディレクトリの追加/削除
 
 use crate::infrastructure::persistence::MetaCache;
-use crate::presentation::egui_app::{ArtistViewMode, GuiApp};
+use crate::presentation::app::{ArtistViewMode, GuiApp};
 
 pub fn clear_library(app: &mut GuiApp) {
     if let Ok(cache) = MetaCache::open_default() {

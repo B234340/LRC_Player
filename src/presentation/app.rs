@@ -20,13 +20,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardVisualKey};
 use symphonia::default::get_probe;
 use crate::localization::translate;
-use crate::presentation::components::{
-    library_actions,
-    play_actions,
-    playlist_actions,
-    queue_actions,
-    scan_actions,
-};
+use crate::presentation::actions::{library, play, playlist, queue, scan};
 use crate::presentation::side_panel::output;
 use crate::presentation::tabs;
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -305,115 +299,115 @@ impl GuiApp {
     }
 
     pub(crate) fn normalize_playlists(playlists: Vec<PlaylistDto>) -> Vec<PlaylistDto> {
-        playlist_actions::normalize_playlists(playlists)
+        playlist::normalize_playlists(playlists)
     }
 
     pub(crate) fn save_playlists(&self) {
-        playlist_actions::save_playlists(self);
+        playlist::save_playlists(self);
     }
 
     pub(crate) fn add_playlist(&mut self) {
-        playlist_actions::add_playlist(self);
+        playlist::add_playlist(self);
     }
 
     pub(crate) fn remove_playlist(&mut self, index: usize) {
-        playlist_actions::remove_playlist(self, index);
+        playlist::remove_playlist(self, index);
     }
 
     pub(crate) fn move_playlist_up(&mut self, index: usize) {
-        playlist_actions::move_playlist_up(self, index);
+        playlist::move_playlist_up(self, index);
     }
 
     pub(crate) fn move_playlist_down(&mut self, index: usize) {
-        playlist_actions::move_playlist_down(self, index);
+        playlist::move_playlist_down(self, index);
     }
 
     pub(crate) fn add_queue_item(&mut self) {
-        queue_actions::add_queue_item(self);
+        queue::add_queue_item(self);
     }
 
     pub(crate) fn clear_queue_selection(&mut self) {
-        queue_actions::clear_queue_selection(self);
+        queue::clear_queue_selection(self);
     }
 
     pub(crate) fn clear_library(&mut self) {
-        library_actions::clear_library(self);
+        library::clear_library(self);
     }
 
     pub(crate) fn select_queue_item_single(&mut self, index: usize) {
-        queue_actions::select_queue_item_single(self, index);
+        queue::select_queue_item_single(self, index);
     }
 
     pub(crate) fn toggle_queue_item_selection(&mut self, index: usize) {
-        queue_actions::toggle_queue_item_selection(self, index);
+        queue::toggle_queue_item_selection(self, index);
     }
 
     pub(crate) fn select_queue_item_range_to(&mut self, index: usize) {
-        queue_actions::select_queue_item_range_to(self, index);
+        queue::select_queue_item_range_to(self, index);
     }
 
     pub(crate) fn remove_selected_queue_items(&mut self) {
-        queue_actions::remove_selected_queue_items(self);
+        queue::remove_selected_queue_items(self);
     }
 
     pub(crate) fn clear_queue_handle_hold(&mut self) {
-        queue_actions::clear_queue_handle_hold(self);
+        queue::clear_queue_handle_hold(self);
     }
 
     pub(crate) fn cancel_queue_drag(&mut self) {
-        queue_actions::cancel_queue_drag(self);
+        queue::cancel_queue_drag(self);
     }
 
     pub(crate) fn move_queue_item_to(&mut self, from: usize, to: usize) {
-        queue_actions::move_queue_item_to(self, from, to);
+        queue::move_queue_item_to(self, from, to);
     }
 
     pub(crate) fn remove_queue_item(&mut self, index: usize) {
-        queue_actions::remove_queue_item(self, index);
+        queue::remove_queue_item(self, index);
     }
 
     pub(crate) fn move_queue_item_up(&mut self, index: usize) {
-        queue_actions::move_queue_item_up(self, index);
+        queue::move_queue_item_up(self, index);
     }
 
     pub(crate) fn move_queue_item_down(&mut self, index: usize) {
-        queue_actions::move_queue_item_down(self, index);
+        queue::move_queue_item_down(self, index);
     }
 
     pub(crate) fn clear_queue(&mut self) {
-        queue_actions::clear_queue(self);
+        queue::clear_queue(self);
     }
 
     pub(crate) fn select_album(&mut self, album: Option<String>) {
-        library_actions::select_album(self, album);
+        library::select_album(self, album);
     }
 
     pub(crate) fn select_artist(&mut self, artist: Option<String>) {
-        library_actions::select_artist(self, artist);
+        library::select_artist(self, artist);
     }
 
     pub(crate) fn set_artist_view_mode(&mut self, mode: ArtistViewMode) {
-        library_actions::set_artist_view_mode(self, mode);
+        library::set_artist_view_mode(self, mode);
     }
 
     pub(crate) fn select_directory(&mut self, directory: Option<String>) {
-        library_actions::select_directory(self, directory);
+        library::select_directory(self, directory);
     }
 
     pub(crate) fn toggle_library_directory_expanded(&mut self, path: &str) {
-        library_actions::toggle_library_directory_expanded(self, path);
+        library::toggle_library_directory_expanded(self, path);
     }
 
     pub(crate) fn is_library_directory_expanded(&self, path: &str) -> bool {
-        library_actions::is_library_directory_expanded(self, path)
+        library::is_library_directory_expanded(self, path)
     }
 
     pub(crate) fn add_favorite_directory(&mut self) {
-        library_actions::add_favorite_directory(self);
+        library::add_favorite_directory(self);
     }
 
     pub(crate) fn remove_favorite_directory(&mut self, index: usize) {
-        library_actions::remove_favorite_directory(self, index);
+        library::remove_favorite_directory(self, index);
     }
 
     pub(crate) fn signal_playback_stop(&mut self) {
@@ -591,7 +585,7 @@ impl GuiApp {
     }
 
     pub(crate) fn queue_seek_position(&mut self, position_ms: u64) {
-        play_actions::queue_seek_position(self, position_ms);
+        play::queue_seek_position(self, position_ms);
     }
 
     fn flush_pending_seek(&mut self) {
@@ -620,23 +614,23 @@ impl GuiApp {
     }
 
     pub(crate) fn play_selected_queue_item(&mut self) {
-        play_actions::play_selected_queue_item(self);
+        play::play_selected_queue_item(self);
     }
 
     pub(crate) fn seek_to_position(&mut self) {
-        play_actions::seek_to_position(self);
+        play::seek_to_position(self);
     }
 
     pub(crate) fn play_next(&mut self) {
-        play_actions::play_next(self);
+        play::play_next(self);
     }
 
     pub(crate) fn play_previous(&mut self) {
-        play_actions::play_previous(self);
+        play::play_previous(self);
     }
 
     pub(crate) fn toggle_play_pause(&mut self) {
-        play_actions::toggle_play_pause(self);
+        play::toggle_play_pause(self);
     }
 
     pub(crate) fn refresh_play_metadata(&mut self) {
@@ -1123,7 +1117,7 @@ impl GuiApp {
     }
 
     pub(crate) fn request_scan(&mut self) {
-        scan_actions::request_scan(self);
+        scan::request_scan(self);
     }
 
     pub(crate) fn request_play(&mut self) {
@@ -1335,31 +1329,31 @@ impl GuiApp {
     }
 
     pub(crate) fn request_cancel(&mut self) {
-        scan_actions::request_cancel(self);
+        scan::request_cancel(self);
     }
 
     pub(crate) fn add_scan_target(&mut self) {
-        scan_actions::add_scan_target(self);
+        scan::add_scan_target(self);
     }
 
     pub(crate) fn remove_scan_target(&mut self, index: usize) {
-        scan_actions::remove_scan_target(self, index);
+        scan::remove_scan_target(self, index);
     }
 
     pub(crate) fn add_scan_lrc_target(&mut self) {
-        scan_actions::add_scan_lrc_target(self);
+        scan::add_scan_lrc_target(self);
     }
 
     pub(crate) fn remove_scan_lrc_target(&mut self, index: usize) {
-        scan_actions::remove_scan_lrc_target(self, index);
+        scan::remove_scan_lrc_target(self, index);
     }
 
     pub(crate) fn add_scan_exclude(&mut self) {
-        scan_actions::add_scan_exclude(self);
+        scan::add_scan_exclude(self);
     }
 
     pub(crate) fn remove_scan_exclude(&mut self, index: usize) {
-        scan_actions::remove_scan_exclude(self, index);
+        scan::remove_scan_exclude(self, index);
     }
 
     fn setup_fonts(cc: &CreationContext<'_>) {

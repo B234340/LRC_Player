@@ -1,16 +1,16 @@
 use crate::domain::model::PlaybackMode;
 use crate::infrastructure::persistence::MetaCache;
-use crate::presentation::components::queue_actions::{
+use crate::presentation::actions::queue::{
     perform_add_track_next_in_queue,
     perform_enqueue_track_path,
 };
-use crate::presentation::components::track_actions::{
+use crate::presentation::actions::track::{
     perform_add_track_to_playlist,
     perform_open_track_details,
 };
 use crate::presentation::components::track_display::render_track_artwork;
 use crate::presentation::components::track_list::{render_track_list_with_artwork, TrackActivation};
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use eframe::egui;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

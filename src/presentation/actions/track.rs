@@ -6,7 +6,7 @@
 
 use crate::infrastructure::persistence::MetaCache;
 use crate::presentation::components::track_list::TrackListOutcome;
-use crate::presentation::egui_app::{GuiApp, TrackDetailsDialog};
+use crate::presentation::app::{GuiApp, TrackDetailsDialog};
 use std::path::Path;
 
 /// 再生アクションを `TrackListOutcome` に登録する。

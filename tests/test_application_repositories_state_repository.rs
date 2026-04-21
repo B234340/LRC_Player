@@ -3,7 +3,7 @@ mod tests {
     use lrc_player::application::dto::StateDto;
     use lrc_player::domain::model::PlaybackMode;
     use lrc_player::infrastructure::persistence::state_file::StateFile;
-    use lrc_player::presentation::egui_app::ArtistViewMode;
+    use lrc_player::presentation::app::ArtistViewMode;
     use tempfile::tempdir;
 
     #[test]

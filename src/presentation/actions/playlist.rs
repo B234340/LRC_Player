@@ -6,7 +6,7 @@
 
 use crate::application::dto::PlaylistDto;
 use crate::infrastructure::persistence::PlaylistsFile;
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 

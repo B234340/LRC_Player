@@ -1,11 +1,11 @@
 use crate::presentation::components::track_display::render_track_artwork;
-use crate::presentation::components::play_actions::perform_play_track_now;
-use crate::presentation::components::queue_actions::{
+use crate::presentation::actions::play::perform_play_track_now;
+use crate::presentation::actions::queue::{
     perform_add_track_next_in_queue,
     perform_enqueue_track_path,
     perform_play_from_displayed_list,
 };
-use crate::presentation::components::track_actions::{
+use crate::presentation::actions::track::{
     apply_enqueue_action,
     apply_play_action,
     apply_remove_action,
@@ -16,7 +16,7 @@ use crate::presentation::components::track_actions::{
     perform_remove_track_from_selected_playlist,
 };
 use crate::presentation::components::track_list::{render_track_list_with_artwork, TrackActivation};
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use eframe::egui;
 
 /// プレイリスト画面のUIを描画する関数

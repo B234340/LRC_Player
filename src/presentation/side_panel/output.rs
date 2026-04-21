@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::domain::model::PlaybackState;
 use crate::localization::{language_name, supported_languages, translate};
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use eframe::egui;
 
 pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {

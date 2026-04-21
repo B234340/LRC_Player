@@ -4,7 +4,7 @@
 //! - スキャン対象の追加/削除
 //! - LRC/除外対象の追加/削除
 
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use crate::shared::ipc as ipc_mod;
 
 pub fn request_scan(app: &mut GuiApp) {

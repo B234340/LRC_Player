@@ -1,17 +1,17 @@
-use crate::presentation::components::play_actions::perform_play_track_now;
-use crate::presentation::components::queue_actions::{
+use crate::presentation::actions::play::perform_play_track_now;
+use crate::presentation::actions::queue::{
     perform_add_track_next_in_queue,
     perform_enqueue_track_path,
     perform_play_from_displayed_list,
 };
-use crate::presentation::components::track_actions::{
+use crate::presentation::actions::track::{
     perform_add_track_to_playlist,
     perform_open_track_details,
 };
 use crate::presentation::components::track_list::{
     render_standard_track_list, TrackActivation,
 };
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use eframe::egui;
 
 /// アルバムタイトルを指定された文字数制限と行数で折り返す関数

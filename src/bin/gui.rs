@@ -33,7 +33,7 @@ fn update_scan_status(
             queue_tracks: Vec::new(),
             selected_queue_index: None,
             queue_playback_mode: lrc_player::domain::model::PlaybackMode::Sequential,
-            artist_view_mode: lrc_player::presentation::egui_app::ArtistViewMode::Artist,
+            artist_view_mode: lrc_player::presentation::app::ArtistViewMode::Artist,
             lrc_overlay_enabled: false,
             side_panel_expanded: true,
             favorite_directories: Vec::new(),
@@ -150,7 +150,7 @@ fn main() -> Result<()> {
     let _ = eframe::run_native(
         "LRC Player GUI",
         options,
-        Box::new(|cc| Box::new(lrc_player::presentation::egui_app::GuiApp::new(cc))),
+        Box::new(|cc| Box::new(lrc_player::presentation::app::GuiApp::new(cc))),
     );
 
     Ok(())

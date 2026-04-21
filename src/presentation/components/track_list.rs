@@ -1,10 +1,10 @@
 use crate::infrastructure::persistence::MetaCache;
-use crate::presentation::components::track_actions::{
+use crate::presentation::actions::track::{
     perform_is_track_favorite,
     perform_toggle_favorite_action,
 };
 use crate::presentation::components::track_context_menu::render_track_context_menu;
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use eframe::egui;
 use std::collections::HashMap;
 use std::path::Path;

@@ -1,4 +1,4 @@
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use eframe::egui;
 
 /// スキャン設定画面のUIを描画する関数

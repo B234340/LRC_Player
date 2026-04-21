@@ -1,10 +1,10 @@
-use crate::presentation::components::play_actions::perform_play_track_now;
-use crate::presentation::components::queue_actions::{
+use crate::presentation::actions::play::perform_play_track_now;
+use crate::presentation::actions::queue::{
     perform_add_track_next_in_queue,
     perform_enqueue_track_path,
     perform_play_from_displayed_list,
 };
-use crate::presentation::components::track_actions::{
+use crate::presentation::actions::track::{
     apply_enqueue_action,
     apply_play_action,
     apply_toggle_favorite_action,
@@ -15,7 +15,7 @@ use crate::presentation::components::track_actions::{
 };
 use crate::presentation::components::track_display::render_track_artwork_with_file_first;
 use crate::presentation::components::track_list::{render_track_list_with_artwork, TrackActivation};
-use crate::presentation::egui_app::{ArtistViewMode, GuiApp};
+use crate::presentation::app::{ArtistViewMode, GuiApp};
 use eframe::egui;
 
 /// アーティスト一覧画面のUIを描画する関数

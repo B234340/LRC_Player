@@ -4,7 +4,7 @@ mod tests {
     use lrc_player::application::usecases::build_app_vm::*;
     use lrc_player::application::dto::{LibraryDto, PlaylistDto, SettingsDto, StateDto};
     use lrc_player::domain::model::PlaybackMode;
-    use lrc_player::presentation::egui_app::ArtistViewMode;
+    use lrc_player::presentation::app::ArtistViewMode;
 
     #[test]
     fn builds_app_vm_from_dtos() {

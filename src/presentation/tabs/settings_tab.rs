@@ -1,5 +1,5 @@
 use crate::config::{Config, LogLevel, Theme};
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use crate::localization::{translate};
 use eframe::egui;
 

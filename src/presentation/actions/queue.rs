@@ -6,8 +6,8 @@
 //! - 再生中のキュー状態調整
 
 use crate::domain::model::PlaybackState;
-use crate::presentation::components::play_actions;
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::actions::play;
+use crate::presentation::app::GuiApp;
 
 pub fn add_queue_item(app: &mut GuiApp) {
     let item = app.queue_item_input.trim().to_string();
@@ -74,7 +74,7 @@ pub fn perform_play_from_displayed_list(
     clear_queue_selection(app);
     select_queue_item_single(app, clicked_index);
     app.update_app_vm();
-    play_actions::play_selected_queue_item(app);
+    play::play_selected_queue_item(app);
 }
 
 pub fn toggle_queue_item_selection(app: &mut GuiApp, index: usize) {
@@ -153,7 +153,7 @@ pub fn remove_selected_queue_items(app: &mut GuiApp) {
                     load_selected_queue_item_paused(app, next_index);
                 }
                 PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
-                    play_actions::play_selected_queue_item(app);
+                    play::play_selected_queue_item(app);
                 }
                 PlaybackState::Stopped => {
                     load_selected_queue_item_stopped(app, next_index);
@@ -274,7 +274,7 @@ pub fn remove_queue_item(app: &mut GuiApp, index: usize) {
                         load_selected_queue_item_paused(app, next_index);
                     }
                     PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
-                        play_actions::play_selected_queue_item(app);
+                        play::play_selected_queue_item(app);
                     }
                     PlaybackState::Stopped => {
                         load_selected_queue_item_stopped(app, next_index);

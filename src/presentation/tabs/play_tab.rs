@@ -1,5 +1,5 @@
 use crate::presentation::components::lrc_overlay::render_lrc_overlay;
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use eframe::egui;
 use std::path::Path;
 use std::time::{Duration, Instant};

@@ -5,7 +5,7 @@
 //! - 再生キューの再生制御
 
 use crate::domain::model::{PlaybackMode, PlaybackState};
-use crate::presentation::egui_app::GuiApp;
+use crate::presentation::app::GuiApp;
 use rand::seq::IteratorRandom;
 use rand::thread_rng;
 use std::time::Instant;
