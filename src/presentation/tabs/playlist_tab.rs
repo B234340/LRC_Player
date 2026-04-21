@@ -6,6 +6,7 @@ use crate::presentation::components::track_actions::{
     apply_toggle_favorite_action,
     perform_add_track_next_in_queue,
     perform_add_track_to_playlist,
+    perform_add_track_to_selected_playlist,
     perform_enqueue_track_path,
     perform_open_track_details,
     perform_play_from_displayed_list,
@@ -241,7 +242,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 // 追加するトラックパスの入力フィールド
                 ui.text_edit_singleline(&mut app.playlist_track_input);
                 if ui.button("Add track").clicked() {
-                    app.add_track_to_selected_playlist();  // 入力されたパスをプレイリストに追加
+                    perform_add_track_to_selected_playlist(&mut *app);  // 入力されたパスをプレイリストに追加
                 }
                 // プレイリストが空の場合のみ「(empty)」と表示
                 if selected_len == 0 {

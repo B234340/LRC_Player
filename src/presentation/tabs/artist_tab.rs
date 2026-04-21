@@ -2,9 +2,11 @@ use crate::presentation::components::track_actions::{
     apply_enqueue_action,
     apply_play_action,
     apply_toggle_favorite_action,
+    perform_add_tracks_to_favorite_playlist,
     perform_add_track_next_in_queue,
     perform_add_track_to_playlist,
     perform_enqueue_track_path,
+    perform_is_track_favorite,
     perform_open_track_details,
     perform_play_from_displayed_list,
     perform_play_track_now,
@@ -217,7 +219,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     |_, _, _, _, _| {},
                                     |_, _, _, _, _, _| false,
                                     |ui, app, index, _display, track_path, outcome| {
-                                        let star_label = if app.is_track_favorite(track_path) {
+                                        let star_label = if perform_is_track_favorite(app, track_path) {
                                             "★"
                                         } else {
                                             "☆"
@@ -283,6 +285,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             .iter()
             .map(|track| track.title.clone())
             .collect();
-        app.add_tracks_to_favorite_playlist(&tracks);
+        perform_add_tracks_to_favorite_playlist(&mut *app, &tracks);
     }
 }

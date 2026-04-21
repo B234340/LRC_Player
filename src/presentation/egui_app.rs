@@ -158,7 +158,7 @@ pub struct GuiApp {
     pub(crate) new_playlist_name: String,
     pub(crate) selected_playlist: Option<usize>,
     pub(crate) playlist_track_input: String,
-    queue: QueueVm,
+    pub(crate) queue: QueueVm,
     pub(crate) queue_item_input: String,
     pub(crate) selected_queue_index: Option<usize>,
     pub(crate) selected_queue_indices: Vec<usize>,
@@ -300,7 +300,7 @@ impl GuiApp {
         }
     }
 
-    fn normalize_playlists(playlists: Vec<PlaylistDto>) -> Vec<PlaylistDto> {
+    pub(crate) fn normalize_playlists(playlists: Vec<PlaylistDto>) -> Vec<PlaylistDto> {
         let mut favorite_tracks: Vec<String> = Vec::new();
         let mut seen_tracks: HashSet<String> = HashSet::new();
         let mut favorite_id: Option<String> = None;
@@ -333,7 +333,7 @@ impl GuiApp {
         normalized
     }
 
-    fn save_playlists(&self) {
+    pub(crate) fn save_playlists(&self) {
         if let Ok(file) = PlaylistsFile::open() {
             let _ = file.save(&self.playlists);
         }
@@ -430,10 +430,6 @@ impl GuiApp {
         self.queue.tracks.push(item);
         self.queue_item_input.clear();
         self.update_app_vm();
-    }
-
-    pub(crate) fn is_queue_item_selected(&self, index: usize) -> bool {
-        self.selected_queue_indices.contains(&index)
     }
 
     pub(crate) fn clear_queue_selection(&mut self) {
@@ -754,125 +750,6 @@ impl GuiApp {
         }
     }
 
-    pub(crate) fn add_track_to_selected_playlist(&mut self) {
-        let track = self.playlist_track_input.trim().to_string();
-        if track.is_empty() {
-            return;
-        }
-        if let Some(index) = self.selected_playlist {
-            if let Some(playlist) = self.playlists.get_mut(index) {
-                if !playlist.tracks.contains(&track) {
-                    playlist.tracks.push(track.clone());
-                    self.playlist_track_input.clear();
-                    self.save_playlists();
-                    self.update_app_vm();
-                }
-            }
-        }
-    }
-
-    pub(crate) fn add_track_to_playlist(&mut self, playlist_index: usize, track: &str) {
-        let item = track.trim();
-        if item.is_empty() {
-            return;
-        }
-        if let Some(playlist) = self.playlists.get_mut(playlist_index) {
-            if !playlist.tracks.iter().any(|existing| existing == item) {
-                playlist.tracks.push(item.to_string());
-                self.save_playlists();
-                self.update_app_vm();
-            }
-        }
-    }
-
-    pub(crate) fn add_track_next_in_queue(&mut self, track: &str) {
-        let item = track.trim();
-        if item.is_empty() {
-            return;
-        }
-
-        let insert_at = self
-            .current_queue_index
-            .or(self.selected_queue_index)
-            .map(|index| (index + 1).min(self.queue.tracks.len()))
-            .unwrap_or(self.queue.tracks.len());
-
-        self.queue.tracks.insert(insert_at, item.to_string());
-        self.update_app_vm();
-    }
-
-    pub(crate) fn play_from_displayed_list(&mut self, displayed_tracks: &[String], clicked_index: usize) {
-        if displayed_tracks.is_empty() || clicked_index >= displayed_tracks.len() {
-            return;
-        }
-
-        self.queue.tracks = displayed_tracks.to_vec();
-        self.current_queue_index = None;
-        self.clear_queue_selection();
-        self.select_queue_item_single(clicked_index);
-        self.update_app_vm();
-        self.play_selected_queue_item();
-    }
-
-    pub(crate) fn open_track_details(&mut self, path: &str) {
-        let item = path.trim();
-        if item.is_empty() {
-            return;
-        }
-
-        let fallback_title = Path::new(item)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(item)
-            .to_string();
-
-        let (title, artist, album) = MetaCache::open_default()
-            .ok()
-            .and_then(|cache| cache.track_metadata_by_location(item).ok().flatten())
-            .map(|(title, artist, album)| {
-                let title = if title.trim().is_empty() {
-                    fallback_title.clone()
-                } else {
-                    title
-                };
-                let artist = if artist.trim().is_empty() {
-                    "Unknown artist".to_string()
-                } else {
-                    artist
-                };
-                let album = if album.trim().is_empty() {
-                    "Unknown album".to_string()
-                } else {
-                    album
-                };
-                (title, artist, album)
-            })
-            .unwrap_or((
-                fallback_title,
-                "Unknown artist".to_string(),
-                "Unknown album".to_string(),
-            ));
-
-        self.track_details_dialog = Some(TrackDetailsDialog {
-            path: item.to_string(),
-            title,
-            artist,
-            album,
-        });
-    }
-
-    pub(crate) fn remove_track_from_selected_playlist(&mut self, track_index: usize) {
-        if let Some(index) = self.selected_playlist {
-            if let Some(playlist) = self.playlists.get_mut(index) {
-                if track_index < playlist.tracks.len() {
-                    playlist.tracks.remove(track_index);
-                    self.save_playlists();
-                    self.update_app_vm();
-                }
-            }
-        }
-    }
-
     pub(crate) fn select_album(&mut self, album: Option<String>) {
         self.selected_album = album;
         self.selected_artist = None;
@@ -895,100 +772,6 @@ impl GuiApp {
         self.selected_artist = None;
         self.update_app_vm();
         self.save_state();
-    }
-
-    pub(crate) fn play_track_now(&mut self, path: &str) {
-        if path.trim().is_empty() {
-            return;
-        }
-        self.play_path = path.to_string();
-        self.play_position_ms = 0;
-        self.playback_state = PlaybackState::Buffering;
-        self.discover_lyrics_for_current_play_path();
-        self.refresh_play_metadata();
-        self.request_play();
-    }
-
-    pub(crate) fn enqueue_track_path(&mut self, path: &str) {
-        let item = path.trim();
-        if item.is_empty() {
-            return;
-        }
-        self.queue.tracks.push(item.to_string());
-        self.update_app_vm();
-    }
-
-    pub(crate) fn add_tracks_to_favorite_playlist(&mut self, tracks: &[String]) {
-        if tracks.is_empty() {
-            return;
-        }
-
-        let favorite_index = self.ensure_favorite_playlist();
-        let mut changed = false;
-        if let Some(playlist) = self.playlists.get_mut(favorite_index) {
-            for track in tracks {
-                if !playlist.tracks.contains(track) {
-                    playlist.tracks.push(track.clone());
-                    changed = true;
-                }
-            }
-        }
-
-        if changed {
-            self.save_playlists();
-            self.update_app_vm();
-        }
-    }
-
-    fn ensure_favorite_playlist(&mut self) -> usize {
-        if self.playlists.is_empty() || !self.playlists[0].name.eq_ignore_ascii_case("favorite") {
-            self.playlists = Self::normalize_playlists(std::mem::take(&mut self.playlists));
-        }
-        0
-    }
-
-    pub(crate) fn is_track_favorite(&self, track: &str) -> bool {
-        self.playlists
-            .first()
-            .map(|playlist| playlist.tracks.contains(&track.to_string()))
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn add_track_to_favorite_playlist(&mut self, track: &str) {
-        let track = track.trim();
-        if track.is_empty() {
-            return;
-        }
-        let favorite_index = self.ensure_favorite_playlist();
-        if let Some(playlist) = self.playlists.get_mut(favorite_index) {
-            if !playlist.tracks.contains(&track.to_string()) {
-                playlist.tracks.push(track.to_string());
-                self.save_playlists();
-                self.update_app_vm();
-            }
-        }
-    }
-
-    pub(crate) fn remove_track_from_favorite_playlist(&mut self, track: &str) {
-        if self.playlists.is_empty() {
-            return;
-        }
-        let favorite_index = self.ensure_favorite_playlist();
-        if let Some(playlist) = self.playlists.get_mut(favorite_index) {
-            if let Some(pos) = playlist.tracks.iter().position(|existing| existing == track) {
-                playlist.tracks.remove(pos);
-                self.save_playlists();
-                self.update_app_vm();
-            }
-        }
-    }
-
-    pub(crate) fn toggle_favorite_track(&mut self, track: &str) {
-        if self.is_track_favorite(track) {
-            self.remove_track_from_favorite_playlist(track);
-        } else {
-            self.add_track_to_favorite_playlist(track);
-        }
     }
 
     pub(crate) fn select_directory(&mut self, directory: Option<String>) {

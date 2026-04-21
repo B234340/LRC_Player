@@ -1,5 +1,8 @@
 use crate::infrastructure::persistence::MetaCache;
-use crate::presentation::components::track_actions::perform_toggle_favorite_action;
+use crate::presentation::components::track_actions::{
+    perform_is_track_favorite,
+    perform_toggle_favorite_action,
+};
 use crate::presentation::components::track_context_menu::render_track_context_menu;
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
@@ -178,7 +181,7 @@ where
             // 行全体を水平レイアウトで配置
             ui.horizontal(|ui| {
                 // --- お気に入り星ボタン ---
-                let is_favorite = app.is_track_favorite(track);
+                let is_favorite = perform_is_track_favorite(app, track);
                 let star_label = if is_favorite { "★" } else { "☆" };
                 
                 // 星ボタンエリアの高さを計算（行の高さに合わせる、最小22px）
@@ -200,7 +203,7 @@ where
 
                 // 星ボタンがクリックされたらお気に入り状態を切り替え
                 if toggle_response.clicked() {
-                    app.toggle_favorite_track(track);
+                    perform_toggle_favorite_action(app, track);
                 }
 
                 ui.add_space(4.0); // 星ボタンとラベルの間隔
@@ -342,7 +345,7 @@ where
                     let star_area_height = art_size.y;
                     let vertical_pad = ((star_area_height - 22.0) * 0.5).max(0.0);
 
-                    let is_favorite = app.is_track_favorite(track);
+                    let is_favorite = perform_is_track_favorite(app, track);
                     let star_label = if is_favorite { "★" } else { "☆" };
                     let toggle_response = ui
                         .allocate_ui_with_layout(
