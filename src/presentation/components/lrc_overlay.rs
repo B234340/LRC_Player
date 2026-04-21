@@ -565,8 +565,9 @@ fn split_into_three_rows(
 
 fn split_into_rows(ui: &egui::Ui, text: &str, font: egui::FontId, max_width: f32) -> Vec<String> {
     let mut rows = Vec::new();
+    let normalized_text = text.replace("\r\n", "\n").replace('\r', "");
 
-    for paragraph in text.split('\n') {
+    for paragraph in normalized_text.split('\n') {
         if paragraph.is_empty() {
             rows.push(String::new());
             continue;
@@ -623,17 +624,18 @@ pub fn render_lrc_overlay(
     let animated_center_line = highlighted_index
         .map(|index| animated_center_line_index(lyrics, current_time_ms, index))
         .unwrap_or(0.0);
-    let center_index = highlighted_index.unwrap_or(0);
-    let start = center_index.saturating_sub(3);
-    let end = (center_index + 3).min(lyrics.lines.len().saturating_sub(1));
-    let mut overlay_lines = Vec::new();
-    for i in start..=end {
-        overlay_lines.push((lyrics.lines[i].clone(), i));
-    }
+    let overlay_lines: Vec<_> = lyrics
+        .lines
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, line)| (line, index))
+        .collect();
 
     // 半透明の黒背景を描画（歌詞の可読性向上）
     let background = egui::Color32::from_black_alpha(150);
-    ui.painter().rect_filled(rect, 0.0, background);
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 0.0, background);
 
     // フォントサイズを計算（画面サイズに応じて動的に調整）
     let base_font_size = rect.height() * 0.04;
@@ -823,6 +825,11 @@ pub fn render_lrc_overlay(
             text_pos.x = start_x + (target_x - start_x) * ease;
         }
 
+        let row_y = y_offset + row_tops[i];
+        if row_y + galley_size.y < rect.min.y || row_y > rect.max.y {
+            continue;
+        }
+
         // 現在行の場合は、進行度に応じたハイライトを描画
         if *is_current {
             if current_highlight_line_index != Some(*line_index) {
@@ -845,7 +852,7 @@ pub fn render_lrc_overlay(
                         text_pos + row.rect.min.to_vec2(),
                         egui::vec2(current_width, row.rect.height()),
                     );
-                    ui.painter().rect_filled(
+                    painter.rect_filled(
                         highlight_rect,
                         0.0,
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 80),
@@ -860,9 +867,9 @@ pub fn render_lrc_overlay(
         if *is_current {
             let bold_offsets = [egui::vec2(-0.6, 0.0), egui::vec2(0.6, 0.0)];
             for offset in bold_offsets {
-                ui.painter().galley(text_pos + offset, galley.clone());
+                painter.galley(text_pos + offset, galley.clone());
             }
         }
-        ui.painter().galley(text_pos, galley.clone());
+        painter.galley(text_pos, galley.clone());
     }
 }
