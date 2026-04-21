@@ -114,13 +114,25 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         &tracks,
         &playlist_targets,
         TrackActivation::SingleClick,
-        44.0,
+        54.0,
         Some(ui.available_height()),
         |index, display| {
             if current_play_path == display.path {
-                format!("{}: {} [Playing]", index + 1, display.title)
+                format!(
+                    "{}: {} [Playing]\n{}\n{}",
+                    index + 1,
+                    display.title,
+                    display.artist,
+                    display.album,
+                )
             } else {
-                format!("{}: {}", index + 1, display.title)
+                format!(
+                    "{}: {}\n{}\n{}",
+                    index + 1,
+                    display.title,
+                    display.artist,
+                    display.album,
+                )
             }
         },
         move |_, index, _, _| selected_queue_indices_for_row.contains(&index),
