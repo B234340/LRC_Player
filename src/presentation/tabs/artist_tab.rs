@@ -201,13 +201,17 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                             format!("{}: {}", index + 1, display.title)
                                         }
                                     },
+                                    |_, _, _, _| false,
                                     render_track_artwork_with_file_first,
-                                    |ui, index, _display, _track_path, outcome| {
+                                    |_, _, _, _, _| {},
+                                    |_, _, _, _, _, _| false,
+                                    |ui, _, index, _display, _track_path, outcome| {
                                         if ui.button("Play").clicked() {
                                             outcome.play_index = Some(index);
                                             outcome.play_list = track_paths.clone();
                                         }
                                     },
+                                    |_, _, _, _, _, _| {},
                                 );
 
                                 pending_play_index = track_list_outcome.play_index;

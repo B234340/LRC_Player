@@ -1,7 +1,7 @@
 use crate::domain::model::PlaybackMode;
 use crate::infrastructure::persistence::MetaCache;
-use crate::presentation::components::track_context_menu::render_track_context_menu;
-use crate::presentation::components::track_display::{render_track_artwork, resolve_track_display};
+use crate::presentation::components::track_display::render_track_artwork;
+use crate::presentation::components::track_list::{render_track_list_with_artwork, TrackActivation};
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
 use std::collections::HashMap;
@@ -87,10 +87,10 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let mut pending_move_down: Option<usize> = None;         // 下に移動
     let mut pending_remove_indices: Option<Vec<usize>> = None; // 削除（複数選択対応）
     let mut pending_play: Option<usize> = None;              // 再生
-    let mut pending_next_path: Option<String> = None;        // 次に再生
-    let mut pending_enqueue_path: Option<String> = None;     // キュー末尾に追加
-    let mut pending_add_to_playlist: Option<(usize, Vec<String>)> = None; // プレイリストに追加
-    let mut pending_show_details_path: Option<String> = None; // 詳細表示
+    let pending_next_path: Option<String> = None;        // 次に再生
+    let pending_enqueue_path: Option<String> = None;     // キュー末尾に追加
+    let pending_add_to_playlist: Option<(usize, Vec<String>)> = None; // プレイリストに追加
+    let pending_show_details_path: Option<String> = None; // 詳細表示
     
     // プレイリスト一覧（追加先用）
     let playlist_targets: Vec<(usize, String)> = app
@@ -100,236 +100,156 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         .map(|(idx, p)| (idx, p.name.clone()))
         .collect();
     
-    let meta_cache = MetaCache::open_default().ok();
-    let mut metadata_cache: HashMap<String, (String, String, String)> = HashMap::new();
+    let _meta_cache = MetaCache::open_default().ok();
+    let mut _metadata_cache: HashMap<String, (String, String, String)> = HashMap::new();
 
-    // --- スクロール可能なキュー一覧 ---
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for (index, track) in tracks.iter().enumerate() {
-                let is_selected = app.is_queue_item_selected(index);  // 選択状態
-                let is_playing = app.current_queue_index == Some(index);  // 再生中かどうか
-                let display = resolve_track_display(track, meta_cache.as_ref(), &mut metadata_cache);
-                let title = display.title.as_str();
-                let artist = display.artist.as_str();
-                let album = display.album.as_str();
+    let current_play_path = app.play_path.clone();
+    let selected_queue_indices = app.selected_queue_indices.clone();
+    let selected_queue_indices_for_row = selected_queue_indices.clone();
 
-                // 状態に応じてフレームスタイルを変更
-                let mut frame = egui::Frame::group(ui.style());
-                if is_playing {
-                    // 再生中：選択色で塗りつぶし、太枠
-                    frame = frame
-                        .fill(ui.visuals().selection.bg_fill)
-                        .stroke(egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
-                } else if is_selected {
-                    // 選択中：細枠
-                    frame = frame.stroke(egui::Stroke::new(1.0, ui.visuals().widgets.active.bg_stroke.color));
-                }
-                if app.queue_drag_source_index == Some(index) {
-                    // ドラッグ元：警告色の太枠
-                    frame = frame.stroke(egui::Stroke::new(2.0, ui.visuals().warn_fg_color));
-                }
-
-                frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        // --- ドラッグハンドル（☰ / ⇅）---
-                        let art_size = egui::vec2(44.0, 44.0);
-                        let handle_label = if app.queue_drag_source_index == Some(index) {
-                            "⇅"  // 移動中アイコン
-                        } else {
-                            "☰"  // 通常ハンドルアイコン
-                        };
-                        let handle_size = 18.0_f32;
-                        let handle_pad_y = ((art_size.y - handle_size) * 0.5).max(0.0);
-                        
-                        let handle_response = ui
-                            .allocate_ui_with_layout(
-                                egui::vec2(20.0, art_size.y),
-                                egui::Layout::top_down(egui::Align::Center),
-                                |ui| {
-                                    ui.add_space(handle_pad_y);
-                                    ui.add_sized([handle_size, handle_size], egui::Button::new(handle_label))
-                                },
-                            )
-                            .inner
-                            .on_hover_text("Handle: click to select. Hold 350ms to start moving one track.");
-
-                        // ドラッグ操作の処理
-                        if let Some(source) = app.queue_drag_source_index {
-                            // ドラッグ中：クリックで移動先を決定
-                            if handle_response.clicked() {
-                                if source == index {
-                                    app.cancel_queue_drag();  // 同じ位置ならキャンセル
-                                } else {
-                                    app.move_queue_item_to(source, index);  // 移動実行
-                                    app.cancel_queue_drag();
-                                }
-                            }
-                        } else {
-                            // 通常時：長押し検出と選択処理
-                            if handle_response.is_pointer_button_down_on() {
-                                // 長押し開始を記録
-                                if app.queue_handle_hold_index != Some(index) {
-                                    app.queue_handle_hold_index = Some(index);
-                                    app.queue_handle_hold_started_at = Some(Instant::now());
-                                }
-
-                                // 350ms以上押し続けたらドラッグモード開始
-                                if let Some(started_at) = app.queue_handle_hold_started_at {
-                                    let elapsed = started_at.elapsed();
-                                    let hold_delay = Duration::from_millis(350);
-                                    if elapsed >= hold_delay {
-                                        app.queue_drag_source_index = Some(index);
-                                        app.select_queue_item_single(index);
-                                        app.clear_queue_handle_hold();
-                                    } else {
-                                        // 再描画を予約
-                                        ui.ctx().request_repaint_after(hold_delay - elapsed);
-                                    }
-                                }
-                            }
-
-                            // クリック時の選択処理（修飾キーに応じて動作変更）
-                            if handle_response.clicked() {
-                                if shift_pressed {
-                                    app.select_queue_item_range_to(index);  // Shift: 範囲選択
-                                } else if ctrl_pressed {
-                                    app.toggle_queue_item_selection(index);  // Ctrl: 選択切り替え
-                                } else {
-                                    app.select_queue_item_single(index);  // 通常: 単一選択
-                                }
-                            }
-                        }
-
-                        // --- アートワーク表示 ---
-                        render_track_artwork(
-                            ui,
-                            track,
-                            &format!("queue_art_{}", index),
-                            art_size,
-                            is_playing,
-                        );
-
-                        // --- トラック情報表示 ---
-                        ui.vertical(|ui| {
-                            let response = ui.horizontal(|ui| {
-                                // トラックタイトル（再生中の場合は [Playing] を付加）
-                                let title_text = if is_playing {
-                                    format!("{}: {} [Playing]", index + 1, title)
-                                } else {
-                                    format!("{}: {}", index + 1, title)
-                                };
-                                let response = ui.selectable_label(is_selected, title_text).on_hover_text(
-                                    "Left click: play now (queue order unchanged). Right click: common actions.",
-                                );
-
-                                // 複数選択時の対象トラックリストを作成
-                                let selected_track_paths: Vec<String> = if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
-                                    app.selected_queue_indices
-                                        .iter()
-                                        .filter_map(|&selected_index| tracks.get(selected_index).cloned())
-                                        .collect()
-                                } else {
-                                    vec![track.clone()]
-                                };
-
-                                // クリック時の処理
-                                if response.clicked() {
-                                    if let Some(source) = app.queue_drag_source_index {
-                                        // ドラッグ中：移動先として処理
-                                        if source == index {
-                                            app.cancel_queue_drag();
-                                        } else {
-                                            app.move_queue_item_to(source, index);
-                                            app.cancel_queue_drag();
-                                        }
-                                    } else {
-                                        // 通常時：選択して再生
-                                        app.select_queue_item_single(index);
-                                        app.play_selected_queue_item();
-                                    }
-                                }
-                                
-                                // 右クリックコンテキストメニュー
-                                response.clone().context_menu(|ui| {
-                                    let menu_outcome = render_track_context_menu(
-                                        ui,
-                                        track,
-                                        &playlist_targets,
-                                        "Add to queue tail",
-                                        |_, _| {},
-                                    );
-                                    if menu_outcome.play_now_path.is_some() {
-                                        pending_play = Some(index);
-                                    }
-                                    if let Some(path) = menu_outcome.next_path {
-                                        pending_next_path = Some(path);
-                                    }
-                                    if let Some(path) = menu_outcome.enqueue_path {
-                                        pending_enqueue_path = Some(path);
-                                    }
-                                    if let Some((target_index, _path)) = menu_outcome.add_to_playlist {
-                                        // queue tab uses selected track paths when multiple are selected
-                                        if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
-                                            pending_add_to_playlist = Some((target_index, selected_track_paths.clone()));
-                                        } else {
-                                            pending_add_to_playlist = Some((target_index, vec![track.clone()]));
-                                        }
-                                    }
-                                    if let Some(path) = menu_outcome.show_details_path {
-                                        pending_show_details_path = Some(path);
-                                    }
-                                    ui.separator();
-                                    if ui.button("Remove from queue").clicked() {
-                                        if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
-                                            pending_remove_indices = Some(app.selected_queue_indices.clone());
-                                        } else {
-                                            pending_remove_indices = Some(vec![index]);
-                                        }
-                                        ui.close_menu();
-                                    }
-                                });
-                                response
-                            })
-                            .inner;
-
-                            // アーティスト名とアルバム名を表示
-                            ui.label(format!("Artist: {}", artist));
-                            ui.label(format!("Album: {}", album));
-
-                            // 再生中トラックへの自動スクロール
-                            if is_playing && app.queue_scroll_to_playing {
-                                response.scroll_to_me(Some(egui::Align::Center));
-                                app.queue_scroll_to_playing = false;
-                            }
-                        });
-
-                        // --- 右寄せ操作ボタン ---
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Play").clicked() {
-                                pending_play = Some(index);
-                            }
-                            if ui.button("Remove").clicked() {
-                                if app.selected_queue_indices.len() > 1 && app.is_queue_item_selected(index) {
-                                    pending_remove_indices = Some(app.selected_queue_indices.clone());
-                                } else {
-                                    pending_remove_indices = Some(vec![index]);
-                                }
-                            }
-                            if ui.button("Up").clicked() {
-                                pending_move_up = Some(index);
-                            }
-                            if ui.button("Down").clicked() {
-                                pending_move_down = Some(index);
-                            }
-                        });
-                    });
-                });
-
-                ui.add_space(4.0);
+    let track_list_outcome = render_track_list_with_artwork(
+        ui,
+        app,
+        "queue_tracks_scroll",
+        &tracks,
+        &playlist_targets,
+        TrackActivation::SingleClick,
+        44.0,
+        Some(ui.available_height()),
+        |index, display| {
+            if current_play_path == display.path {
+                format!("{}: {} [Playing]", index + 1, display.title)
+            } else {
+                format!("{}: {}", index + 1, display.title)
             }
-        });
+        },
+        move |_, index, _, _| selected_queue_indices_for_row.contains(&index),
+        render_track_artwork,
+        |ui, app, index, _, _| {
+            let art_size = egui::vec2(44.0, 44.0);
+            let handle_label = if app.queue_drag_source_index == Some(index) {
+                "⇅"
+            } else {
+                "☰"
+            };
+            let handle_size = 18.0_f32;
+            let handle_pad_y = ((art_size.y - handle_size) * 0.5).max(0.0);
+
+            let handle_response = ui
+                .allocate_ui_with_layout(
+                    egui::vec2(20.0, art_size.y),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        ui.add_space(handle_pad_y);
+                        ui.add_sized([handle_size, handle_size], egui::Button::new(handle_label))
+                    },
+                )
+                .inner
+                .on_hover_text("Handle: click to select. Hold 350ms to start moving one track.");
+
+            if let Some(source) = app.queue_drag_source_index {
+                if handle_response.clicked() {
+                    if source == index {
+                        app.cancel_queue_drag();
+                    } else {
+                        app.move_queue_item_to(source, index);
+                        app.cancel_queue_drag();
+                    }
+                }
+            } else {
+                if handle_response.is_pointer_button_down_on() {
+                    if app.queue_handle_hold_index != Some(index) {
+                        app.queue_handle_hold_index = Some(index);
+                        app.queue_handle_hold_started_at = Some(Instant::now());
+                    }
+
+                    if let Some(started_at) = app.queue_handle_hold_started_at {
+                        let elapsed = started_at.elapsed();
+                        let hold_delay = Duration::from_millis(350);
+                        if elapsed >= hold_delay {
+                            app.queue_drag_source_index = Some(index);
+                            app.select_queue_item_single(index);
+                            app.clear_queue_handle_hold();
+                        } else {
+                            ui.ctx().request_repaint_after(hold_delay - elapsed);
+                        }
+                    }
+                }
+
+                if handle_response.clicked() {
+                    if shift_pressed {
+                        app.select_queue_item_range_to(index);
+                    } else if ctrl_pressed {
+                        app.toggle_queue_item_selection(index);
+                    } else {
+                        app.select_queue_item_single(index);
+                    }
+                }
+            }
+        },
+        |response, app, index, _display, _track_path, _outcome| {
+            if response.clicked() {
+                if let Some(source) = app.queue_drag_source_index {
+                    if source == index {
+                        app.cancel_queue_drag();
+                    } else {
+                        app.move_queue_item_to(source, index);
+                        app.cancel_queue_drag();
+                    }
+                    return true;
+                }
+            }
+
+            if app.current_queue_index == Some(index) && app.queue_scroll_to_playing {
+                response.scroll_to_me(Some(egui::Align::Center));
+                app.queue_scroll_to_playing = false;
+            }
+
+            false
+        },
+        |ui, _app, index, _display, _track_path, outcome| {
+            if ui.button("Play").clicked() {
+                pending_play = Some(index);
+            }
+            if ui.button("Remove").clicked() {
+                if selected_queue_indices.len() > 1 && selected_queue_indices.contains(&index) {
+                    outcome.remove_indices = Some(selected_queue_indices.clone());
+                } else {
+                    outcome.remove_indices = Some(vec![index]);
+                }
+            }
+            if ui.button("Up").clicked() {
+                outcome.move_up_index = Some(index);
+            }
+            if ui.button("Down").clicked() {
+                outcome.move_down_index = Some(index);
+            }
+        },
+        |ui, _app, index, _display, _track_path, outcome| {
+            if ui.button("Remove from queue").clicked() {
+                if selected_queue_indices.len() > 1 && selected_queue_indices.contains(&index) {
+                    outcome.remove_indices = Some(selected_queue_indices.clone());
+                } else {
+                    outcome.remove_indices = Some(vec![index]);
+                }
+                ui.close_menu();
+            }
+        },
+    );
+
+    if let Some(indices) = track_list_outcome.remove_indices {
+        pending_remove_indices = Some(indices);
+    }
+    if let Some(index) = track_list_outcome.move_up_index {
+        pending_move_up = Some(index);
+    }
+    if let Some(index) = track_list_outcome.move_down_index {
+        pending_move_down = Some(index);
+    }
+    if let Some(index) = track_list_outcome.play_index {
+        pending_play = Some(index);
+    }
+
 
     // --- 保留中のアクションを実行 ---
     if let Some(index) = pending_move_up {

@@ -165,36 +165,47 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     &playlist.tracks,
                     &playlist_targets,
                     TrackActivation::SingleClick,
-                    44.0,
+                    54.0,
                     Some(ui.available_height().max(120.0)),
                     |index, display| {
                         if current_play_path == display.path {
-                            format!("{}: {} [Playing]", index + 1, display.title)
+                            format!(
+                                "{}: {} [Playing]\n{}\n{}",
+                                index + 1,
+                                display.title,
+                                display.artist,
+                                display.album,
+                            )
                         } else {
-                            format!("{}: {}", index + 1, display.title)
+                            format!(
+                                "{}: {}\n{}\n{}",
+                                index + 1,
+                                display.title,
+                                display.artist,
+                                display.album,
+                            )
                         }
                     },
+                    |_, _, _, _| false,
                     render_track_artwork,
-                    |ui, index, display, _track_path, outcome| {
-                        ui.vertical(|ui| {
-                            ui.label(format!("Artist: {}", display.artist));
-                            ui.label(format!("Album: {}", display.album));
-                        });
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Remove").clicked() {
-                                outcome.remove_index = Some(index);
-                            }
-                            if ui.button("Play").clicked() {
-                                outcome.play_index = Some(index);
-                                outcome.play_list = playlist.tracks.clone();
-                            }
-                        });
+                    |_, _, _, _, _| {},
+                    |_, _, _, _, _, _| false,
+                    |ui, _, index, _display, _track_path, outcome| {
+                        if ui.button("Remove").clicked() {
+                            outcome.remove_indices = Some(vec![index]);
+                        }
+                        if ui.button("Play").clicked() {
+                            outcome.play_index = Some(index);
+                            outcome.play_list = playlist.tracks.clone();
+                        }
                     },
+                    |_, _, _, _, _, _| {},
                 );
 
-                if let Some(index) = track_list_outcome.remove_index {
-                    pending_remove_track = Some(index);
+                if let Some(indices) = track_list_outcome.remove_indices {
+                    if let Some(index) = indices.into_iter().next() {
+                        pending_remove_track = Some(index);
+                    }
                 }
                 pending_play_index = track_list_outcome.play_index;
                 pending_play_list = track_list_outcome.play_list;

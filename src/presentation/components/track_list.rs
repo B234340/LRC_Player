@@ -42,8 +42,12 @@ pub struct TrackListOutcome {
     pub enqueue_path: Option<String>,
     /// プレイリストへの追加操作（プレイリストインデックス, トラックパス）
     pub add_to_playlist: Option<(usize, String)>,
-    /// 削除操作が発生したトラックのインデックス
-    pub remove_index: Option<usize>,
+    /// 一括削除対象のトラックインデックス
+    pub remove_indices: Option<Vec<usize>>,
+    /// 行を上に移動する操作
+    pub move_up_index: Option<usize>,
+    /// 行を下に移動する操作
+    pub move_down_index: Option<usize>,
     /// 「詳細を表示」が選択されたトラックのパス
     pub show_details_path: Option<String>,
 }
@@ -282,7 +286,7 @@ where
 /// * `artwork_renderer` - アートワークを描画する関数
 /// * `trailing_actions` - 各行の右端に追加アクションを描画するクロージャ
 #[allow(clippy::too_many_arguments)]
-pub fn render_track_list_with_artwork<F, R>(
+pub fn render_track_list_with_artwork<F, S, P, R, T, M>(
     ui: &mut egui::Ui,
     app: &mut GuiApp,
     id_source: &str,
@@ -292,12 +296,20 @@ pub fn render_track_list_with_artwork<F, R>(
     row_height: f32,
     max_height: Option<f32>,
     mut label_for: F,
+    mut selected_for_row: S,
     artwork_renderer: fn(&mut egui::Ui, &str, &str, egui::Vec2, bool),
-    mut trailing_actions: R,
+    mut row_prefix: P,
+    mut response_handler: R,
+    mut trailing_actions: T,
+    mut context_menu_extra: M,
 ) -> TrackListOutcome
 where
     F: FnMut(usize, &TrackDisplay) -> String,
-    R: FnMut(&mut egui::Ui, usize, &TrackDisplay, &str, &mut TrackListOutcome),
+    S: FnMut(&GuiApp, usize, &TrackDisplay, &str) -> bool,
+    P: FnMut(&mut egui::Ui, &mut GuiApp, usize, &TrackDisplay, &str),
+    R: FnMut(&egui::Response, &mut GuiApp, usize, &TrackDisplay, &str, &mut TrackListOutcome) -> bool,
+    T: FnMut(&mut egui::Ui, &mut GuiApp, usize, &TrackDisplay, &str, &mut TrackListOutcome),
+    M: FnMut(&mut egui::Ui, &mut GuiApp, usize, &TrackDisplay, &str, &mut TrackListOutcome),
 {
     let mut outcome = TrackListOutcome::default();
     let mut metadata_cache: HashMap<String, (String, String, String)> = HashMap::new();
@@ -309,16 +321,22 @@ where
             let display = resolve_track_display(track, meta_cache.as_ref(), &mut metadata_cache);
             let label = label_for(index, &display);
             let is_playing = app.play_path == *track;
+            let selected = selected_for_row(app, index, &display, track);
 
             let mut frame = egui::Frame::group(ui.style());
             if is_playing {
                 frame = frame
                     .fill(ui.visuals().selection.bg_fill)
                     .stroke(egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
+            } else if selected {
+                frame = frame.stroke(egui::Stroke::new(1.0, ui.visuals().widgets.active.bg_stroke.color));
             }
 
             frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    row_prefix(ui, app, index, &display, track);
+                    ui.add_space(8.0);
+
                     let art_size = egui::vec2(row_height, row_height);
                     let star_area_height = art_size.y;
                     let vertical_pad = ((star_area_height - 22.0) * 0.5).max(0.0);
@@ -348,17 +366,21 @@ where
 
                     ui.vertical(|ui| {
                         let response = ui
-                            .selectable_label(false, label)
+                            .selectable_label(selected, label)
                             .on_hover_text("Double click to play. Right click for actions.");
 
-                        let activated = match activation {
-                            TrackActivation::SingleClick => response.clicked(),
-                            TrackActivation::DoubleClick => response.double_clicked(),
-                        };
+                        let handled = response_handler(&response, app, index, &display, track, &mut outcome);
 
-                        if activated {
-                            outcome.play_index = Some(index);
-                            outcome.play_list = displayed_tracks.clone();
+                        if !handled {
+                            let activated = match activation {
+                                TrackActivation::SingleClick => response.clicked(),
+                                TrackActivation::DoubleClick => response.double_clicked(),
+                            };
+
+                            if activated {
+                                outcome.play_index = Some(index);
+                                outcome.play_list = displayed_tracks.clone();
+                            }
                         }
 
                         response.context_menu(|ui| {
@@ -385,11 +407,13 @@ where
                             if let Some(path) = menu_outcome.show_details_path {
                                 outcome.show_details_path = Some(path);
                             }
+
+                            context_menu_extra(ui, app, index, &display, track, &mut outcome);
                         });
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        trailing_actions(ui, index, &display, track, &mut outcome);
+                        trailing_actions(ui, app, index, &display, track, &mut outcome);
                     });
                 });
             });
