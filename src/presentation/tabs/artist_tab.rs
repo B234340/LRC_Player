@@ -1,3 +1,4 @@
+use crate::presentation::components::track_actions::{apply_enqueue_action, apply_play_action, apply_toggle_favorite_action};
 use crate::presentation::components::track_display::render_track_artwork_with_file_first;
 use crate::presentation::components::track_list::{render_track_list_with_artwork, TrackActivation};
 use crate::presentation::egui_app::{ArtistViewMode, GuiApp};
@@ -205,10 +206,20 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     render_track_artwork_with_file_first,
                                     |_, _, _, _, _| {},
                                     |_, _, _, _, _, _| false,
-                                    |ui, _, index, _display, _track_path, outcome| {
+                                    |ui, app, index, _display, track_path, outcome| {
+                                        let star_label = if app.is_track_favorite(track_path) {
+                                            "★"
+                                        } else {
+                                            "☆"
+                                        };
+                                        if ui.button(star_label).clicked() {
+                                            apply_toggle_favorite_action(app, track_path);
+                                        }
                                         if ui.button("Play").clicked() {
-                                            outcome.play_index = Some(index);
-                                            outcome.play_list = track_paths.clone();
+                                            apply_play_action(outcome, index, &track_paths);
+                                        }
+                                        if ui.button("Add to queue").clicked() {
+                                            apply_enqueue_action(outcome, track_path);
                                         }
                                     },
                                     |_, _, _, _, _, _| {},

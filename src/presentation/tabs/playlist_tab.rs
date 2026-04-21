@@ -1,4 +1,5 @@
 use crate::presentation::components::track_display::render_track_artwork;
+use crate::presentation::components::track_actions::{apply_enqueue_action, apply_play_action, apply_remove_action, apply_toggle_favorite_action};
 use crate::presentation::components::track_list::{render_track_list_with_artwork, TrackActivation};
 use crate::presentation::egui_app::GuiApp;
 use eframe::egui;
@@ -190,13 +191,23 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     render_track_artwork,
                     |_, _, _, _, _| {},
                     |_, _, _, _, _, _| false,
-                    |ui, _, index, _display, _track_path, outcome| {
+                    |ui, app, index, display, track_path, outcome| {
+                        ui.vertical(|ui| {
+                            ui.label(format!("Artist: {}", display.artist));
+                            ui.label(format!("Album: {}", display.album));
+                        });
+
                         if ui.button("Remove").clicked() {
-                            outcome.remove_indices = Some(vec![index]);
+                            apply_remove_action(outcome, index);
                         }
                         if ui.button("Play").clicked() {
-                            outcome.play_index = Some(index);
-                            outcome.play_list = playlist.tracks.clone();
+                            apply_play_action(outcome, index, &playlist.tracks);
+                        }
+                        if ui.button("Add to queue").clicked() {
+                            apply_enqueue_action(outcome, track_path);
+                        }
+                        if ui.button("Favorite").clicked() {
+                            apply_toggle_favorite_action(app, track_path);
                         }
                     },
                     |_, _, _, _, _, _| {},
