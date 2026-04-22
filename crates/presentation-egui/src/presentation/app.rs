@@ -198,6 +198,7 @@ impl App for GuiApp {
         }
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            let tab_size = ui.spacing().interact_size * 2.0;
             ui.heading(translate("title", self.language));
             ui.horizontal(|ui| {
                 for tab in [
@@ -210,7 +211,13 @@ impl App for GuiApp {
                     Tab::Scan,
                     Tab::Settings,
                 ] {
-                    if ui.selectable_label(self.active_tab == tab, tab.label()).clicked() {
+                    if ui
+                        .add_sized(
+                            tab_size,
+                            egui::SelectableLabel::new(self.active_tab == tab, tab.label()),
+                        )
+                        .clicked()
+                    {
                         self.active_tab = tab;
                         if tab == Tab::Queue {
                             self.queue_scroll_to_playing = true;

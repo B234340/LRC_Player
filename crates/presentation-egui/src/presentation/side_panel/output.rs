@@ -3,6 +3,7 @@ use lrc_player_domain::model::PlaybackState;
 use lrc_player_application::localization::{language_name, supported_languages, translate};
 use crate::presentation::app::GuiApp;
 use eframe::egui;
+use std::path::Path;
 
 pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.horizontal(|ui| {
@@ -25,10 +26,31 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     if app.play_path.trim().is_empty() {
         ui.label("No track selected.");
     } else {
+        let path = Path::new(&app.play_path);
         ui.label(format!("Path: {}", app.play_path));
+        ui.label(format!("Exists: {}", path.exists()));
         ui.label(format!("State: {}", app.playback_state));
         if let Some(status) = &app.play_status {
             ui.label(format!("Status: {}", status));
+        }
+        if let Some(title) = &app.play_title {
+            ui.label(format!("Title: {}", title));
+        }
+        if let Some(artist) = &app.play_artist {
+            ui.label(format!("Artist: {}", artist));
+        }
+        if let Some(album) = &app.play_album {
+            ui.label(format!("Album: {}", album));
+        }
+        if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+            ui.label(format!("Filename: {}", filename));
+        }
+        if let Some(index) = app.selected_queue_index {
+            if let Some(track) = app.app_vm.queue.tracks.get(index) {
+                ui.label(format!("Selected queue item: {}", track));
+            }
+        } else {
+            ui.label("No queue item selected.");
         }
     }
     ui.add_space(8.0);

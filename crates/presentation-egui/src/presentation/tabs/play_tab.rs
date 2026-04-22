@@ -1,7 +1,6 @@
 use crate::presentation::components::lrc_overlay::render_lrc_overlay;
 use crate::presentation::app::GuiApp;
 use eframe::egui;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// 再生コントロール画面のUIを描画する関数。
@@ -34,20 +33,53 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let mut mode_changed = false;
     ui.horizontal(|ui| {
         ui.label("Playback mode:");
+        let button_size = ui.spacing().interact_size * 2.0;
         
         // 各モードの選択ボタンを作成（selectable_valueは選択状態を視覚的に表示するボタン）
-        mode_changed |= ui
-            .selectable_value(&mut app.playback_mode, lrc_player_domain::model::PlaybackMode::Sequential, "Sequential")
-            .changed();
-        mode_changed |= ui
-            .selectable_value(&mut app.playback_mode, lrc_player_domain::model::PlaybackMode::RepeatOne, "Repeat One")
-            .changed();
-        mode_changed |= ui
-            .selectable_value(&mut app.playback_mode, lrc_player_domain::model::PlaybackMode::RepeatAll, "Repeat All")
-            .changed();
-        mode_changed |= ui
-            .selectable_value(&mut app.playback_mode, lrc_player_domain::model::PlaybackMode::Shuffle, "Shuffle")
-            .changed();
+        if ui.add_sized(
+                button_size,
+                egui::SelectableLabel::new(
+                    app.playback_mode == lrc_player_domain::model::PlaybackMode::Sequential,
+                    "Sequential",
+                ),
+            ).clicked()
+        {
+            app.playback_mode = lrc_player_domain::model::PlaybackMode::Sequential;
+            mode_changed = true;
+        }
+
+        if ui.add_sized(
+            button_size,
+            egui::SelectableLabel::new(
+                app.playback_mode == lrc_player_domain::model::PlaybackMode::RepeatOne,
+                "Repeat One",
+            ),).clicked()
+        {
+            app.playback_mode = lrc_player_domain::model::PlaybackMode::RepeatOne;
+            mode_changed = true;
+        }
+
+        if ui.add_sized(
+            button_size,
+            egui::SelectableLabel::new(
+                app.playback_mode == lrc_player_domain::model::PlaybackMode::RepeatAll,
+                "Repeat All",
+            ),).clicked()
+        {
+            app.playback_mode = lrc_player_domain::model::PlaybackMode::RepeatAll;
+            mode_changed = true;
+        }
+
+        if ui.add_sized(
+            button_size,
+            egui::SelectableLabel::new(
+                app.playback_mode == lrc_player_domain::model::PlaybackMode::Shuffle,
+                "Shuffle",
+            ),).clicked()
+        {
+            app.playback_mode = lrc_player_domain::model::PlaybackMode::Shuffle;
+            mode_changed = true;
+        }
     });
     
     // モードが変更された場合は設定を永続化
@@ -117,26 +149,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             // 下部の各ウィジェットの実際の高さを計算する。
             let text_height = ui.text_style_height(&egui::TextStyle::Body);
             let item_spacing = ui.spacing().item_spacing.y;
-            let control_height = ui.spacing().interact_size.y.max(text_height);
+            let control_height = ui.spacing().interact_size.y.max(text_height) * 2.0;
             let separator_height = 8.0;
             let mut bottom_height = 0.0;
-
-            // Exists ラベル
-            bottom_height += text_height;
-
-            // タイトル / アーティスト / アルバム / ファイル名
-            if app.play_title.is_some() {
-                bottom_height += text_height + item_spacing;
-            }
-            if app.play_artist.is_some() {
-                bottom_height += text_height + item_spacing;
-            }
-            if app.play_album.is_some() {
-                bottom_height += text_height + item_spacing;
-            }
-            if !app.play_path.is_empty() {
-                bottom_height += text_height + item_spacing;
-            }
 
             // Duration / unknown
             bottom_height += text_height + item_spacing;
@@ -150,9 +165,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             // Current position label
             bottom_height += text_height + item_spacing;
 
-            // Queue selection label
-            bottom_height += text_height + item_spacing;
-
             // Queue command buttons
             bottom_height += control_height + item_spacing;
 
@@ -160,7 +172,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             bottom_height += text_height;
 
             // 分離線の高さ
-            bottom_height += separator_height * 3.0;
+            bottom_height += separator_height * 2.0;
 
             // アートワーク直後の余白
             bottom_height += 12.0;
@@ -194,24 +206,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             ui.add_space(12.0);
         }
 
-        // トラック情報の詳細表示
-        let path = Path::new(&app.play_path);
-        ui.label(format!("Exists: {}", path.exists()));  // ファイルの存在有無を表示
-        
-        // メタデータ情報（取得できている場合のみ表示）
-        if let Some(title) = &app.play_title {
-            ui.label(format!("Title: {}", title));
-        }
-        if let Some(artist) = &app.play_artist {
-            ui.label(format!("Artist: {}", artist));
-        }
-        if let Some(album) = &app.play_album {
-            ui.label(format!("Album: {}", album));
-        }
-        if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
-            ui.label(format!("Filename: {}", filename));
-        }
-        
         // 再生時間とシークバーの表示
         if let Some(duration_ms) = app.play_duration_ms {
             // 総再生時間を「分:秒.ミリ秒」形式で表示
@@ -275,8 +269,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
     // ========== 再生コントロールボタン ==========
     ui.horizontal(|ui| {
+        let button_size = ui.spacing().interact_size * 2.0;
         // 「前の曲」ボタン：キューまたは履歴から前の曲を再生
-        if ui.button("Previous").clicked() {
+        if ui.add_sized(button_size, egui::Button::new("Previous")).clicked() {
             app.play_previous();
         }
         
@@ -286,26 +281,15 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             lrc_player_domain::model::PlaybackState::Paused => "Resume",   // 一時停止中 → 再開
             _ => "Play",  // 停止中/バッファリング中など → 再生開始
         };
-        if ui.button(play_label).clicked() {
-            app.toggle_play_pause();  // 再生状態を切り替え
+        if ui.add_sized(button_size, egui::Button::new(play_label)).clicked() {
+            app.toggle_play_pause();
         }
         
         // 「次の曲」ボタン：キューまたは次のファイルを再生
-        if ui.button("Next").clicked() {
+        if ui.add_sized(button_size, egui::Button::new("Next")).clicked() {
             app.play_next();
         }
     });
-
-    ui.separator();
-    
-    // ========== キュー内の選択項目表示 ==========
-    if let Some(index) = app.selected_queue_index {
-        if let Some(track) = app.app_vm.queue.tracks.get(index) {
-            ui.label(format!("Selected queue item: {}", track));
-        }
-    } else {
-        ui.label("No queue item selected.");
-    }
 
     ui.separator();
     
