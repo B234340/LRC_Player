@@ -1,3 +1,5 @@
+//! Egui presentation crate and facade re-exports for app composition.
+
 pub use lrc_player_domain as domain;
 pub use lrc_player_application as application;
 pub use lrc_player_application::config;

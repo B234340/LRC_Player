@@ -1,3 +1,6 @@
+//! CLI application entrypoint.
+//! Supports playback demo, device inspection, and IPC-driven scan requests.
+
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait};
 use lrc_player::infrastructure::io_worker::ScanOptions;

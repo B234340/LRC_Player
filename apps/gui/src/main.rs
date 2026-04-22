@@ -1,3 +1,6 @@
+//! GUI application entrypoint.
+//! Starts IPC scan server wiring and launches the egui frontend.
+
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use anyhow::Result;
@@ -17,6 +20,7 @@ fn update_scan_status(
     parsed: Option<u64>,
     registered: Option<u64>,
 ) -> anyhow::Result<()> {
+    // Persist scan progress in state.json so GUI tabs can restore status across restarts.
     let mut state = StateFile::open()
         .and_then(|store| store.load())
         .unwrap_or(StateDto {
@@ -52,6 +56,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let socket = ipc_mod::default_socket_path();
+    // Run the IPC receiver on a dedicated thread so the GUI event loop stays responsive.
     let server_thread = thread::spawn(move || -> Result<()> {
         let rt = Builder::new_current_thread().enable_all().build()?;
         rt.block_on(async move {

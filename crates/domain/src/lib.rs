@@ -1,8 +1,7 @@
-// Domain layer: pure business logic, no I/O
+//! Domain layer.
+//! Pure business rules and core models without infrastructure dependencies.
 
 pub mod events;
 pub mod ids;
 pub mod model;
 pub mod services;
-
-// Re-export commonly used types here as needed.

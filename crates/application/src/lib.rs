@@ -1,3 +1,6 @@
+//! Application layer.
+//! Contains DTOs, use cases, repository ports, and view-model assembly logic.
+
 pub mod app_service;
 pub mod config;
 pub mod dto;
