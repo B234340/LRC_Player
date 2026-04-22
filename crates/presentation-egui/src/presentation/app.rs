@@ -182,7 +182,9 @@ pub(crate) struct TrackDetailsDialog {
 
 impl App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.active_tab == Tab::Scan {
+        if self.active_tab == Tab::Scan
+            || self.last_scan_status.as_deref() == Some("Requested scan")
+        {
             self.refresh_scan_status();
         }
 

@@ -102,7 +102,12 @@ fn main() -> Result<()> {
                     }
 
                     tracing::info!("IPC scan request received: {:?}", req.paths);
-                    let paths: Vec<_> = req.paths.into_iter().map(std::path::PathBuf::from).collect();
+                    let mut all_scan_paths = req.paths;
+                    all_scan_paths.extend(req.lrc_paths);
+                    let paths: Vec<_> = all_scan_paths
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
                     let excludes: Vec<_> = req.excludes.into_iter().map(std::path::PathBuf::from).collect();
                     let opts = ScanOptions {
                         fast: false,

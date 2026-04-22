@@ -687,6 +687,22 @@ COMMIT;
         album_id.split_once('\0').unwrap_or((album_id, ""))
     }
 
+    fn sort_location_paths(paths: &mut [String]) {
+        paths.sort_by(|a, b| {
+            let a_name = Path::new(a)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(a)
+                .to_ascii_lowercase();
+            let b_name = Path::new(b)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(b)
+                .to_ascii_lowercase();
+            a_name.cmp(&b_name)
+        });
+    }
+
     /// Return distinct album names in the library.
     pub fn library_albums(&self) -> anyhow::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
@@ -748,7 +764,19 @@ COMMIT;
     pub fn library_tracks_by_album_id(&self, album_id: &str) -> anyhow::Result<Vec<String>> {
         let (album, album_owner) = Self::decode_album_identifier(album_id);
         if album_owner.is_empty() {
-            return self.library_tracks_by_album(album);
+            let mut stmt = self.conn.prepare(
+                "SELECT l.path
+                 FROM tracks t
+                 JOIN locations l ON l.content_id = t.content_id
+                 WHERE t.album = ?1",
+            )?;
+            let rows = stmt.query_map(params![album], |row| row.get::<_, String>(0))?;
+            let mut paths = Vec::new();
+            for path in rows {
+                paths.push(path?);
+            }
+            Self::sort_location_paths(&mut paths);
+            return Ok(paths);
         }
 
         let mut stmt = self.conn.prepare(
@@ -764,19 +792,7 @@ COMMIT;
             paths.push(path?);
         }
 
-        paths.sort_by(|a, b| {
-            let a_name = Path::new(a)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(a)
-                .to_ascii_lowercase();
-            let b_name = Path::new(b)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(b)
-                .to_ascii_lowercase();
-            a_name.cmp(&b_name)
-        });
+        Self::sort_location_paths(&mut paths);
 
         Ok(paths)
     }

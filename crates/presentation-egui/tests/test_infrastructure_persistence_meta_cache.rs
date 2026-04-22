@@ -375,6 +375,75 @@ mod tests {
     }
 
     #[test]
+    fn library_tracks_by_album_id_without_owner_returns_location_paths() {
+        let cache = MetaCache::new(":memory:").expect("create in-memory db");
+
+        cache
+            .upsert_track(
+                "track-a",
+                Some("Song A"),
+                Some("Artist A"),
+                None,
+                None,
+                Some("Album X"),
+                None,
+                100,
+            )
+            .expect("upsert track A");
+        cache
+            .upsert_location(
+                "track-a",
+                "/tmp/music/Artist A/Album X/02-song-a.mp3",
+                None,
+                None,
+                1234,
+                42,
+                1620000000,
+                true,
+                true,
+            )
+            .expect("upsert location A");
+
+        cache
+            .upsert_track(
+                "track-c",
+                Some("Song C"),
+                Some("Artist B"),
+                None,
+                None,
+                Some("Album X"),
+                None,
+                102,
+            )
+            .expect("upsert track C");
+        cache
+            .upsert_location(
+                "track-c",
+                "/tmp/music/Artist B/Album X/01-song-c.mp3",
+                None,
+                None,
+                1235,
+                43,
+                1620000001,
+                true,
+                true,
+            )
+            .expect("upsert location C");
+
+        let tracks = cache
+            .library_tracks_by_album_id("Album X")
+            .expect("album X paths");
+
+        assert_eq!(
+            tracks,
+            vec![
+                "/tmp/music/Artist B/Album X/01-song-c.mp3".to_string(),
+                "/tmp/music/Artist A/Album X/02-song-a.mp3".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn recent_directories_work() {
         let cache = MetaCache::new(":memory:").expect("create in-memory db");
 

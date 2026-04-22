@@ -122,8 +122,15 @@ impl GuiApp {
     pub(crate) fn refresh_scan_status(&mut self) {
         if let Ok(store) = StateFile::open() {
             if let Ok(state) = store.load() {
-                self.last_scan_status = state.last_scan_status.clone();
-                self.app_vm.scan.last_scan_status = state.last_scan_status.clone();
+                let next_status = state.last_scan_status.clone();
+                let status_changed = self.last_scan_status != next_status;
+
+                self.last_scan_status = next_status.clone();
+                self.app_vm.scan.last_scan_status = next_status.clone();
+
+                if status_changed && next_status.as_deref() == Some("Scan completed") {
+                    self.discover_lyrics_for_current_play_path();
+                }
             }
         }
     }
