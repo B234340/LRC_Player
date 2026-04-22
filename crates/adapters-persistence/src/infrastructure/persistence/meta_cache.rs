@@ -683,14 +683,6 @@ COMMIT;
         Ok(dirs)
     }
 
-    fn encode_album_identifier(album: &str, album_artist: &str) -> String {
-        let mut id = String::with_capacity(album.len() + 1 + album_artist.len());
-        id.push_str(album);
-        id.push('\0');
-        id.push_str(album_artist);
-        id
-    }
-
     fn decode_album_identifier(album_id: &str) -> (&str, &str) {
         album_id.split_once('\0').unwrap_or((album_id, ""))
     }
