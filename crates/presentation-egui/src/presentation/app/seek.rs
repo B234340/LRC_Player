@@ -60,17 +60,17 @@ impl GuiApp {
             return;
         };
 
-        // 矢印キーの単押し処理（最初の10秒シーク）
+        // 矢印キーの単押し処理（最初の5秒シーク）
         // 左右同時押しの場合は無視
         if left_pressed && !right_pressed {
-            self.step_seek_by(-1, 10_000, duration_ms);
+            self.step_seek_by(-1, 5_000, duration_ms);
             // ホールド状態を初期化（長押し検出用）
             self.seek_key_hold_direction = -1;
             self.seek_key_hold_started_at = Some(now);
             self.seek_key_last_step_at = Some(now);
             self.set_seek_interacting(false);
         } else if right_pressed && !left_pressed {
-            self.step_seek_by(1, 10_000, duration_ms);
+            self.step_seek_by(1, 5_000, duration_ms);
             // ホールド状態を初期化（長押し検出用）
             self.seek_key_hold_direction = 1;
             self.seek_key_hold_started_at = Some(now);
@@ -132,7 +132,7 @@ impl GuiApp {
 
         // シーク実行
         if can_step {
-            self.step_seek_by(hold_direction, 1_000, duration_ms); // 1秒シーク
+            self.step_seek_by(hold_direction, 0_050, duration_ms); // 0.05秒シーク
             self.seek_key_last_step_at = Some(now);
         }
 
