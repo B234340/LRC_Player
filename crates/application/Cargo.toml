@@ -1,0 +1,28 @@
+[package]
+name = "lrc_player_application"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "net", "io-util", "time"] }
+hex = "0.4"
+rand = "0.8"
+serde_json = "1.0"
+cpal = "0.15"
+crossbeam-channel = "0.5"
+ringbuf = "0.2"
+symphonia = "0.5"
+image = "0.24"
+rusqlite = "0.29"
+blake3 = "1.4"
+tracing = "0.1"
+
+lrc_player_domain = { path = "../domain" }
+lrc_player_ports = { path = "../ports" }
+lrc_player_shared = { path = "../../shared/contracts" }
+lrc_player_adapters_persistence = { path = "../adapters-persistence" }
+lrc_player_adapters_audio = { path = "../adapters-audio" }
+lrc_player_adapters_scan = { path = "../adapters-scan" }
+lrc_player_adapters_lyrics = { path = "../adapters-lyrics" }

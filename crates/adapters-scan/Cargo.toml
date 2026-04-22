@@ -1,0 +1,13 @@
+[package]
+name = "lrc_player_adapters_scan"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+rand = "0.8"
+symphonia = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net", "io-util"] }
+lrc_player_adapters_persistence = { path = "../adapters-persistence" }
+lrc_player_adapters_lyrics = { path = "../adapters-lyrics" }
+lrc_player_domain = { path = "../domain" }

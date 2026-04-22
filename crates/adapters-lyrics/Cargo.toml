@@ -1,0 +1,8 @@
+[package]
+name = "lrc_player_adapters_lyrics"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+lrc_player_adapters_persistence = { path = "../adapters-persistence" }

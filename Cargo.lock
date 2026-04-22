@@ -2161,6 +2161,10 @@ dependencies = [
  "fontdb",
  "hex",
  "image",
+ "lrc_player_application",
+ "lrc_player_domain",
+ "lrc_player_ports",
+ "lrc_player_shared",
  "rand",
  "ringbuf",
  "rusqlite",
@@ -2173,6 +2177,137 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "winapi",
+]
+
+[[package]]
+name = "lrc_player_adapters_audio"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cpal",
+ "crossbeam-channel",
+ "lrc_player_ports",
+ "ringbuf",
+ "symphonia",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lrc_player_adapters_lyrics"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lrc_player_adapters_persistence",
+]
+
+[[package]]
+name = "lrc_player_adapters_persistence"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lrc_player_shared",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lrc_player_adapters_scan"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lrc_player_adapters_lyrics",
+ "lrc_player_adapters_persistence",
+ "lrc_player_domain",
+ "rand",
+ "symphonia",
+ "tokio",
+]
+
+[[package]]
+name = "lrc_player_application"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "cpal",
+ "crossbeam-channel",
+ "hex",
+ "image",
+ "lrc_player_adapters_audio",
+ "lrc_player_adapters_lyrics",
+ "lrc_player_adapters_persistence",
+ "lrc_player_adapters_scan",
+ "lrc_player_domain",
+ "lrc_player_ports",
+ "lrc_player_shared",
+ "rand",
+ "ringbuf",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lrc_player_cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 4.6.0",
+ "cpal",
+ "crossbeam-channel",
+ "lrc_player",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "lrc_player_domain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "hex",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "lrc_player_gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 4.6.0",
+ "eframe",
+ "fontdb",
+ "lrc_player",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "lrc_player_ports"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "lrc_player_shared"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

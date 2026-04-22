@@ -1,49 +1,15 @@
-[package]
-name = "lrc_player"
-version = "0.1.0"
-edition = "2021"
-default-run = "lrc_player"
-
-[dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "net", "io-util"] }
-rusqlite = { version = "0.29", features = ["bundled"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-cpal = "0.15"
-blake3 = "1.4"
-clap = { version = "4", features = ["derive"] }
-anyhow = "1.0"
-# Audio decoding / format parsing (symphonia family)
-symphonia = "0.5"
-thiserror = "1.0"
-rand = "0.8"
-hex = "0.4"
-tempfile = { version = "3", optional = true }
-ringbuf = "0.2"
-crossbeam-channel = "0.5"
-directories = "4"
-image = "0.24"
-eframe = "0.22"
-fontdb = "0.10"
-
-[[bin]]
-name = "lrc_player"
-path = "src/bin/gui.rs"
-
-[[bin]]
-name = "lrc_player_cli"
-path = "src/bin/cli.rs"
-
-[[bin]]
-name = "generate_10k_tracks"
-path = "bench/10k_tracks/generate.rs"
-
-[target.'cfg(windows)'.dependencies.winapi]
-version = "0.3.9"
-features = ["winuser"]
-
-[dev-dependencies]
-tempfile = "3"
-criterion = "0.4"
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/ports",
+    "crates/application",
+    "crates/adapters-persistence",
+    "crates/adapters-audio",
+    "crates/adapters-scan",
+    "crates/adapters-lyrics",
+    "shared/contracts",
+    "crates/presentation-egui",
+    "apps/gui",
+    "apps/cli",
+]
