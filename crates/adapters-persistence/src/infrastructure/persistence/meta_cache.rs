@@ -3,6 +3,7 @@ use anyhow::Context;
 use rusqlite::{params, Connection, OpenFlags};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
+use std::time::Duration;
 
 pub struct MetaCache {
     conn: Connection,
@@ -26,6 +27,8 @@ impl MetaCache {
             .context("enable WAL journal_mode")?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .context("set synchronous to NORMAL")?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .context("set sqlite busy timeout")?;
 
         let cache = MetaCache {
             conn,
@@ -950,14 +953,15 @@ COMMIT;
     pub fn clear_library(&self) -> anyhow::Result<()> {
         self.conn.execute_batch(
             "BEGIN TRANSACTION;
+             DELETE FROM locations;
              DELETE FROM hashes;
+             DELETE FROM lyrics;
              DELETE FROM files;
              DELETE FROM tracks;
-             DELETE FROM locations;
+             DELETE FROM locations_staging;
              DELETE FROM hashes_staging;
              DELETE FROM files_staging;
              DELETE FROM tracks_staging;
-             DELETE FROM locations_staging;
              COMMIT;",
         )?;
         Ok(())

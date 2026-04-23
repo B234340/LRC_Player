@@ -18,7 +18,15 @@ use crate::presentation::app::{ArtistViewMode, GuiApp};
 pub fn clear_library(app: &mut GuiApp) {
     // メタデータキャッシュを開き、ライブラリをクリア
     if let Ok(cache) = MetaCache::open_default() {
-        let _ = cache.clear_library();
+        if let Err(err) = cache.clear_library() {
+            app.last_scan_status = Some(format!("Failed to clear library: {}", err));
+            app.update_app_vm();
+            return;
+        }
+    } else {
+        app.last_scan_status = Some("Failed to open meta cache for clear library".to_string());
+        app.update_app_vm();
+        return;
     }
     // メモリ上のアルバムアートワークキャッシュをクリア
     app.clear_album_artwork_cache();

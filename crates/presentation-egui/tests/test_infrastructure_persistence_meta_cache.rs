@@ -18,6 +18,18 @@ mod tests {
     }
 
     #[test]
+    fn clear_library_handles_current_schema() {
+        let cache = MetaCache::new(":memory:").expect("create in-memory db");
+        cache.clear_library().expect("clear library");
+
+        let row: i64 = cache
+            .connection()
+            .query_row("SELECT count(*) FROM tracks", [], |r| r.get(0))
+            .expect("query tracks");
+        assert_eq!(row, 0);
+    }
+
+    #[test]
     fn upsert_staging_and_checkpoint_moves_to_main() {
         let cache = MetaCache::new(":memory:").expect("create in-memory db");
 
