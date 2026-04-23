@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::egui;
-use image::{self, GenericImageView, io::Reader as ImageReader};
+use image::{self, io::Reader as ImageReader};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardVisualKey};
@@ -130,39 +130,10 @@ impl GuiApp {
         reader.decode().ok()
     }
 
-    /// 画像を正方形にクロップします。
-    /// 
-    /// 画像の中央部分を切り出し、短辺の長さを一辺とする正方形にします。
-    /// すでに正方形の場合はそのまま返します。
-    /// 
-    /// # 引数
-    /// * `image` - クロップ対象の画像
-    /// 
-    /// # 戻り値
-    /// 正方形にクロップされた画像
-    pub(crate) fn crop_image_to_square(&self, image: image::DynamicImage) -> image::DynamicImage {
-        let (width, height) = image.dimensions();
-        
-        // すでに正方形ならそのまま返す
-        if width == height {
-            return image;
-        }
-
-        // 短辺の長さを一辺とする
-        let side: u32 = width.min(height);
-        // 中央から切り出すためのオフセット計算
-        let x = (width - side) / 2;
-        let y = (height - side) / 2;
-        
-        // RGBA8に変換してクロップ
-        let buffer = image.to_rgba8();
-        let cropped = image::imageops::crop_imm(&buffer, x, y, side, side).to_image();
-        image::DynamicImage::ImageRgba8(cropped)
-    }
-
     /// 画像からeguiテクスチャを生成します。
     /// 
-    /// 画像は自動的に正方形にクロップされます。
+    /// 画像はアスペクト比を維持したまま、そのままテクスチャ化します。
+    /// 大きすぎる画像は最大2048pxまで縮小されます。
     /// 
     /// # 引数
     /// * `ctx` - eguiコンテキスト
@@ -177,8 +148,8 @@ impl GuiApp {
         image: image::DynamicImage,
         id: &str,
     ) -> Option<egui::TextureHandle> {
-        // 正方形にクロップ
-        let image = self.crop_image_to_square(image);
+        // 大きすぎる画像はテクスチャ負荷軽減のため最大2048pxに縮小
+        let image = image.thumbnail(2048, 2048);
         let size = [image.width() as usize, image.height() as usize];
         
         // egui用のカラー画像に変換
@@ -191,10 +162,9 @@ impl GuiApp {
     /// 画像をぼかし加工してeguiテクスチャを生成します。
     /// 
     /// パフォーマンス最適化のため、以下の処理を行います：
-    /// 1. 正方形にクロップ
-    /// 2. 512x512に縮小（ぼかし処理の負荷軽減）
-    /// 3. ガウシアンブラーを適用（半径10.0）
-    /// 4. テクスチャとしてロード
+    /// 1. 512x512に縮小（ぼかし処理の負荷軽減）
+    /// 2. ガウシアンブラーを適用（半径10.0）
+    /// 3. テクスチャとしてロード
     /// 
     /// # 引数
     /// * `ctx` - eguiコンテキスト
@@ -209,10 +179,7 @@ impl GuiApp {
         image: image::DynamicImage,
         id: &str,
     ) -> Option<egui::TextureHandle> {
-        // 正方形にクロップ
-        let image = self.crop_image_to_square(image);
-        
-        // ぼかし処理の負荷を軽減するため512x512に縮小
+        // ぼかし処理の負荷を軽減するため512x512に縮小（アスペクト比を維持）
         let image = image.thumbnail(512, 512);
         
         // ガウシアンブラーを適用（半径10.0）

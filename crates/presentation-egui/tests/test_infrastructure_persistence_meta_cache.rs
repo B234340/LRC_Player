@@ -232,6 +232,114 @@ mod tests {
     }
 
     #[test]
+    fn recent_locations_excludes_unavailable_paths() {
+        let cache = MetaCache::new(":memory:").expect("create in-memory db");
+
+        cache
+            .upsert_track(
+                "track-a",
+                Some("Song A"),
+                Some("Artist A"),
+                None,
+                None,
+                Some("Album A"),
+                None,
+                100,
+            )
+            .expect("upsert track A");
+        cache
+            .upsert_location(
+                "track-a",
+                "/tmp/track-a.mp3",
+                None,
+                None,
+                1234,
+                42,
+                1620000000,
+                false,
+                false,
+            )
+            .expect("upsert unavailable location A");
+        cache
+            .upsert_location(
+                "track-a",
+                "/tmp/track-a-available.mp3",
+                None,
+                None,
+                1235,
+                43,
+                1620000001,
+                true,
+                true,
+            )
+            .expect("upsert available location B");
+
+        let recent = cache.recent_locations(2).expect("recent locations");
+        assert_eq!(recent, vec!["/tmp/track-a-available.mp3".to_string()]);
+    }
+
+    #[test]
+    fn library_tracks_by_directory_excludes_unavailable_paths() {
+        let cache = MetaCache::new(":memory:").expect("create in-memory db");
+
+        cache
+            .upsert_track(
+                "track-a",
+                Some("Song A"),
+                Some("Artist A"),
+                None,
+                None,
+                Some("Album A"),
+                None,
+                100,
+            )
+            .expect("upsert track A");
+        cache
+            .upsert_location(
+                "track-a",
+                "/tmp/dir/track-a.mp3",
+                None,
+                None,
+                1234,
+                42,
+                1620000000,
+                true,
+                true,
+            )
+            .expect("upsert available location A");
+        cache
+            .upsert_track(
+                "track-b",
+                Some("Song B"),
+                Some("Artist A"),
+                None,
+                None,
+                Some("Album A"),
+                None,
+                101,
+            )
+            .expect("upsert track B");
+        cache
+            .upsert_location(
+                "track-b",
+                "/tmp/dir/track-b.mp3",
+                None,
+                None,
+                1235,
+                43,
+                1620000001,
+                false,
+                false,
+            )
+            .expect("upsert unavailable location B");
+
+        let paths = cache
+            .library_tracks_by_directory("/tmp/dir")
+            .expect("directory paths");
+        assert_eq!(paths, vec!["/tmp/dir/track-a.mp3".to_string()]);
+    }
+
+    #[test]
     fn duplicate_groups_returns_same_stable_key_paths() {
         let cache = MetaCache::new(":memory:").expect("create in-memory db");
         cache
@@ -291,6 +399,19 @@ mod tests {
             )
             .expect("upsert track A");
         cache
+            .upsert_location(
+                "track-a",
+                "/tmp/track-a.mp3",
+                None,
+                None,
+                1234,
+                42,
+                1620000000,
+                true,
+                true,
+            )
+            .expect("upsert location A");
+        cache
             .upsert_track(
                 "track-b",
                 Some("Song B"),
@@ -303,6 +424,19 @@ mod tests {
             )
             .expect("upsert track B");
         cache
+            .upsert_location(
+                "track-b",
+                "/tmp/track-b.mp3",
+                None,
+                None,
+                1235,
+                43,
+                1620000001,
+                true,
+                true,
+            )
+            .expect("upsert location B");
+        cache
             .upsert_track(
                 "track-c",
                 Some("Song C"),
@@ -314,6 +448,19 @@ mod tests {
                 102,
             )
             .expect("upsert track C");
+        cache
+            .upsert_location(
+                "track-c",
+                "/tmp/track-c.mp3",
+                None,
+                None,
+                1236,
+                44,
+                1620000002,
+                true,
+                true,
+            )
+            .expect("upsert location C");
 
         let albums = cache.library_albums().expect("library albums");
         assert_eq!(albums, vec!["Album X".to_string(), "Album Y".to_string()]);
@@ -339,6 +486,19 @@ mod tests {
             )
             .expect("upsert track A");
         cache
+            .upsert_location(
+                "track-a",
+                "/tmp/track-a.mp3",
+                None,
+                None,
+                1234,
+                42,
+                1620000000,
+                true,
+                true,
+            )
+            .expect("upsert location A");
+        cache
             .upsert_track(
                 "track-b",
                 Some("Song B"),
@@ -351,6 +511,19 @@ mod tests {
             )
             .expect("upsert track B");
         cache
+            .upsert_location(
+                "track-b",
+                "/tmp/track-b.mp3",
+                None,
+                None,
+                1235,
+                43,
+                1620000001,
+                true,
+                true,
+            )
+            .expect("upsert location B");
+        cache
             .upsert_track(
                 "track-c",
                 Some("Song C"),
@@ -362,6 +535,19 @@ mod tests {
                 102,
             )
             .expect("upsert track C");
+        cache
+            .upsert_location(
+                "track-c",
+                "/tmp/track-c.mp3",
+                None,
+                None,
+                1236,
+                44,
+                1620000002,
+                true,
+                true,
+            )
+            .expect("upsert location C");
 
         let album_x_tracks = cache
             .library_tracks_by_album("Album X")

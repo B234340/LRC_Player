@@ -633,11 +633,20 @@ COMMIT;
 
     /// Return aggregate library counts from the current meta cache.
     pub fn library_counts(&self) -> anyhow::Result<(usize, usize)> {
-        let track_count: i64 = self
-            .conn
-            .query_row("SELECT count(*) FROM tracks", [], |r| r.get(0))?;
+        let track_count: i64 = self.conn.query_row(
+            "SELECT count(DISTINCT t.content_id)
+             FROM tracks t
+             JOIN locations l ON l.content_id = t.content_id
+             WHERE l.available = 1",
+            [],
+            |r| r.get(0),
+        )?;
         let album_count: i64 = self.conn.query_row(
-            "SELECT count(DISTINCT album) FROM tracks WHERE album IS NOT NULL AND album <> ''",
+            "SELECT count(DISTINCT t.album)
+             FROM tracks t
+             JOIN locations l ON l.content_id = t.content_id
+             WHERE l.available = 1
+               AND t.album IS NOT NULL AND t.album <> ''",
             [],
             |r| r.get(0),
         )?;
@@ -648,7 +657,7 @@ COMMIT;
     pub fn recent_locations(&self, limit: usize) -> anyhow::Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path FROM locations ORDER BY last_seen DESC LIMIT ?1")?;
+            .prepare("SELECT path FROM locations WHERE available = 1 ORDER BY last_seen DESC LIMIT ?1")?;
         let rows = stmt.query_map(params![limit as i64], |row| row.get(0))?;
         let mut paths = Vec::new();
         for path in rows {
@@ -661,7 +670,7 @@ COMMIT;
     pub fn recent_directories(&self, limit: usize) -> anyhow::Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path FROM locations ORDER BY last_seen DESC")?;
+            .prepare("SELECT path FROM locations WHERE available = 1 ORDER BY last_seen DESC")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut dirs = Vec::new();
         let mut seen = HashSet::new();
@@ -706,10 +715,12 @@ COMMIT;
     /// Return distinct album names in the library.
     pub fn library_albums(&self) -> anyhow::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT album
-             FROM tracks
-             WHERE album IS NOT NULL AND album <> ''
-             ORDER BY album COLLATE NOCASE",
+            "SELECT DISTINCT t.album
+             FROM tracks t
+             JOIN locations l ON l.content_id = t.content_id
+             WHERE l.available = 1
+               AND t.album IS NOT NULL AND t.album <> ''
+             ORDER BY t.album COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], |row| Ok(row.get::<_, String>(0)?))?;
         let mut albums = Vec::new();
@@ -734,7 +745,7 @@ COMMIT;
             _ => "artist",
         };
         let sql = format!(
-            "SELECT DISTINCT {col} FROM tracks WHERE {col} IS NOT NULL AND {col} <> '' ORDER BY {col} COLLATE NOCASE"
+            "SELECT DISTINCT t.{col} FROM tracks t JOIN locations l ON l.content_id = t.content_id WHERE l.available = 1 AND t.{col} IS NOT NULL AND t.{col} <> '' ORDER BY t.{col} COLLATE NOCASE"
         );
         let mut stmt = self.conn.prepare(
             &sql,
@@ -750,7 +761,12 @@ COMMIT;
     /// Return track titles grouped by album.
     pub fn library_tracks_by_album(&self, album: &str) -> anyhow::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT COALESCE(title, '') FROM tracks WHERE album = ?1 ORDER BY title COLLATE NOCASE",
+            "SELECT DISTINCT COALESCE(t.title, '')
+             FROM tracks t
+             JOIN locations l ON l.content_id = t.content_id
+             WHERE l.available = 1
+               AND t.album = ?1
+             ORDER BY COALESCE(t.title, '') COLLATE NOCASE",
         )?;
         let rows = stmt.query_map(params![album], |row| row.get::<_, String>(0))?;
         let mut titles = Vec::new();
@@ -768,7 +784,8 @@ COMMIT;
                 "SELECT l.path
                  FROM tracks t
                  JOIN locations l ON l.content_id = t.content_id
-                 WHERE t.album = ?1",
+                 WHERE l.available = 1
+                   AND t.album = ?1",
             )?;
             let rows = stmt.query_map(params![album], |row| row.get::<_, String>(0))?;
             let mut paths = Vec::new();
@@ -783,7 +800,8 @@ COMMIT;
             "SELECT l.path
              FROM tracks t
              JOIN locations l ON l.content_id = t.content_id
-             WHERE t.album = ?1
+             WHERE l.available = 1
+               AND t.album = ?1
                AND COALESCE(NULLIF(t.album_artist, ''), NULLIF(t.artist, ''), '') = ?2",
         )?;
         let rows = stmt.query_map(params![album, album_owner], |row| row.get::<_, String>(0))?;
@@ -819,7 +837,8 @@ COMMIT;
             "SELECT COALESCE(t.album, ''), l.path
              FROM tracks t
              JOIN locations l ON l.content_id = t.content_id
-             WHERE t.{col} = ?1"
+             WHERE l.available = 1
+               AND t.{col} = ?1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![artist_name], |row| {
@@ -856,7 +875,12 @@ COMMIT;
     /// Return track titles grouped by artist.
     pub fn library_track_titles_by_artist(&self, artist: &str) -> anyhow::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT title FROM tracks WHERE artist = ?1 ORDER BY title COLLATE NOCASE",
+            "SELECT DISTINCT COALESCE(t.title, '')
+             FROM tracks t
+             JOIN locations l ON l.content_id = t.content_id
+             WHERE l.available = 1
+               AND t.artist = ?1
+             ORDER BY COALESCE(t.title, '') COLLATE NOCASE",
         )?;
         let rows = stmt.query_map(params![artist], |row| row.get(0))?;
         let mut titles = Vec::new();
@@ -941,7 +965,9 @@ COMMIT;
  
      /// Return a hierarchical tree of scanned library directories.
     pub fn library_directories(&self, limit: usize) -> anyhow::Result<Vec<LibraryDirectoryDto>> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT path FROM locations")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT path FROM locations WHERE available = 1")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut dirs = HashSet::new();
 
@@ -1011,7 +1037,7 @@ COMMIT;
         pattern.push('%');
 
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT l.path FROM tracks t JOIN locations l ON l.content_id = t.content_id WHERE l.path = ?1 OR l.path LIKE ?2",
+            "SELECT DISTINCT l.path FROM tracks t JOIN locations l ON l.content_id = t.content_id WHERE l.available = 1 AND (l.path = ?1 OR l.path LIKE ?2)",
         )?;
         let rows = stmt.query_map(params![directory, pattern], |row| row.get::<_, String>(0))?;
         let mut paths = Vec::new();
