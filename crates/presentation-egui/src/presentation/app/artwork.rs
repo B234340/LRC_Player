@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::egui;
-use image::{self, io::Reader as ImageReader};
+use image::{self, GenericImageView, io::Reader as ImageReader};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardVisualKey};
@@ -130,9 +130,32 @@ impl GuiApp {
         reader.decode().ok()
     }
 
+    /// 画像を正方形にクロップします。
+    /// 
+    /// 画像の中央部分を切り出し、短辺の長さを一辺とする正方形にします。
+    /// すでに正方形の場合はそのまま返します。
+    /// 
+    /// # 引数
+    /// * `image` - クロップ対象の画像
+    /// 
+    /// # 戻り値
+    /// 正方形にクロップされた画像
+    pub(crate) fn crop_image_to_square(&self, image: image::DynamicImage) -> image::DynamicImage {
+        let (width, height) = image.dimensions();
+        if width == height {
+            return image;
+        }
+        let side: u32 = width.min(height);
+        let x = (width - side) / 2;
+        let y = (height - side) / 2;
+        let buffer = image.to_rgba8();
+        let cropped = image::imageops::crop_imm(&buffer, x, y, side, side).to_image();
+        image::DynamicImage::ImageRgba8(cropped)
+    }
+
     /// 画像からeguiテクスチャを生成します。
     /// 
-    /// 画像はアスペクト比を維持したまま、そのままテクスチャ化します。
+    /// 画像は正方形にクロップされてテクスチャ化されます。
     /// 大きすぎる画像は最大2048pxまで縮小されます。
     /// 
     /// # 引数
@@ -150,6 +173,7 @@ impl GuiApp {
     ) -> Option<egui::TextureHandle> {
         // 大きすぎる画像はテクスチャ負荷軽減のため最大2048pxに縮小
         let image = image.thumbnail(2048, 2048);
+        let image = self.crop_image_to_square(image);
         let size = [image.width() as usize, image.height() as usize];
         
         // egui用のカラー画像に変換
@@ -179,8 +203,9 @@ impl GuiApp {
         image: image::DynamicImage,
         id: &str,
     ) -> Option<egui::TextureHandle> {
-        // ぼかし処理の負荷を軽減するため512x512に縮小（アスペクト比を維持）
+        // ぼかし処理の負荷を軽減するため512x512に縮小
         let image = image.thumbnail(512, 512);
+        let image = self.crop_image_to_square(image);
         
         // ガウシアンブラーを適用（半径10.0）
         let blurred = image::imageops::blur(&image, 10.0);

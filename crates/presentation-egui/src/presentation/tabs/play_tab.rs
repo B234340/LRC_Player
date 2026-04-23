@@ -180,9 +180,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             let max_side = available.x
                 .min((available.y - bottom_height).max(100.0))
                 .clamp(100.0, 1080.0);
-            let mut image_size = texture.size_vec2();
-            let scale = (max_side / image_size.x).min(max_side / image_size.y);
-            image_size *= scale;
+            let image_size = egui::vec2(max_side, max_side);
             let response = ui.image(texture, image_size);
 
             // LRCオーバーレイが有効な場合、アートワーク上に歌詞を重ねて表示
