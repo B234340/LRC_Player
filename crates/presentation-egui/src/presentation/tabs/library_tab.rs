@@ -159,6 +159,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     &playlist_targets,
                     TrackActivation::SingleClick,
                     24.0,
+                    22.0,
                     Some(ui.available_height()),
                     |_index, display| display.title.clone(),
                 );

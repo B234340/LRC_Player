@@ -448,6 +448,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     &playlist_targets,
                                     TrackActivation::DoubleClick,  // ダブルクリックで再生
                                     22.0,  // 行の高さ
+                                    22.0,
                                     Some((panel_height - 84.0).max(120.0)),  // 最大高さ
                                     |i, display| {
                                         // トラック番号付きの表示ラベル

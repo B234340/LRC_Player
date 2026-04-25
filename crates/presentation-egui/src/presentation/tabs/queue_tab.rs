@@ -128,6 +128,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         &playlist_targets,
         TrackActivation::SingleClick,
         row_height,
+        ui.text_style_height(&egui::TextStyle::Body) * 1.75,
         Some(ui.available_height()),
         |index, display| {
             if current_play_path == display.path {
@@ -156,7 +157,8 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             } else {
                 "☰"
             };
-            let handle_response = render_handle_button(ui, row_height, handle_label, 20.0)
+            let handle_size = ui.text_style_height(&egui::TextStyle::Body) * 1.75;
+            let handle_response = render_handle_button(ui, row_height, handle_label, handle_size, 20.0)
                 .on_hover_text("Handle: click to select. Hold 350ms to start moving one track.");
 
             if let Some(source) = app.queue_drag_source_index {

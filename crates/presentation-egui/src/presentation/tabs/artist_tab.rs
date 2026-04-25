@@ -212,6 +212,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     &playlist_targets,
                                     TrackActivation::DoubleClick,
                                     ui.text_style_height(&egui::TextStyle::Body) * 2.5,
+                                    22.0,
                                     Some(ui.available_height()),
                                     |index, display| {
                                         if current_play_path == display.path {

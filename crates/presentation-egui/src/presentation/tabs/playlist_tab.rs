@@ -182,6 +182,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     &playlist_targets,
                     TrackActivation::SingleClick,
                     54.0,
+                    22.0,
                     Some(ui.available_height().max(120.0)),
                     |index, display| {
                         if current_play_path == display.path {

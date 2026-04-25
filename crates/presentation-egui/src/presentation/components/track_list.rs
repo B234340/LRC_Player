@@ -143,27 +143,71 @@ pub fn button_area_width(button_size: f32, min_width: f32) -> f32 {
 
 /// ドラッグハンドルボタンを描画し、そのレスポンスを返します。
 ///
-/// `handle_size` はテキストの高さを基準に計算し、`min_width` だけは確保します。
+/// `handle_size` はタブ側で指定できるようにし、`min_width` は必要な最小幅を保証します。
 pub fn render_handle_button(
     ui: &mut egui::Ui,
     row_height: f32,
     handle_label: &str,
+    handle_size: f32,
     min_width: f32,
 ) -> egui::Response {
-    let handle_size = ui.text_style_height(&egui::TextStyle::Body) * 2.0;
     let handle_width = button_area_width(handle_size, min_width);
     let handle_area_height = button_area_height(row_height, handle_size);
     let handle_pad_y = button_area_vertical_padding(handle_area_height, handle_size);
 
+    let handle_text_size = (handle_size * 0.75).max(10.0);
     ui.allocate_ui_with_layout(
         egui::vec2(handle_width, handle_area_height),
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
             ui.add_space(handle_pad_y);
-            ui.add_sized([handle_size, handle_size], egui::Button::new(handle_label))
+            ui.add_sized(
+                [handle_size, handle_size],
+                egui::Button::new(egui::RichText::new(handle_label).size(handle_text_size)),
+            )
         },
     )
     .inner
+}
+
+/// お気に入りトグルボタンを描画し、そのレスポンスを返します。
+///
+/// `button_size` はタブ側で指定できます。`min_width` は最低幅を保証します。
+pub fn render_favorite_toggle(
+    ui: &mut egui::Ui,
+    app: &mut GuiApp,
+    track_path: &str,
+    row_height: f32,
+    button_size: f32,
+    min_width: f32,
+) -> egui::Response {
+    let is_favorite = perform_is_track_favorite(app, track_path);
+    let star_label = if is_favorite { "★" } else { "☆" };
+    let button_width = button_area_width(button_size, min_width);
+    let button_height = button_area_height(row_height, button_size);
+    let vertical_pad = button_area_vertical_padding(button_height, button_size);
+    let star_text_size = (button_size * 0.75).max(10.0);
+
+    let response = ui
+        .allocate_ui_with_layout(
+            egui::vec2(button_width, button_height),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.add_space(vertical_pad);
+                ui.add_sized(
+                    [button_size, button_size],
+                    egui::Button::new(egui::RichText::new(star_label).size(star_text_size)),
+                )
+            },
+        )
+        .inner
+        .on_hover_text("Toggle favorite");
+
+    if response.clicked() {
+        perform_toggle_favorite_action(app, track_path);
+    }
+
+    response
 }
 
 /// 行内ボタンの上下パディングを計算する。
@@ -202,6 +246,7 @@ pub fn render_standard_track_list<F>(
     playlist_targets: &[(usize, String)],
     activation: TrackActivation,
     row_height: f32,
+    favorite_button_size: f32,
     max_height: Option<f32>,
     mut label_for: F,
 ) -> TrackListOutcome
@@ -228,31 +273,7 @@ where
             // 行全体を水平レイアウトで配置
             ui.horizontal(|ui| {
                 // --- お気に入り星ボタン ---
-                let is_favorite = perform_is_track_favorite(app, track);
-                let star_label = if is_favorite { "★" } else { "☆" };
-                
-                // 星ボタンエリアの高さを計算（行の高さに合わせる、最小22px）
-                let star_area_height = row_height.max(22.0);
-                let vertical_pad = ((star_area_height - 22.0) * 0.5).max(0.0);
-                
-                // 星ボタンを中央配置するための専用UI領域
-                let toggle_response = ui
-                    .allocate_ui_with_layout(
-                        egui::vec2(28.0, star_area_height),
-                        egui::Layout::top_down(egui::Align::Center),
-                        |ui| {
-                            ui.add_space(vertical_pad);
-                            ui.add_sized([22.0, 22.0], egui::Button::new(star_label))
-                        },
-                    )
-                    .inner
-                    .on_hover_text("Toggle favorite"); // ホバー時のツールチップ
-
-                // 星ボタンがクリックされたらお気に入り状態を切り替え
-                if toggle_response.clicked() {
-                    perform_toggle_favorite_action(app, track);
-                }
-
+                let _ = render_favorite_toggle(ui, app, track, row_height, favorite_button_size, 28.0);
                 ui.add_space(4.0); // 星ボタンとラベルの間隔
                 
                 // --- トラック情報ラベル ---
@@ -347,6 +368,7 @@ pub fn render_track_list_with_artwork<F, S, H, P, R, T, M>(
     playlist_targets: &[(usize, String)],
     activation: TrackActivation,
     row_height: f32,
+    favorite_button_size: f32,
     max_height: Option<f32>,
     mut label_for: F,
     mut selected_for_row: S,
@@ -395,30 +417,10 @@ where
                     row_prefix(ui, app, index, &display, track);
                     ui.add_space(8.0);
 
-                    let art_size = egui::vec2(row_height, row_height);
-                    let star_area_height = art_size.y;
-                    let vertical_pad = ((star_area_height - 22.0) * 0.5).max(0.0);
-
-                    let is_favorite = perform_is_track_favorite(app, track);
-                    let star_label = if is_favorite { "★" } else { "☆" };
-                    let toggle_response = ui
-                        .allocate_ui_with_layout(
-                            egui::vec2(28.0, star_area_height),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |ui| {
-                                ui.add_space(vertical_pad);
-                                ui.add_sized([22.0, 22.0], egui::Button::new(star_label))
-                            },
-                        )
-                        .inner
-                        .on_hover_text("Toggle favorite");
-
-                    if toggle_response.clicked() {
-                        perform_toggle_favorite_action(app, track);
-                    }
-
+                    let _ = render_favorite_toggle(ui, app, track, row_height, favorite_button_size, 28.0);
                     ui.add_space(8.0);
 
+                    let art_size = egui::vec2(row_height, row_height);
                     artwork_renderer(ui, track, &format!("artwork_{}_{}", id_source, index), art_size, is_playing);
                     ui.add_space(8.0);
 
