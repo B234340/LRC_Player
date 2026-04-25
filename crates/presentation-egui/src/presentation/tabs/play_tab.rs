@@ -3,7 +3,7 @@ use crate::presentation::app::GuiApp;
 use eframe::egui;
 use std::time::{Duration, Instant};
 
-fn truncate_middle(text: &str, max_chars: usize) -> String {
+fn truncate_end(text: &str, max_chars: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= max_chars {
         return text.to_owned();
@@ -13,11 +13,8 @@ fn truncate_middle(text: &str, max_chars: usize) -> String {
     }
 
     let keep = max_chars - 3;
-    let head = keep / 2;
-    let tail = keep - head;
-    let start: String = chars[..head].iter().collect();
-    let end: String = chars[chars.len() - tail..].iter().collect();
-    format!("{}...{}", start, end)
+    let start: String = chars[..keep].iter().collect();
+    format!("{}...", start)
 }
 
 /// 再生コントロール画面のUIを描画する関数。
@@ -131,21 +128,38 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 .unwrap_or("lyrics");
             let full_path = file_path.display().to_string();
             let full_label = format!("{} — {}", file_name, full_path);
-            let display_label = truncate_middle(&full_label, 96);
+            let display_label = truncate_end(&full_label, 96);
             
             ui.horizontal(|ui| {
                 let load_button_width = 48.0;
                 let select_width =
                     (ui.available_width() - load_button_width - ui.spacing().item_spacing.x).max(80.0);
-                // 歌詞ファイル選択ボタン（選択状態がハイライト表示される）
-                let select_response = ui
-                    .add_sized(
-                        [select_width, ui.spacing().interact_size.y],
-                        egui::SelectableLabel::new(app.selected_lyrics_index == Some(index), display_label),
-                    )
-                    .on_hover_text(full_label);
+                let button_height = ui.spacing().interact_size.y;
+                let (select_rect, select_response) = ui.allocate_exact_size(
+                    egui::vec2(select_width, button_height),
+                    egui::Sense::click(),
+                );
+                let is_selected = app.selected_lyrics_index == Some(index);
+                let fill = if is_selected {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().widgets.inactive.bg_fill
+                };
+                ui.painter().rect_filled(select_rect, 4.0, fill);
+                let text_style = egui::TextStyle::Button.resolve(ui.style());
+                let text_pos = select_rect.left_center() + egui::vec2(8.0, 0.0);
+                ui.painter().text(
+                    text_pos,
+                    egui::Align2::LEFT_CENTER,
+                    display_label,
+                    text_style,
+                    ui.visuals().text_color(),
+                );
                 if select_response.clicked() {
                     app.load_lyrics_file(index);
+                }
+                if select_response.hovered() {
+                    ui.painter().rect_stroke(select_rect, 4.0, egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_fill));
                 }
                 // 「Load」ボタン：明示的な読み込み用（選択時の自動読み込みの補助）
                 if ui
