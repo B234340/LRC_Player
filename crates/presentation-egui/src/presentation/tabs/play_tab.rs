@@ -134,15 +134,24 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             let display_label = truncate_middle(&full_label, 96);
             
             ui.horizontal(|ui| {
+                let load_button_width = 48.0;
+                let select_width =
+                    (ui.available_width() - load_button_width - ui.spacing().item_spacing.x).max(80.0);
                 // 歌詞ファイル選択ボタン（選択状態がハイライト表示される）
                 let select_response = ui
-                    .selectable_label(app.selected_lyrics_index == Some(index), display_label)
+                    .add_sized(
+                        [select_width, ui.spacing().interact_size.y],
+                        egui::SelectableLabel::new(app.selected_lyrics_index == Some(index), display_label),
+                    )
                     .on_hover_text(full_label);
                 if select_response.clicked() {
                     app.load_lyrics_file(index);
                 }
                 // 「Load」ボタン：明示的な読み込み用（選択時の自動読み込みの補助）
-                if ui.button("Load").clicked() {
+                if ui
+                    .add_sized([load_button_width, ui.spacing().interact_size.y], egui::Button::new("Load"))
+                    .clicked()
+                {
                     app.load_lyrics_file(index);
                 }
             });
@@ -331,28 +340,40 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     }
 
     // ========== 再生コントロールボタン ==========
-    ui.horizontal(|ui| {
-        let button_size = ui.spacing().interact_size * 2.0;
-        // 「前の曲」ボタン：キューまたは履歴から前の曲を再生
-        if ui.add_sized(button_size, egui::Button::new("Previous")).clicked() {
-            app.play_previous();
-        }
-        
-        // 再生/一時停止ボタン：現在の状態に応じてラベルを動的に変更
-        let play_label = match app.playback_state {
-            lrc_player_domain::model::PlaybackState::Playing => "Pause",   // 再生中 → 一時停止
-            lrc_player_domain::model::PlaybackState::Paused => "Resume",   // 一時停止中 → 再開
-            _ => "Play",  // 停止中/バッファリング中など → 再生開始
-        };
-        if ui.add_sized(button_size, egui::Button::new(play_label)).clicked() {
-            app.toggle_play_pause();
-        }
-        
-        // 「次の曲」ボタン：キューまたは次のファイルを再生
-        if ui.add_sized(button_size, egui::Button::new("Next")).clicked() {
-            app.play_next();
-        }
-    });
+    let button_size = ui.spacing().interact_size * 2.0;
+    let spacing_x = ui.spacing().item_spacing.x;
+    let total_width = button_size.x * 3.0 + spacing_x * 2.0;
+    let (row_rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width().max(1.0), button_size.y), egui::Sense::hover());
+    let viewport_rect = ui.max_rect().intersect(ui.clip_rect());
+    let center_x = viewport_rect.center().x;
+    let start_x = (center_x - total_width * 0.5).clamp(row_rect.min.x, row_rect.max.x - total_width);
+    let mut x = start_x;
+
+    // 「前の曲」ボタン：キューまたは履歴から前の曲を再生
+    let prev_rect = egui::Rect::from_min_size(egui::pos2(x, row_rect.min.y), button_size);
+    if ui.put(prev_rect, egui::Button::new("Previous")).clicked() {
+        app.play_previous();
+    }
+    x += button_size.x + spacing_x;
+
+    // 再生/一時停止ボタン：現在の状態に応じてラベルを動的に変更
+    let play_label = match app.playback_state {
+        lrc_player_domain::model::PlaybackState::Playing => "Pause",   // 再生中 → 一時停止
+        lrc_player_domain::model::PlaybackState::Paused => "Resume",   // 一時停止中 → 再開
+        _ => "Play",  // 停止中/バッファリング中など → 再生開始
+    };
+    let play_rect = egui::Rect::from_min_size(egui::pos2(x, row_rect.min.y), button_size);
+    if ui.put(play_rect, egui::Button::new(play_label)).clicked() {
+        app.toggle_play_pause();
+    }
+    x += button_size.x + spacing_x;
+
+    // 「次の曲」ボタン：キューまたは次のファイルを再生
+    let next_rect = egui::Rect::from_min_size(egui::pos2(x, row_rect.min.y), button_size);
+    if ui.put(next_rect, egui::Button::new("Next")).clicked() {
+        app.play_next();
+    }
 
     ui.separator();
     
