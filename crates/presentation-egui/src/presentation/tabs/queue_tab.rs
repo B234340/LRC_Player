@@ -9,7 +9,12 @@ use crate::presentation::actions::track::{
     perform_open_track_details,
 };
 use crate::presentation::components::track_display::render_track_artwork;
-use crate::presentation::components::track_list::{render_track_list_with_artwork, TrackActivation};
+use crate::presentation::components::track_list::{
+    button_area_height,
+    button_area_vertical_padding,
+    render_track_list_with_artwork,
+    TrackActivation,
+};
 use crate::presentation::app::GuiApp;
 use eframe::egui;
 use std::collections::HashMap;
@@ -114,6 +119,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let current_play_path = app.play_path.clone();
     let selected_queue_indices = app.selected_queue_indices.clone();
     let selected_queue_indices_for_row = selected_queue_indices.clone();
+    let row_height = ui.text_style_height(&egui::TextStyle::Body) * 3.5,
 
     let track_list_outcome = render_track_list_with_artwork(
         ui,
@@ -122,7 +128,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         &tracks,
         &playlist_targets,
         TrackActivation::SingleClick,
-        54.0,
+        row_height,
         Some(ui.available_height()),
         |index, display| {
             if current_play_path == display.path {
@@ -152,8 +158,8 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 "☰"
             };
             let handle_size = 18.0_f32;
-            let handle_area_height = 54.0_f32;
-            let handle_pad_y = ((handle_area_height - handle_size) * 0.5).max(0.0);
+            let handle_area_height = button_area_height(row_height, handle_size);
+            let handle_pad_y = button_area_vertical_padding(handle_area_height, handle_size);
 
             let handle_response = ui
                 .allocate_ui_with_layout(

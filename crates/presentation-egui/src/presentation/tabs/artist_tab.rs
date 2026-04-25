@@ -7,10 +7,8 @@ use crate::presentation::actions::queue::{
 use crate::presentation::actions::track::{
     apply_enqueue_action,
     apply_play_action,
-    apply_toggle_favorite_action,
     perform_add_tracks_to_favorite_playlist,
     perform_add_track_to_playlist,
-    perform_is_track_favorite,
     perform_open_track_details,
 };
 use crate::presentation::components::track_display::render_track_artwork_with_file_first;
@@ -175,12 +173,14 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     egui::vec2(ui.available_width(), body_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
+                        // タイトル表示
                         ui.heading("Tracks");
                         
                         if let Some(selected) = selected_artist.as_deref() {
+                            // 選択中アーティストの名前を表示
                             ui.label(format!("Artist: {}", selected));
                             
-                            // 全トラックをお気に入りに追加するボタン
+                            // 右ペイン上部の操作ボタン：このアーティストの全トラックをお気に入りに追加
                             if !selected_artist_tracks.is_empty()
                                 && ui.button("Add all to favorite").clicked()
                             {
@@ -188,18 +188,22 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                             }
                             ui.separator();
 
+                            // トラックが存在しない場合のメッセージ表示
                             if selected_artist_tracks.is_empty() {
                                 ui.label("No tracks found for this artist.");
                             } else {
+                                // トラック一覧の操作説明
                                 ui.label("Double left click: create queue from this list and play. Right click: common actions.");
                                 ui.separator();
 
+                                // 選択中アーティストのトラックパスリストを作成
                                 let track_paths: Vec<String> = selected_artist_tracks
                                     .iter()
                                     .map(|track| track.id.clone())
                                     .collect();
                                 let current_play_path = app.play_path.clone();
 
+                                // トラック一覧を表示（アートワーク付き、2行表示、幅2.5行分）
                                 let track_list_outcome = render_track_list_with_artwork(
                                     ui,
                                     app,
@@ -207,28 +211,30 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     &track_paths,
                                     &playlist_targets,
                                     TrackActivation::DoubleClick,
-                                    44.0,
+                                    ui.text_style_height(&egui::TextStyle::Body) * 2.5,
                                     Some(ui.available_height()),
                                     |index, display| {
                                         if current_play_path == display.path {
-                                            format!("{}: {} [Playing]", index + 1, display.title)
+                                            format!(
+                                                "{}: {} [Playing]\n{}",
+                                                index + 1,
+                                                display.title,
+                                                display.album,
+                                            )
                                         } else {
-                                            format!("{}: {}", index + 1, display.title)
+                                            format!(
+                                                "{}: {}\n{}",
+                                                index + 1,
+                                                display.title,
+                                                display.album,
+                                            )
                                         }
                                     },
                                     |_, _, _, _| false,
                                     render_track_artwork_with_file_first,
                                     |_, _, _, _, _| {},
                                     |_, _, _, _, _, _| false,
-                                    |ui, app, index, _display, track_path, outcome| {
-                                        let star_label = if perform_is_track_favorite(app, track_path) {
-                                            "★"
-                                        } else {
-                                            "☆"
-                                        };
-                                        if ui.button(star_label).clicked() {
-                                            apply_toggle_favorite_action(app, track_path);
-                                        }
+                                    |ui, _app, index, _display, track_path, outcome| {
                                         if ui.button("Play").clicked() {
                                             apply_play_action(outcome, index, &track_paths);
                                         }

@@ -126,6 +126,21 @@ fn resolve_track_display(
     }
 }
 
+/// 行内ボタンの表示エリアの高さを決定する。
+///
+/// 行の高さとボタンサイズのうち大きい方を採用し、
+/// ボタンが十分に収まる高さを保証します。
+pub fn button_area_height(row_height: f32, button_size: f32) -> f32 {
+    row_height.max(button_size)
+}
+
+/// 行内ボタンの上下パディングを計算する。
+///
+/// ボタンサイズをエリア高さの中央に配置するための余白を返します。
+pub fn button_area_vertical_padding(area_height: f32, button_size: f32) -> f32 {
+    ((area_height - button_size) * 0.5).max(0.0)
+}
+
 /// 標準的なトラックリストを描画する。
 /// 
 /// 各トラック行には以下の要素が含まれる：
