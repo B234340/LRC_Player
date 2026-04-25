@@ -3,6 +3,23 @@ use crate::presentation::app::GuiApp;
 use eframe::egui;
 use std::time::{Duration, Instant};
 
+fn truncate_middle(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_owned();
+    }
+    if max_chars <= 3 {
+        return "...".to_owned();
+    }
+
+    let keep = max_chars - 3;
+    let head = keep / 2;
+    let tail = keep - head;
+    let start: String = chars[..head].iter().collect();
+    let end: String = chars[chars.len() - tail..].iter().collect();
+    format!("{}...{}", start, end)
+}
+
 /// 再生コントロール画面のUIを描画する関数。
 /// 
 /// この画面には以下の要素が含まれる：
@@ -112,14 +129,16 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("lyrics");
-            let label = format!("{} — {}", file_name, file_path.display());
+            let full_path = file_path.display().to_string();
+            let full_label = format!("{} — {}", file_name, full_path);
+            let display_label = truncate_middle(&full_label, 96);
             
             ui.horizontal(|ui| {
                 // 歌詞ファイル選択ボタン（選択状態がハイライト表示される）
-                if ui
-                    .selectable_label(app.selected_lyrics_index == Some(index), label)
-                    .clicked()
-                {
+                let select_response = ui
+                    .selectable_label(app.selected_lyrics_index == Some(index), display_label)
+                    .on_hover_text(full_label);
+                if select_response.clicked() {
                     app.load_lyrics_file(index);
                 }
                 // 「Load」ボタン：明示的な読み込み用（選択時の自動読み込みの補助）
@@ -145,6 +164,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
         if let Some(texture) = display_texture {
             let available = ui.available_size();
+            let available_width = available.x.max(1.0);
             // 画面内で他UIを除いた残り領域をアートワークに使うため、
             // 下部の各ウィジェットの実際の高さを計算する。
             let text_height = ui.text_style_height(&egui::TextStyle::Body);
@@ -177,11 +197,17 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             // アートワーク直後の余白
             bottom_height += 12.0;
 
-            let max_side = available.x
-                .min((available.y - bottom_height).max(100.0))
-                .clamp(100.0, 1080.0);
+            let max_side = available_width
+                .min((available.y - bottom_height).max(1.0))
+                .clamp(1.0, 1080.0);
             let image_size = egui::vec2(max_side, max_side);
-            let response = ui.image(texture, image_size);
+            let response = ui
+                .allocate_ui_with_layout(
+                    egui::vec2(available_width, image_size.y),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| ui.image(texture, image_size),
+                )
+                .inner;
 
             // LRCオーバーレイが有効な場合、アートワーク上に歌詞を重ねて表示
             if app.lrc_overlay_enabled {
