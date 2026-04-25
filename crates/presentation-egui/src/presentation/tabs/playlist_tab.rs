@@ -9,7 +9,6 @@ use crate::presentation::actions::track::{
     apply_enqueue_action,
     apply_play_action,
     apply_remove_action,
-    apply_toggle_favorite_action,
     perform_add_track_to_playlist,
     perform_add_track_to_selected_playlist,
     perform_open_track_details,
@@ -208,7 +207,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     |_, _, _, _, _| {},
                     |_, _, _, _, _| {},
                     |_, _, _, _, _, _| false,
-                    |ui, app, index, _display, track_path, outcome| {
+                    |ui, _app, index, _display, track_path, outcome| {
                         if ui.button("Remove").clicked() {
                             apply_remove_action(outcome, index);
                         }
@@ -217,9 +216,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                         }
                         if ui.button("Add to queue").clicked() {
                             apply_enqueue_action(outcome, track_path);
-                        }
-                        if ui.button("Favorite").clicked() {
-                            apply_toggle_favorite_action(app, track_path);
                         }
                     },
                     |_, _, _, _, _, _| {},
