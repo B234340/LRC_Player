@@ -287,18 +287,10 @@ fn split_into_two_rows(
     let mut best_whitespace_dist = f32::MAX;
     let mut fallback_whitespace_split: Option<usize> = None;
     let mut fallback_whitespace_dist = f32::MAX;
-
     let mut prev_char: Option<char> = None;
-    for (idx, ch) in text.char_indices() {
-        let is_candidate = if is_break_whitespace(ch) {
-            true
-        } else if let Some(prev) = prev_char {
-            is_preferred_boundary(prev, ch)
-        } else {
-            false
-        };
 
-        if !is_candidate {
+    for (idx, ch) in text.char_indices() {
+        if !is_break_whitespace(ch) {
             prev_char = Some(ch);
             continue;
         }
@@ -483,27 +475,22 @@ fn split_into_three_rows(
     let mut whitespace_positions: Vec<(usize, f32)> = Vec::new();
     let mut prev_char: Option<char> = None;
     for (idx, ch) in text.char_indices() {
-        let is_boundary = if is_break_whitespace(ch) {
-            true
-        } else if let Some(prev) = prev_char {
-            is_preferred_boundary(prev, ch)
-        } else {
-            false
-        };
-        if is_boundary {
-            let split_idx = boundary_split_index(text, idx, ch, prev_char);
-            let prefix = &text[..split_idx];
-            let width = ui.fonts(|fonts| {
-                let mut job = egui::text::LayoutJob::default();
-                job.append(
-                    prefix,
-                    0.0,
-                    egui::TextFormat::simple(font.clone(), egui::Color32::WHITE),
-                );
-                fonts.layout_job(job).size().x
-            });
-            whitespace_positions.push((split_idx, width));
+        if !is_break_whitespace(ch) {
+            prev_char = Some(ch);
+            continue;
         }
+        let split_idx = boundary_split_index(text, idx, ch, prev_char);
+        let prefix = &text[..split_idx];
+        let width = ui.fonts(|fonts| {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                prefix,
+                0.0,
+                egui::TextFormat::simple(font.clone(), egui::Color32::WHITE),
+            );
+            fonts.layout_job(job).size().x
+        });
+        whitespace_positions.push((split_idx, width));
         prev_char = Some(ch);
     }
 
