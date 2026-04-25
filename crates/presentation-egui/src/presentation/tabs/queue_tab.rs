@@ -119,7 +119,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let current_play_path = app.play_path.clone();
     let selected_queue_indices = app.selected_queue_indices.clone();
     let selected_queue_indices_for_row = selected_queue_indices.clone();
-    let row_height = ui.text_style_height(&egui::TextStyle::Body) * 3.5,
+    let row_height = ui.text_style_height(&egui::TextStyle::Body) * 3.5;
 
     let track_list_outcome = render_track_list_with_artwork(
         ui,
@@ -157,13 +157,14 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             } else {
                 "☰"
             };
-            let handle_size = 18.0_f32;
+            let handle_size = ui.text_style_height(&egui::TextStyle::Body) * 2.0;
+            let handle_width = handle_size.max(20.0);
             let handle_area_height = button_area_height(row_height, handle_size);
             let handle_pad_y = button_area_vertical_padding(handle_area_height, handle_size);
 
             let handle_response = ui
                 .allocate_ui_with_layout(
-                    egui::vec2(20.0, handle_area_height),
+                    egui::vec2(handle_width, handle_area_height),
                     egui::Layout::top_down(egui::Align::Center),
                     |ui| {
                         ui.add_space(handle_pad_y);
