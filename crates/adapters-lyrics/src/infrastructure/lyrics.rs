@@ -84,39 +84,50 @@ impl Lyrics {
 
     fn parse_timestamped_line(line: &str) -> Option<(u64, String, Vec<LyricSegment>)> {
         let mut segments = Vec::new();
+        let mut current_time: Option<u64> = None;
+        let mut current_kind: LyricTagKind = LyricTagKind::Bracket;
+        let mut current_text = String::new();
         let mut i = 0;
 
         while i < line.len() {
-            let remaining = &line[i..];
-            let (closing, tag_kind) = if remaining.starts_with('[') {
-                (']', LyricTagKind::Bracket)
-            } else if remaining.starts_with('<') {
-                ('>', LyricTagKind::Angle)
-            } else {
-                break;
-            };
-
-            if let Some(end_rel) = remaining[1..].find(closing) {
-                let tag = &remaining[1..1 + end_rel];
-                if let Some(ms) = parse_timestamp(tag) {
-                    let content_start = i + 1 + end_rel + closing.len_utf8();
-                    let next_tag_offset = line[content_start..]
-                        .find('[')
-                        .or_else(|| line[content_start..].find('<'))
-                        .map(|offset| content_start + offset)
-                        .unwrap_or(line.len());
-                    let segment_text = line[content_start..next_tag_offset].to_string();
-                    segments.push(LyricSegment {
-                        time_ms: ms,
-                        text: segment_text,
-                        tag_kind,
-                    });
-                    i = next_tag_offset;
-                    continue;
+            let ch = line[i..].chars().next().unwrap();
+            if ch == '[' || ch == '<' {
+                let closing = if ch == '[' { ']' } else { '>' };
+                if let Some(end_rel) = line[i + ch.len_utf8()..].find(closing) {
+                    let tag = &line[i + ch.len_utf8()..i + ch.len_utf8() + end_rel];
+                    if let Some(ms) = parse_timestamp(tag) {
+                        if let Some(time_ms) = current_time {
+                            segments.push(LyricSegment {
+                                time_ms,
+                                text: current_text.clone(),
+                                tag_kind: current_kind.clone(),
+                            });
+                        }
+                        current_time = Some(ms);
+                        current_kind = if ch == '[' {
+                            LyricTagKind::Bracket
+                        } else {
+                            LyricTagKind::Angle
+                        };
+                        current_text.clear();
+                        i += ch.len_utf8() + end_rel + closing.len_utf8();
+                        continue;
+                    }
                 }
             }
 
-            break;
+            if let Some(_) = current_time {
+                current_text.push(ch);
+            }
+            i += ch.len_utf8();
+        }
+
+        if let Some(time_ms) = current_time {
+            segments.push(LyricSegment {
+                time_ms,
+                text: current_text,
+                tag_kind: current_kind,
+            });
         }
 
         if segments.is_empty() {
