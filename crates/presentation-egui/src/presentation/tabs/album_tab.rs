@@ -12,6 +12,7 @@ use crate::presentation::actions::track::{
 use crate::presentation::components::track_list::{
     render_standard_track_list, TrackActivation,
 };
+use crate::presentation::actions::click;
 use crate::presentation::app::GuiApp;
 use eframe::egui;
 
@@ -454,14 +455,15 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     "album_detail_tracks_scroll",
                                     &tracks,
                                     &playlist_targets,
-                                    TrackActivation::DoubleClick,  // ダブルクリックで再生
-                                    22.0,  // 行の高さ
+                                    TrackActivation::DoubleClick,
                                     22.0,
-                                    Some((panel_height - 84.0).max(120.0)),  // 最大高さ
+                                    22.0,
+                                    Some((panel_height - 84.0).max(120.0)),
                                     |i, display| {
                                         // トラック番号付きの表示ラベル
                                         format!("{:>2}. {} - {}", i + 1, display.title, display.artist)
                                     },
+                                    |_index| false,
                                 );
 
                                 // トラックリスト操作の結果を保留変数に保存
@@ -484,6 +486,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     
     // アルバム選択の切り替え
     if let Some(next) = action {
+        if selected_album.as_deref() != next.as_deref() {
+            click::clear_selected_track_index(ui, "album_detail_tracks_scroll");
+        }
         app.select_album(next);
     }
     // トラックリストからの再生（ダブルクリック）

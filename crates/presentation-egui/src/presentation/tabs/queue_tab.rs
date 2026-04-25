@@ -8,6 +8,7 @@ use crate::presentation::actions::track::{
     perform_add_track_to_playlist,
     perform_open_track_details,
 };
+use crate::presentation::actions::click;
 use crate::presentation::components::track_display::render_track_artwork;
 use crate::presentation::components::track_list::{
     render_handle_button,
@@ -120,13 +121,14 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let selected_queue_indices_for_row = selected_queue_indices.clone();
     let row_height = ui.text_style_height(&egui::TextStyle::Body) * 3.5;
 
+    ui.label("Single click: select queue item. Double click: play selected queue item. Right click: common actions.");
     let track_list_outcome = render_track_list_with_artwork(
         ui,
         app,
         "queue_tracks_scroll",
         &tracks,
         &playlist_targets,
-        TrackActivation::SingleClick,
+        TrackActivation::DoubleClick,
         row_height,
         ui.text_style_height(&egui::TextStyle::Body) * 1.75,
         Some(ui.available_height()),
@@ -211,6 +213,21 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                         app.move_queue_item_to(source, index);
                         app.cancel_queue_drag();
                     }
+                    return true;
+                }
+
+                // Allow double-click to be handled by process_track_activation first.
+                if response.double_clicked() {
+                    return false;
+                }
+
+                if click::process_single_click_selection(
+                    &response,
+                    app,
+                    index,
+                    shift_pressed,
+                    ctrl_pressed,
+                ) {
                     return true;
                 }
             }

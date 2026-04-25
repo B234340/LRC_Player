@@ -143,7 +143,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             ui.label("No tracks found for this directory.");
         } else {
             ui.group(|ui| {
-                ui.label("Left click: create queue from this list and play. Right click: common actions.");
+                ui.label("Double click: create queue from this list and play. Right click: common actions.");
 
                 let track_paths: Vec<String> = library
                     .selected_directory_tracks
@@ -157,11 +157,12 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     "library_directory_tracks",
                     &track_paths,
                     &playlist_targets,
-                    TrackActivation::SingleClick,
+                    TrackActivation::DoubleClick,
                     24.0,
                     22.0,
                     Some(ui.available_height()),
                     |_index, display| display.title.clone(),
+                    |_index| false,
                 );
 
                 pending_play_index = track_list_outcome.play_index;

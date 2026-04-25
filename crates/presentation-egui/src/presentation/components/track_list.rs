@@ -1,4 +1,5 @@
 use lrc_player_application::infrastructure::persistence::MetaCache;
+use crate::presentation::actions::click;
 use crate::presentation::actions::track::{
     perform_is_track_favorite,
     perform_toggle_favorite_action,
@@ -241,7 +242,7 @@ pub fn button_area_vertical_padding(area_height: f32, button_size: f32) -> f32 {
 /// # 戻り値
 /// ユーザー操作の結果を表す `TrackListOutcome`
 #[allow(clippy::too_many_arguments)]
-pub fn render_standard_track_list<F>(
+pub fn render_standard_track_list<F, S>(
     ui: &mut egui::Ui,
     app: &mut GuiApp,
     id_source: &str,
@@ -252,9 +253,11 @@ pub fn render_standard_track_list<F>(
     favorite_button_size: f32,
     max_height: Option<f32>,
     mut label_for: F,
+    mut selected_for_row: S,
 ) -> TrackListOutcome
 where
     F: FnMut(usize, &TrackDisplay) -> String,
+    S: FnMut(usize) -> bool,
 {
     // 戻り値となる結果オブジェクトを初期化
     let mut outcome = TrackListOutcome::default();
@@ -280,19 +283,23 @@ where
                     ui.add_space(4.0); // star button spacing
                 
                 // --- トラック情報ラベル ---
-                let response = ui.selectable_label(false, label);
+                let selected = selected_for_row(index)
+                    || click::selected_track_index(ui, id_source) == Some(index);
+                let response = ui.selectable_label(selected, label);
+
+                // 行クリックで選択を保持
+                if response.clicked() {
+                    click::set_selected_track_index(ui, id_source, index);
+                }
 
                 // アクティベーション方法に応じたクリック判定
-                let activated = match activation {
-                    TrackActivation::SingleClick => response.clicked(),
-                    TrackActivation::DoubleClick => response.double_clicked(),
-                };
-                
-                // アクティベートされた場合、再生開始情報を結果に設定
-                if activated {
-                    outcome.play_index = Some(index);
-                    outcome.play_list = displayed_tracks.clone();
-                }
+                click::process_track_activation(
+                    &response,
+                    activation,
+                    index,
+                    &displayed_tracks,
+                    &mut outcome,
+                );
 
                 // --- 右クリックによるコンテキストメニュー ---
                 response.context_menu(|ui| {
@@ -401,7 +408,8 @@ where
             let display = resolve_track_display(track, meta_cache.as_ref(), &mut metadata_cache);
             let label = label_for(index, &display);
             let is_playing = app.play_path == *track;
-            let selected = selected_for_row(app, index, &display, track);
+            let selected = selected_for_row(app, index, &display, track)
+                || click::selected_track_index(ui, id_source) == Some(index);
 
             let mut frame = egui::Frame::group(ui.style());
             if is_playing {
@@ -432,18 +440,21 @@ where
                             .selectable_label(selected, label)
                             .on_hover_text("Double click to play. Right click for actions.");
 
+                        // 行クリックで選択状態を保持
+                        if response.clicked() {
+                            click::set_selected_track_index(ui, id_source, index);
+                        }
+
                         let handled = response_handler(&response, app, index, &display, track, &mut outcome);
 
                         if !handled {
-                            let activated = match activation {
-                                TrackActivation::SingleClick => response.clicked(),
-                                TrackActivation::DoubleClick => response.double_clicked(),
-                            };
-
-                            if activated {
-                                outcome.play_index = Some(index);
-                                outcome.play_list = displayed_tracks.clone();
-                            }
+                            click::process_track_activation(
+                                &response,
+                                activation,
+                                index,
+                                &displayed_tracks,
+                                &mut outcome,
+                            );
                         }
 
                         response.context_menu(|ui| {

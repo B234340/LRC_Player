@@ -5,6 +5,7 @@ use crate::presentation::actions::queue::{
     perform_enqueue_track_path,
     perform_play_from_displayed_list,
 };
+use crate::presentation::actions::click;
 use crate::presentation::actions::track::{
     apply_enqueue_action,
     apply_play_action,
@@ -64,53 +65,61 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         // "favorite" という名前のプレイリストは特別扱い（削除・並び替え不可）
         let is_favorite = playlist.name.eq_ignore_ascii_case("favorite");
         
-        // 選択状態に応じてフレームのスタイルを変更（ハイライト表示）
+        let row_height = ui.text_style_height(&egui::TextStyle::Body) * 2.5;
+        let row_size = egui::vec2(ui.available_width(), row_height);
+        let (row_rect, row_response) = ui.allocate_exact_size(row_size, egui::Sense::click());
+
         let mut frame = egui::Frame::group(ui.style());
         if selected {
             frame = frame
-                .fill(ui.visuals().selection.bg_fill)  // 選択時の背景色
+                .fill(ui.visuals().selection.bg_fill)
                 .stroke(egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
+        } else if row_response.hovered() {
+            frame = frame
+                .fill(ui.visuals().widgets.hovered.bg_fill)
+                .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_stroke.color));
         }
 
-        frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
-                // お気に入りプレイリストの場合は★マークを付けて視覚的に区別
-                let label = if is_favorite {
-                    format!("★ {}", playlist.name)
-                } else {
-                    playlist.name.clone()
-                };
-                
-                // プレイリスト選択ラベル（クリックで選択/選択解除）
-                let response = ui.add(egui::SelectableLabel::new(selected, label));
-                if response.clicked() {
-                    if selected {
-                        pending_select_playlist = Some(None);  // 選択解除
-                    } else {
-                        pending_select_playlist = Some(Some(index));  // 選択
-                    }
-                }
-                
-                // 右寄せで操作ボタンを配置
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 下に移動ボタン
-                    // お気に入り以外、かつ最後の要素以外の場合のみ有効
-                    if ui.add_enabled(!is_favorite && index < app.playlists.len() - 1, egui::Button::new("↓")).clicked() {
-                        pending_move_playlist_down = Some(index);
-                    }
-                    // 上に移動ボタン
-                    // お気に入り以外、かつインデックス1以上の場合のみ有効
-                    // （インデックス0はお気に入りプレイリストの可能性があるため1以上とする）
-                    if ui.add_enabled(index > 1, egui::Button::new("↑")).clicked() {
-                        pending_move_playlist_up = Some(index);
-                    }
-                    // 削除ボタン（お気に入り以外のみ削除可能）
-                    if ui.add_enabled(!is_favorite, egui::Button::new("Delete")).clicked() {
-                        pending_delete_playlist = Some(index);
-                    }
-                });
-            });
+        ui.painter().add(frame.paint(row_rect));
+
+        let mut button_clicked = false;
+        let mut row_ui = ui.child_ui(row_rect.shrink(4.0), egui::Layout::left_to_right(egui::Align::Center));
+        row_ui.add_space(8.0);
+
+        let label_text = if is_favorite {
+            format!("★ {}", playlist.name)
+        } else {
+            playlist.name.clone()
+        };
+        let label_color = if selected {
+            ui.visuals().selection.stroke.color
+        } else {
+            ui.visuals().text_color()
+        };
+        row_ui.label(egui::RichText::new(label_text).color(label_color));
+
+        row_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui: &mut egui::Ui| {
+            if ui.add_enabled(!is_favorite && index < app.playlists.len() - 1, egui::Button::new("↓")).clicked() {
+                pending_move_playlist_down = Some(index);
+                button_clicked = true;
+            }
+            if ui.add_enabled(index > 1, egui::Button::new("↑")).clicked() {
+                pending_move_playlist_up = Some(index);
+                button_clicked = true;
+            }
+            if ui.add_enabled(!is_favorite, egui::Button::new("Delete")).clicked() {
+                pending_delete_playlist = Some(index);
+                button_clicked = true;
+            }
         });
+
+        if row_response.clicked() && !button_clicked {
+            if selected {
+                pending_select_playlist = Some(None);
+            } else {
+                pending_select_playlist = Some(Some(index));
+            }
+        }
         ui.add_space(4.0);  // プレイリスト間の余白
     }
 
@@ -131,6 +140,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
     // ========== プレイリスト選択アクションの実行 ==========
     if let Some(selection) = pending_select_playlist {
+        click::clear_selected_track_index(ui, "playlist_tracks_scroll");
         app.selected_playlist = selection;
         app.update_app_vm();  // ViewModelを更新
     }
@@ -170,7 +180,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             if playlist.tracks.is_empty() {
                 ui.label("No tracks in this playlist.");
             } else {
-                ui.label("Left click: create queue from this list and play. Right click: common actions.");
+                ui.label("Double click: create queue from this list and play. Right click: common actions.");
                 let current_play_path = app.play_path.clone();
 
                 let track_list_outcome = render_track_list_with_artwork(
@@ -179,7 +189,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     "playlist_tracks_scroll",
                     &playlist.tracks,
                     &playlist_targets,
-                    TrackActivation::SingleClick,
+                    TrackActivation::DoubleClick,
                     54.0,
                     22.0,
                     Some(ui.available_height().max(120.0)),

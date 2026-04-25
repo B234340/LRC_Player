@@ -1,4 +1,5 @@
 use crate::presentation::actions::play::perform_play_track_now;
+use crate::presentation::actions::click;
 use crate::presentation::actions::queue::{
     perform_add_track_next_in_queue,
     perform_enqueue_track_path,
@@ -269,6 +270,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     // UI描画完了後に実際の状態変更を行う
     
     if let Some(next) = action {
+        if selected_artist.as_deref() != next.as_deref() {
+            click::clear_selected_track_index(ui, "artist_tracks_scroll");
+        }
         app.select_artist(next);  // アーティスト選択/選択解除
     }
     if let Some(index) = pending_play_index {
