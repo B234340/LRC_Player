@@ -37,6 +37,8 @@ pub fn play_selected_queue_item(app: &mut GuiApp) {
             app.select_queue_item_single(index);
             // 現在のキューインデックスを更新
             app.current_queue_index = Some(index);
+            // トラック変更時に歌詞オフセットをリセット
+            app.reset_lyrics_offset_if_track_changed(&path);
             // 再生パスを設定
             app.play_path = path;
             // 再生位置を先頭にリセット
@@ -65,6 +67,8 @@ pub fn perform_play_track_now(app: &mut GuiApp, path: &str) {
     if path.trim().is_empty() {
         return;
     }
+    // トラック変更時に歌詞オフセットをリセット
+    app.reset_lyrics_offset_if_track_changed(path);
     // 再生パスを設定
     app.play_path = path.to_string();
     // 再生位置を先頭にリセット
@@ -131,6 +135,7 @@ pub fn play_current_queue_item(app: &mut GuiApp) {
         if let Some(path) = app.queue.tracks.get(index).cloned() {
             app.select_queue_item_single(index);
             app.current_queue_index = Some(index);
+            app.reset_lyrics_offset_if_track_changed(&path);
             app.play_path = path;
             app.playback_state = PlaybackState::Buffering;
             app.discover_lyrics_for_current_play_path();

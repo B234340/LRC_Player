@@ -102,6 +102,16 @@ impl GuiApp {
         }
     }
 
+    /// 再生トラックが変更された場合に歌詞オフセットをリセットします。
+    ///
+    /// 同じトラックを再度再生した場合はリセットしません。
+    pub(crate) fn reset_lyrics_offset_if_track_changed(&mut self, new_play_path: &str) {
+        if self.play_path != new_play_path {
+            self.lyrics_offset_ms = 0;
+            self.save_state();
+        }
+    }
+
     /// 選択中のLRCファイルへ現在の歌詞オフセットを恒久反映します。
     ///
     /// - `[]` と `<>` のタイムタグをすべて走査

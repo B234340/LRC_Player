@@ -575,6 +575,8 @@ fn load_selected_queue_item_paused(app: &mut GuiApp, index: usize) {
         select_queue_item_single(app, index);
         app.current_queue_index = Some(index);
         
+        // トラック変更時に歌詞オフセットをリセット
+        app.reset_lyrics_offset_if_track_changed(&path);
         // 再生パスを設定
         app.play_path = path;
         app.play_position_ms = 0;
@@ -607,6 +609,8 @@ fn load_selected_queue_item_stopped(app: &mut GuiApp, index: usize) {
         select_queue_item_single(app, index);
         app.current_queue_index = Some(index);
         
+        // トラック変更時に歌詞オフセットをリセット
+        app.reset_lyrics_offset_if_track_changed(&path);
         // 再生パスを設定
         app.play_path = path;
         app.play_position_ms = 0;

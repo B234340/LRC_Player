@@ -246,6 +246,12 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     app.save_lyrics_offset_to_selected_file();
                 }
 
+                let reset_enabled = app.lyrics_offset_ms != 0;
+                if ui.add_enabled(reset_enabled, egui::Button::new("Reset offset")).clicked() {
+                    app.lyrics_offset_ms = 0;
+                    app.save_state();
+                }
+
                 if !save_enabled {
                     ui.label("Select lyrics file and set non-zero offset to save.");
                 }
