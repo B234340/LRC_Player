@@ -287,9 +287,13 @@ where
                     || click::selected_track_index(ui, id_source) == Some(index);
                 let response = ui.selectable_label(selected, label);
 
-                // 行クリックで選択を保持
+                // 行クリックで選択/選択解除を切り替え
                 if response.clicked() {
-                    click::set_selected_track_index(ui, id_source, index);
+                    if selected {
+                        click::clear_selected_track_index(ui, id_source);
+                    } else {
+                        click::set_selected_track_index(ui, id_source, index);
+                    }
                 }
 
                 // アクティベーション方法に応じたクリック判定
@@ -440,9 +444,13 @@ where
                             .selectable_label(selected, label)
                             .on_hover_text("Double click to play. Right click for actions.");
 
-                        // 行クリックで選択状態を保持
+                        // 行クリックで選択/選択解除を切り替え
                         if response.clicked() {
-                            click::set_selected_track_index(ui, id_source, index);
+                            if selected {
+                                click::clear_selected_track_index(ui, id_source);
+                            } else {
+                                click::set_selected_track_index(ui, id_source, index);
+                            }
                         }
 
                         let handled = response_handler(&response, app, index, &display, track, &mut outcome);

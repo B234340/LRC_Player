@@ -83,6 +83,8 @@ pub fn process_single_click_selection(
         app.select_queue_item_range_to(index);
     } else if ctrl_pressed {
         app.toggle_queue_item_selection(index);
+    } else if app.selected_queue_indices.contains(&index) {
+        app.toggle_queue_item_selection(index);
     } else {
         app.select_queue_item_single(index);
     }
