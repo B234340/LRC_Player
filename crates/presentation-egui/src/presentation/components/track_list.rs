@@ -182,24 +182,27 @@ pub fn render_favorite_toggle(
     min_width: f32,
 ) -> egui::Response {
     let is_favorite = perform_is_track_favorite(app, track_path);
-    let star_label = if is_favorite { "★" } else { "☆" };
-    let button_width = button_area_width(button_size, min_width);
-    let button_height = button_area_height(row_height, button_size);
-    let vertical_pad = button_area_vertical_padding(button_height, button_size);
-    let star_text_size = (button_size * 0.75).max(10.0);
+    let star_label = if is_favorite { "♥" } else { "♡" };
+    // Snap to whole pixels to avoid subtle 1px vertical distortion from fractional sizes.
+    let button_side = button_size.max(min_width).round();
+    let button_area_height = button_area_height(row_height, button_side).round();
+    let star_text_size = (button_side * 0.75).max(10.0);
+
+    let (area_rect, _) =
+        ui.allocate_exact_size(egui::vec2(button_side, button_area_height), egui::Sense::hover());
+    let button_rect = egui::Rect::from_center_size(area_rect.center(), egui::vec2(button_side, button_side));
 
     let response = ui
-        .allocate_ui_with_layout(
-            egui::vec2(button_width, button_height),
-            egui::Layout::top_down(egui::Align::Center),
-            |ui| {
-                ui.add_space(vertical_pad);
-                ui.add_sized(
-                    [button_size, button_size],
-                    egui::Button::new(egui::RichText::new(star_label).size(star_text_size)),
-                )
-            },
-        )
+        .scope(|ui| {
+            // Keep this button strictly square regardless of global spacing defaults.
+            ui.spacing_mut().interact_size = egui::vec2(button_side, button_side);
+            ui.spacing_mut().button_padding = egui::vec2(0.0, 0.0);
+            ui.put(
+                button_rect,
+                egui::Button::new(egui::RichText::new(star_label).size(star_text_size))
+                    .min_size(egui::vec2(button_side, button_side)),
+            )
+        })
         .inner
         .on_hover_text("Toggle favorite");
 
@@ -274,7 +277,7 @@ where
             ui.horizontal(|ui| {
                 // --- お気に入り星ボタン ---
                 let _ = render_favorite_toggle(ui, app, track, row_height, favorite_button_size, 28.0);
-                ui.add_space(4.0); // 星ボタンとラベルの間隔
+                    ui.add_space(4.0); // star button spacing
                 
                 // --- トラック情報ラベル ---
                 let response = ui.selectable_label(false, label);
