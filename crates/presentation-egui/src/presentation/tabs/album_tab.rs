@@ -5,6 +5,7 @@ use crate::presentation::actions::queue::{
     perform_play_from_displayed_list,
 };
 use crate::presentation::actions::track::{
+    perform_add_tracks_to_favorite_playlist,
     perform_add_track_to_playlist,
     perform_open_track_details,
 };
@@ -151,6 +152,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     let mut pending_enqueue_path: Option<String> = None;        // キューに追加するトラック
     let mut pending_add_to_playlist: Option<(usize, String)> = None;  // プレイリストに追加
     let mut pending_show_details_path: Option<String> = None;   // 詳細表示するトラック
+    let mut pending_add_favorite_tracks: Option<Vec<String>> = None; // 選択中アルバムの全トラックをお気に入りに追加
     
     // ========== プレイリスト一覧の準備 ==========
     // コンテキストメニュー用に (インデックス, プレイリスト名) のペアを作成
@@ -423,6 +425,12 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                 ui.label(format!("Album: {}", album_title));
                                 ui.label(format!("Album artist: {}", album_owner));
                             }
+
+                            if !selected_album_tracks.is_empty() && ui.button("Add all to favorite").clicked() {
+                                pending_add_favorite_tracks = Some(
+                                    selected_album_tracks.iter().map(|track| track.id.clone()).collect()
+                                );
+                            }
                             ui.add_space(4.0);
 
                             // --- トラックリストの表示 ---
@@ -495,6 +503,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     }
     if let Some((target_index, track)) = pending_add_to_playlist {
         perform_add_track_to_playlist(&mut *app, target_index, &track);
+    }
+    if let Some(tracks) = pending_add_favorite_tracks {
+        perform_add_tracks_to_favorite_playlist(&mut *app, &tracks);
     }
     if let Some(path) = pending_show_details_path {
         perform_open_track_details(&mut *app, &path);
