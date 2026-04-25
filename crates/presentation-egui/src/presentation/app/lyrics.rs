@@ -44,17 +44,16 @@ impl GuiApp {
         self.lyrics_files.sort_by(|a, b| {
             // 各ファイルの表示優先度ランクを取得
             // 解析に失敗した場合はランク0（最低優先度）
-            let a_rank = Lyrics::from_lrc(a)
-                .map(|lyrics| lyrics.display_priority_rank())
-                .unwrap_or(0);
-            let b_rank = Lyrics::from_lrc(b)
-                .map(|lyrics| lyrics.display_priority_rank())
-                .unwrap_or(0);
+            let a_lyrics = Lyrics::from_lrc(a);
+            let b_lyrics = Lyrics::from_lrc(b);
+            let a_rank = a_lyrics.as_ref().map(|lyrics| lyrics.display_priority_rank()).unwrap_or(0);
+            let b_rank = b_lyrics.as_ref().map(|lyrics| lyrics.display_priority_rank()).unwrap_or(0);
+            let a_line_only = a_lyrics.as_ref().map(|lyrics| lyrics.is_line_only_enhanced()).unwrap_or(false);
+            let b_line_only = b_lyrics.as_ref().map(|lyrics| lyrics.is_line_only_enhanced()).unwrap_or(false);
 
-            // 優先度の降順（高い方が先）でソート
-            // 同じ優先度の場合はファイル名の昇順
             b_rank
                 .cmp(&a_rank)
+                .then_with(|| a_line_only.cmp(&b_line_only))
                 .then_with(|| a.file_name().cmp(&b.file_name()))
         });
 
@@ -145,7 +144,10 @@ impl GuiApp {
             }
         };
 
-        let (shifted, replaced_count) = shift_lrc_timestamps(&contents, self.lyrics_offset_ms);
+        // Preview applies offset to playback time, so persisting requires shifting
+        // file timestamps in the opposite direction.
+        let file_shift_ms = self.lyrics_offset_ms.saturating_neg();
+        let (shifted, replaced_count) = shift_lrc_timestamps(&contents, file_shift_ms);
         if replaced_count == 0 {
             self.play_status = Some(format!(
                 "No timestamp tags found in {}.",

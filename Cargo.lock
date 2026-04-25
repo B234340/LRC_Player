@@ -2199,6 +2199,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lrc_player_adapters_persistence",
+ "tempfile",
 ]
 
 [[package]]

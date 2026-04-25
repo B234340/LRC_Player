@@ -40,13 +40,32 @@ impl Lyrics {
     }
 
     fn has_enhanced_segments(&self) -> bool {
-        self.lines
-            .iter()
-            .any(|line| line.segments.iter().any(|seg| seg.tag_kind == LyricTagKind::Angle))
+        self.lines.iter().any(|line| {
+            line.segments
+                .iter()
+                .filter(|seg| !seg.text.trim().is_empty())
+                .filter(|seg| seg.tag_kind == LyricTagKind::Angle)
+                .count()
+                > 1
+        })
     }
 
     fn has_char_level_segments(&self) -> bool {
-        self.lines.iter().any(|line| line.segments.len() > 1)
+        self.lines.iter().any(|line| {
+            line.segments
+                .iter()
+                .filter(|seg| !seg.text.trim().is_empty())
+                .count()
+                > 1
+        })
+    }
+
+    pub fn is_line_only_enhanced(&self) -> bool {
+        self.lines.iter().any(|line| {
+            line.segments.len() > 1
+                && line.segments.iter().filter(|seg| !seg.text.trim().is_empty()).count() == 1
+                && line.segments.iter().any(|seg| seg.tag_kind == LyricTagKind::Angle)
+        })
     }
 
     pub fn from_lrc<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -245,6 +264,56 @@ fn parse_timestamp(tag: &str) -> Option<u64> {
         None => 0,
     };
     Some(minutes * 60_000 + seconds * 1_000 + millis)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Lyrics;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[test]
+    fn enhanced_lrc_with_only_line_timestamps_is_not_treated_as_enhanced() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("line_only_enhanced.lrc");
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, "<00:00.033>Intro").unwrap();
+        writeln!(file, "<00:05.000>Verse").unwrap();
+
+        let lyrics = Lyrics::from_lrc(&path).unwrap();
+        assert_eq!(lyrics.display_priority_rank(), 1);
+        assert_eq!(lyrics.lines.len(), 2);
+        assert_eq!(lyrics.lines[0].text, "Intro");
+        assert_eq!(lyrics.lines[1].text, "Verse");
+    }
+
+    #[test]
+    fn enhanced_lrc_with_segmented_timestamps_is_treated_as_enhanced() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("char_level_enhanced.lrc");
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, "<00:00.000><00:00.500>He<00:01.000>llo").unwrap();
+
+        let lyrics = Lyrics::from_lrc(&path).unwrap();
+        assert_eq!(lyrics.display_priority_rank(), 3);
+        assert_eq!(lyrics.lines.len(), 1);
+        assert_eq!(lyrics.lines[0].segments.len(), 3);
+    }
+
+    #[test]
+    fn enhanced_lrc_with_trailing_empty_timestamp_is_line_based() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("line_enhanced_trailing_tag.lrc");
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, "[00:14.189] I feel it risin' within me<00:14.189>").unwrap();
+
+        let lyrics = Lyrics::from_lrc(&path).unwrap();
+        assert_eq!(lyrics.display_priority_rank(), 1);
+        assert_eq!(lyrics.lines.len(), 1);
+        assert_eq!(lyrics.lines[0].segments.len(), 1);
+        assert_eq!(lyrics.lines[0].text, " I feel it risin' within me");
+    }
 }
 
 

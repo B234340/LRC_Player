@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 lrc_player_adapters_persistence = { path = "../adapters-persistence" }
+
+[dev-dependencies]
+tempfile = "3"
