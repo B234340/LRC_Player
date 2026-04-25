@@ -263,25 +263,81 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
             // 歌詞オフセット調整ボタン（±100ms / ±250ms）
             let mut lyrics_offset_changed = false;
-            ui.horizontal(|ui| {
-                if ui.button("-250 ms").clicked() {
-                    app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_sub(250).clamp(-30_000, 30_000);
-                    lyrics_offset_changed = true;
-                }
-                if ui.button("-100 ms").clicked() {
-                    app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_sub(100).clamp(-30_000, 30_000);
-                    lyrics_offset_changed = true;
-                }
-                ui.label(format!("Offset: {:+} ms", app.lyrics_offset_ms));
-                if ui.button("+100 ms").clicked() {
-                    app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_add(100).clamp(-30_000, 30_000);
-                    lyrics_offset_changed = true;
-                }
-                if ui.button("+250 ms").clicked() {
-                    app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_add(250).clamp(-30_000, 30_000);
-                    lyrics_offset_changed = true;
-                }
-            });
+            let spacing_x = ui.spacing().item_spacing.x;
+            let offset_label = format!("Offset: {:+} ms", app.lyrics_offset_ms);
+            let text_style = egui::TextStyle::Button.resolve(ui.style());
+            let measure_text = |text: &str| {
+                ui.ctx().fonts(|fonts| {
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(
+                        text,
+                        0.0,
+                        egui::TextFormat::simple(text_style.clone(), ui.visuals().text_color()),
+                    );
+                    fonts.layout_job(job).size()
+                })
+            };
+            let minus_250_size = measure_text("-250 ms");
+            let minus_100_size = measure_text("-100 ms");
+            let plus_100_size = measure_text("+100 ms");
+            let plus_250_size = measure_text("+250 ms");
+            let label_size = measure_text(&offset_label);
+            let button_height = (minus_250_size.y.max(minus_100_size.y).max(plus_100_size.y).max(plus_250_size.y)
+                + 8.0)
+                .max(ui.spacing().interact_size.y);
+            let button_widths = [
+                minus_250_size.x + 16.0,
+                minus_100_size.x + 16.0,
+                plus_100_size.x + 16.0,
+                plus_250_size.x + 16.0,
+            ];
+            let total_width = button_widths.iter().sum::<f32>() + spacing_x * 4.0 + label_size.x;
+            let (row_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width().max(1.0), button_height),
+                egui::Sense::hover(),
+            );
+            let viewport_rect = ui.max_rect().intersect(ui.clip_rect());
+            let center_x = viewport_rect.center().x;
+            let start_x = (center_x - total_width * 0.5).clamp(row_rect.min.x, row_rect.max.x - total_width);
+            let mut x = start_x;
+
+            let minus_250_rect = egui::Rect::from_min_size(egui::pos2(x, row_rect.min.y), egui::vec2(button_widths[0], button_height));
+            if ui.put(minus_250_rect, egui::Button::new("-250 ms")).clicked() {
+                app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_sub(250).clamp(-30_000, 30_000);
+                lyrics_offset_changed = true;
+            }
+            x += button_widths[0] + spacing_x;
+
+            let minus_100_rect = egui::Rect::from_min_size(egui::pos2(x, row_rect.min.y), egui::vec2(button_widths[1], button_height));
+            if ui.put(minus_100_rect, egui::Button::new("-100 ms")).clicked() {
+                app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_sub(100).clamp(-30_000, 30_000);
+                lyrics_offset_changed = true;
+            }
+            x += button_widths[1] + spacing_x;
+
+            let label_rect = egui::Rect::from_min_size(egui::pos2(x, row_rect.min.y), egui::vec2(label_size.x, button_height));
+            ui.painter().text(
+                label_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                offset_label,
+                text_style,
+                ui.visuals().text_color(),
+            );
+            x += label_size.x + spacing_x;
+
+            let plus_100_rect = egui::Rect::from_min_size(egui::pos2(x, row_rect.min.y), egui::vec2(button_widths[2], button_height));
+            if ui.put(plus_100_rect, egui::Button::new("+100 ms")).clicked() {
+                app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_add(100).clamp(-30_000, 30_000);
+                lyrics_offset_changed = true;
+            }
+            x += button_widths[2] + spacing_x;
+
+            let plus_250_rect = egui::Rect::from_min_size(egui::pos2(x, row_rect.min.y), egui::vec2(button_widths[3], button_height));
+            if ui.put(plus_250_rect, egui::Button::new("+250 ms")).clicked() {
+                app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_add(250).clamp(-30_000, 30_000);
+                lyrics_offset_changed = true;
+            }
+
             if lyrics_offset_changed {
                 app.save_state();
             }
