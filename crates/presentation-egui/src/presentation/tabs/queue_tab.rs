@@ -10,8 +10,7 @@ use crate::presentation::actions::track::{
 };
 use crate::presentation::components::track_display::render_track_artwork;
 use crate::presentation::components::track_list::{
-    button_area_height,
-    button_area_vertical_padding,
+    render_handle_button,
     render_track_list_with_artwork,
     TrackActivation,
 };
@@ -157,21 +156,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             } else {
                 "☰"
             };
-            let handle_size = ui.text_style_height(&egui::TextStyle::Body) * 2.0;
-            let handle_width = handle_size.max(20.0);
-            let handle_area_height = button_area_height(row_height, handle_size);
-            let handle_pad_y = button_area_vertical_padding(handle_area_height, handle_size);
-
-            let handle_response = ui
-                .allocate_ui_with_layout(
-                    egui::vec2(handle_width, handle_area_height),
-                    egui::Layout::top_down(egui::Align::Center),
-                    |ui| {
-                        ui.add_space(handle_pad_y);
-                        ui.add_sized([handle_size, handle_size], egui::Button::new(handle_label))
-                    },
-                )
-                .inner
+            let handle_response = render_handle_button(ui, row_height, handle_label, 20.0)
                 .on_hover_text("Handle: click to select. Hold 350ms to start moving one track.");
 
             if let Some(source) = app.queue_drag_source_index {
@@ -214,6 +199,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 }
             }
         },
+        |_, _, _, _, _| {},
         |response, app, index, _display, _track_path, _outcome| {
             if response.clicked() {
                 if let Some(source) = app.queue_drag_source_index {

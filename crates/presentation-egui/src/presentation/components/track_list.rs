@@ -134,6 +134,38 @@ pub fn button_area_height(row_height: f32, button_size: f32) -> f32 {
     row_height.max(button_size)
 }
 
+/// 行内ボタンの表示エリアの幅を決定する。
+///
+/// ボタンサイズに対して最低幅を保証します。
+pub fn button_area_width(button_size: f32, min_width: f32) -> f32 {
+    button_size.max(min_width)
+}
+
+/// ドラッグハンドルボタンを描画し、そのレスポンスを返します。
+///
+/// `handle_size` はテキストの高さを基準に計算し、`min_width` だけは確保します。
+pub fn render_handle_button(
+    ui: &mut egui::Ui,
+    row_height: f32,
+    handle_label: &str,
+    min_width: f32,
+) -> egui::Response {
+    let handle_size = ui.text_style_height(&egui::TextStyle::Body) * 2.0;
+    let handle_width = button_area_width(handle_size, min_width);
+    let handle_area_height = button_area_height(row_height, handle_size);
+    let handle_pad_y = button_area_vertical_padding(handle_area_height, handle_size);
+
+    ui.allocate_ui_with_layout(
+        egui::vec2(handle_width, handle_area_height),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            ui.add_space(handle_pad_y);
+            ui.add_sized([handle_size, handle_size], egui::Button::new(handle_label))
+        },
+    )
+    .inner
+}
+
 /// 行内ボタンの上下パディングを計算する。
 ///
 /// ボタンサイズをエリア高さの中央に配置するための余白を返します。
@@ -303,9 +335,11 @@ where
 /// * `max_height` - リスト全体の最大高さ
 /// * `label_for` - 各トラック行のラベルを生成するクロージャ
 /// * `artwork_renderer` - アートワークを描画する関数
+/// * `handle_renderer` - 各行の左端に描画するハンドル／ドラッグボタン
+/// * `row_prefix` - ハンドルの次に描画する任意のプレフィックス領域
 /// * `trailing_actions` - 各行の右端に追加アクションを描画するクロージャ
 #[allow(clippy::too_many_arguments)]
-pub fn render_track_list_with_artwork<F, S, P, R, T, M>(
+pub fn render_track_list_with_artwork<F, S, H, P, R, T, M>(
     ui: &mut egui::Ui,
     app: &mut GuiApp,
     id_source: &str,
@@ -317,6 +351,7 @@ pub fn render_track_list_with_artwork<F, S, P, R, T, M>(
     mut label_for: F,
     mut selected_for_row: S,
     artwork_renderer: fn(&mut egui::Ui, &str, &str, egui::Vec2, bool),
+    mut handle_renderer: H,
     mut row_prefix: P,
     mut response_handler: R,
     mut trailing_actions: T,
@@ -325,6 +360,7 @@ pub fn render_track_list_with_artwork<F, S, P, R, T, M>(
 where
     F: FnMut(usize, &TrackDisplay) -> String,
     S: FnMut(&GuiApp, usize, &TrackDisplay, &str) -> bool,
+    H: FnMut(&mut egui::Ui, &mut GuiApp, usize, &TrackDisplay, &str),
     P: FnMut(&mut egui::Ui, &mut GuiApp, usize, &TrackDisplay, &str),
     R: FnMut(&egui::Response, &mut GuiApp, usize, &TrackDisplay, &str, &mut TrackListOutcome) -> bool,
     T: FnMut(&mut egui::Ui, &mut GuiApp, usize, &TrackDisplay, &str, &mut TrackListOutcome),
@@ -353,6 +389,9 @@ where
 
             frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    handle_renderer(ui, app, index, &display, track);
+                    // ui.add_space(8.0);
                     row_prefix(ui, app, index, &display, track);
                     ui.add_space(8.0);
 

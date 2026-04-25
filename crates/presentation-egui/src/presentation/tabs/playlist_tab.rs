@@ -205,6 +205,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     |_, _, _, _| false,
                     render_track_artwork,
                     |_, _, _, _, _| {},
+                    |_, _, _, _, _| {},
                     |_, _, _, _, _, _| false,
                     |ui, app, index, _display, track_path, outcome| {
                         if ui.button("Remove").clicked() {
