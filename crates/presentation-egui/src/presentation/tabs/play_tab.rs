@@ -237,6 +237,20 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 app.save_state();
             }
 
+            ui.horizontal(|ui| {
+                let save_enabled = app.selected_lyrics_index.is_some() && app.lyrics_offset_ms != 0;
+                if ui
+                    .add_enabled(save_enabled, egui::Button::new("Save offset to LRC"))
+                    .clicked()
+                {
+                    app.save_lyrics_offset_to_selected_file();
+                }
+
+                if !save_enabled {
+                    ui.label("Select lyrics file and set non-zero offset to save.");
+                }
+            });
+
             // シークバー（再生位置調整用スライダー）
             let slider = egui::Slider::new(&mut app.play_position_ms, 0..=duration_ms).text("Position ms");
             let response = ui

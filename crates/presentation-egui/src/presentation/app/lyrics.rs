@@ -4,6 +4,7 @@
 
 use crate::presentation::app::GuiApp;
 use lrc_player_application::infrastructure::lyrics::Lyrics;
+use std::fs;
 
 impl GuiApp {
     /// 現在の再生パスに対応する歌詞（LRC）ファイルを検索します。
@@ -100,4 +101,165 @@ impl GuiApp {
             }
         }
     }
+
+    /// 選択中のLRCファイルへ現在の歌詞オフセットを恒久反映します。
+    ///
+    /// - `[]` と `<>` のタイムタグをすべて走査
+    /// - `lyrics_offset_ms` だけ時刻を加算/減算
+    /// - 反映後は `lyrics_offset_ms` を 0 に戻し、歌詞を再読み込み
+    pub(crate) fn save_lyrics_offset_to_selected_file(&mut self) {
+        let Some(index) = self.selected_lyrics_index else {
+            self.play_status = Some("No lyrics file selected.".to_string());
+            return;
+        };
+
+        let Some(path) = self.lyrics_files.get(index).cloned() else {
+            self.play_status = Some("Selected lyrics file was not found.".to_string());
+            return;
+        };
+
+        if self.lyrics_offset_ms == 0 {
+            self.play_status = Some("Lyrics offset is 0 ms; nothing to save.".to_string());
+            return;
+        }
+
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(err) => {
+                self.play_status = Some(format!(
+                    "Unable to read lyrics file {}: {}",
+                    path.display(),
+                    err
+                ));
+                return;
+            }
+        };
+
+        let (shifted, replaced_count) = shift_lrc_timestamps(&contents, self.lyrics_offset_ms);
+        if replaced_count == 0 {
+            self.play_status = Some(format!(
+                "No timestamp tags found in {}.",
+                path.display()
+            ));
+            return;
+        }
+
+        if let Err(err) = fs::write(&path, shifted) {
+            self.play_status = Some(format!(
+                "Unable to write lyrics file {}: {}",
+                path.display(),
+                err
+            ));
+            return;
+        }
+
+        self.lyrics_offset_ms = 0;
+        self.load_lyrics_file(index);
+        self.save_state();
+        self.play_status = Some(format!(
+            "Saved lyrics offset to {} (updated {} timestamp tags).",
+            path.display(),
+            replaced_count
+        ));
+    }
 }
+
+fn shift_lrc_timestamps(contents: &str, offset_ms: i64) -> (String, usize) {
+    let mut output = String::with_capacity(contents.len());
+    let mut replaced_count = 0usize;
+    let mut i = 0usize;
+
+    while i < contents.len() {
+        let remaining = &contents[i..];
+        let (open, close) = if remaining.starts_with('[') {
+            ('[', ']')
+        } else if remaining.starts_with('<') {
+            ('<', '>')
+        } else {
+            let ch = remaining
+                .chars()
+                .next()
+                .expect("remaining is non-empty while iterating");
+            output.push(ch);
+            i += ch.len_utf8();
+            continue;
+        };
+
+        let search_start = i + open.len_utf8();
+        let Some(end_rel) = contents[search_start..].find(close) else {
+            let ch = remaining
+                .chars()
+                .next()
+                .expect("remaining is non-empty while iterating");
+            output.push(ch);
+            i += ch.len_utf8();
+            continue;
+        };
+
+        let end = search_start + end_rel;
+        let tag = &contents[search_start..end];
+        if let Some(ms) = parse_lrc_timestamp(tag) {
+            let shifted_ms = apply_signed_offset(ms, offset_ms);
+            output.push(open);
+            output.push_str(&format_lrc_timestamp(shifted_ms));
+            output.push(close);
+            replaced_count += 1;
+            i = end + close.len_utf8();
+            continue;
+        }
+
+        output.push(open);
+        i = search_start;
+    }
+
+    (output, replaced_count)
+}
+
+fn parse_lrc_timestamp(tag: &str) -> Option<u64> {
+    let mut parts = tag.splitn(2, ':');
+    let minutes = parts.next()?.parse::<u64>().ok()?;
+    let seconds_part = parts.next()?;
+
+    let mut sec_parts = seconds_part.splitn(2, '.');
+    let seconds = sec_parts.next()?.parse::<u64>().ok()?;
+    if seconds >= 60 {
+        return None;
+    }
+
+    let millis = match sec_parts.next() {
+        Some(frac) => {
+            if frac.is_empty() || frac.len() > 3 || !frac.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let normalized = match frac.len() {
+                1 => format!("{}00", frac),
+                2 => format!("{}0", frac),
+                _ => frac.to_string(),
+            };
+            normalized.parse::<u64>().ok()?
+        }
+        None => 0,
+    };
+
+    Some(minutes * 60_000 + seconds * 1_000 + millis)
+}
+
+fn apply_signed_offset(ms: u64, offset_ms: i64) -> u64 {
+    // どんな場合でも負の値にならないように、0でクランプする。
+    if offset_ms >= 0 {
+        ms.saturating_add(offset_ms as u64)
+    } else {
+        ms.saturating_sub(offset_ms.unsigned_abs())
+    }
+}
+
+fn format_lrc_timestamp(ms: u64) -> String {
+    let minutes = ms / 60_000;
+    let seconds = (ms / 1_000) % 60;
+    let millis = ms % 1_000;
+    format!("{:02}:{:02}.{:03}", minutes, seconds, millis)
+}
+
+#[cfg(test)]
+#[path = "tests/test_lyrics_offset.rs"]
+mod tests;
