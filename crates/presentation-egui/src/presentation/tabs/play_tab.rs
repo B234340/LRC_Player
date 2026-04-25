@@ -212,11 +212,30 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             let millis = duration_ms % 1000;
             ui.label(format!("Duration: {:02}:{:02}.{:03}", mins, secs, millis));
 
-            // 歌詞オフセット調整スライダー（±30秒の範囲で調整可能）
+            // 歌詞オフセット調整ボタン（±100ms / ±250ms）
+            let mut lyrics_offset_changed = false;
             ui.horizontal(|ui| {
-                ui.add(egui::Slider::new(&mut app.lyrics_offset_ms, -30_000..=30_000).text("Lyrics offset ms"));
-                ui.label(format!("({:+} ms)", app.lyrics_offset_ms));
+                if ui.button("-250 ms").clicked() {
+                    app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_sub(250).clamp(-30_000, 30_000);
+                    lyrics_offset_changed = true;
+                }
+                if ui.button("-100 ms").clicked() {
+                    app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_sub(100).clamp(-30_000, 30_000);
+                    lyrics_offset_changed = true;
+                }
+                ui.label(format!("Offset: {:+} ms", app.lyrics_offset_ms));
+                if ui.button("+100 ms").clicked() {
+                    app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_add(100).clamp(-30_000, 30_000);
+                    lyrics_offset_changed = true;
+                }
+                if ui.button("+250 ms").clicked() {
+                    app.lyrics_offset_ms = app.lyrics_offset_ms.saturating_add(250).clamp(-30_000, 30_000);
+                    lyrics_offset_changed = true;
+                }
             });
+            if lyrics_offset_changed {
+                app.save_state();
+            }
 
             // シークバー（再生位置調整用スライダー）
             let slider = egui::Slider::new(&mut app.play_position_ms, 0..=duration_ms).text("Position ms");
