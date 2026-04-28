@@ -64,6 +64,8 @@ pub struct StateDto {
     pub artist_view_mode: ArtistViewMode,
     #[serde(default)]
     pub lrc_overlay_enabled: bool,
+    #[serde(default)]
+    pub fft_overlay_enabled: bool,
 
     #[serde(default = "default_side_panel_expanded")]
     pub side_panel_expanded: bool,

@@ -74,6 +74,7 @@ impl GuiApp {
             queue_playback_mode: PlaybackMode::Sequential, // デフォルトは順次再生
             artist_view_mode: crate::presentation::app::ArtistViewMode::Artist,
             lrc_overlay_enabled: false,               // デフォルトは無効
+            fft_overlay_enabled: false,               // デフォルトは無効
             side_panel_expanded: true,                // デフォルトは展開
             favorite_directories: Vec::new(),         // お気に入りディレクトリは別途管理
         };

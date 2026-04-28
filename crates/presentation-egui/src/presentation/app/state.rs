@@ -60,6 +60,7 @@ impl GuiApp {
                 queue_playback_mode: PlaybackMode::Sequential,
                 artist_view_mode: ArtistViewMode::Artist,
                 lrc_overlay_enabled: false,
+                fft_overlay_enabled: false,
                 side_panel_expanded: true,
                 last_play_position_ms: None,
                 favorite_directories: Vec::new(),
@@ -102,6 +103,7 @@ impl GuiApp {
             queue_playback_mode: self.playback_mode,
             artist_view_mode: self.artist_view_mode,
             lrc_overlay_enabled: self.lrc_overlay_enabled,
+            fft_overlay_enabled: self.fft_overlay_enabled,
             side_panel_expanded: self.side_panel_expanded,
             favorite_directories: self.favorite_directories.clone(),
         };
@@ -555,7 +557,7 @@ impl GuiApp {
             play_artwork_blur_handle: None,
             play_artwork_blur_source: None,
             lrc_overlay_enabled: state.lrc_overlay_enabled,
-            fft_overlay_enabled: false,
+            fft_overlay_enabled: state.fft_overlay_enabled,
             
             // アルバムアートワークキャッシュ
             album_meta_cache: MetaCache::open_default().ok(),

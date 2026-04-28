@@ -39,6 +39,7 @@ fn update_scan_status(
             queue_playback_mode: lrc_player::domain::model::PlaybackMode::Sequential,
             artist_view_mode: lrc_player::presentation::app::ArtistViewMode::Artist,
             lrc_overlay_enabled: false,
+            fft_overlay_enabled: false,
             side_panel_expanded: true,
             favorite_directories: Vec::new(),
         });

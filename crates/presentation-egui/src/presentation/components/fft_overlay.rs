@@ -15,7 +15,7 @@ const FFT_LOG_BAND_COUNT: usize = 50;
 const ANALYSIS_FPS: f32 = 10.0;
 const DISPLAY_FPS: f32 = 60.0;
 const FFT_WINDOW_SIZE: usize = 4096;
-const MIN_DB: f32 = -90.0;
+const MIN_DB: f32 = -60.0;
 const MAX_DB: f32 = 0.0;
 
 #[derive(Clone)]
@@ -307,7 +307,7 @@ pub fn render_fft_overlay(
 
 	painter.rect_stroke(plot, 0.0, egui::Stroke::new(1.0, axis_color));
 
-	for db in (-90..=0).step_by(10) {
+	for db in (-60..=0).step_by(10) {
 		let y = map_db_to_y(plot, db as f32);
 		painter.line_segment(
 			[egui::pos2(plot.min.x, y), egui::pos2(plot.max.x, y)],

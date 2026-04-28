@@ -236,6 +236,10 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 )
                 .inner;
 
+            if app.fft_overlay_enabled {
+                render_fft_overlay(ui, response.rect, &app.play_path, app.play_position_ms);
+            }
+
             // LRCオーバーレイが有効な場合、アートワーク上に歌詞を重ねて表示
             if app.lrc_overlay_enabled {
                 let rect = response.rect;
@@ -252,10 +256,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     };
                     render_lrc_overlay(ui, rect, lyrics, current_time_ms);
                 }
-            }
-
-            if app.fft_overlay_enabled {
-                render_fft_overlay(ui, response.rect, &app.play_path, app.play_position_ms);
             }
 
             ui.add_space(12.0);
