@@ -124,11 +124,17 @@ pub fn seek_to_position(app: &mut GuiApp) {
 /// 2. 選択中のインデックス (`selected_queue_index`)
 /// 3. キューが空でなければ先頭 (0)
 pub fn play_current_queue_item(app: &mut GuiApp) {
-    // 再生するインデックスを決定
+    let len = app.queue.tracks.len();
+    if len == 0 {
+        return;
+    }
+
+    // 再生するインデックスを決定（範囲外インデックスは無効化）
     let index = app
-        .current_queue_index                      // 現在再生中のもの
-        .or(app.selected_queue_index)             // または選択中のもの
-        .or(if app.queue.tracks.is_empty() { None } else { Some(0) }); // または先頭
+        .current_queue_index
+        .filter(|&i| i < len)
+        .or(app.selected_queue_index.filter(|&i| i < len))
+        .or(Some(0));
 
     // インデックスが存在すれば再生を開始
     if let Some(index) = index {
@@ -162,7 +168,8 @@ pub fn play_next(app: &mut GuiApp) {
     // 現在のインデックスを決定（再生中 > 選択中 > 0）
     let current = app
         .current_queue_index
-        .or(app.selected_queue_index)
+        .filter(|&i| i < len)
+        .or(app.selected_queue_index.filter(|&i| i < len))
         .unwrap_or(0);
 
     // 再生モードに応じて次のインデックスを計算
@@ -172,13 +179,10 @@ pub fn play_next(app: &mut GuiApp) {
         // 1曲リピート：同じインデックス
         PlaybackMode::RepeatOne => Some(current),
         // 全曲リピート：次のインデックス、最後なら先頭へ
-        PlaybackMode::RepeatAll => {
-            if current + 1 < len {
-                Some(current + 1)
-            } else {
-                Some(0)
-            }
-        }
+        PlaybackMode::RepeatAll => current
+            .checked_add(1)
+            .filter(|&index| index < len)
+            .or(Some(0)),
         // シャッフル：現在のトラックを除く中からランダムに選択
         PlaybackMode::Shuffle => {
             let mut rng = thread_rng();
@@ -218,7 +222,8 @@ pub fn play_previous(app: &mut GuiApp) {
     // 現在のインデックスを決定
     let current = app
         .current_queue_index
-        .or(app.selected_queue_index)
+        .filter(|&i| i < len)
+        .or(app.selected_queue_index.filter(|&i| i < len))
         .unwrap_or(0);
 
     // 再生モードに応じて前のインデックスを計算

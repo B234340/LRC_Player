@@ -25,6 +25,7 @@ mod tests {
             queue_playback_mode: PlaybackMode::Sequential,
             artist_view_mode: ArtistViewMode::Artist,
             lrc_overlay_enabled: false,
+            fft_overlay_enabled: false,
             side_panel_expanded: true,
             favorite_directories: Vec::new(),
         };
