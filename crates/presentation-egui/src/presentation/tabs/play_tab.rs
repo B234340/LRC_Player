@@ -1,4 +1,5 @@
 use crate::presentation::components::lrc_overlay::render_lrc_overlay;
+use crate::presentation::components::fft_overlay::render_fft_overlay;
 use crate::presentation::app::GuiApp;
 use eframe::egui;
 use std::time::{Duration, Instant};
@@ -106,13 +107,16 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.heading("Lyrics");
 
     // LRCオーバーレイ：アルバムアートワーク上に歌詞を重ねて表示する機能
-    let mut lrc_overlay_changed = false;
+    let mut overlay_setting_changed = false;
     ui.horizontal(|ui| {
-        lrc_overlay_changed = ui
+        overlay_setting_changed |= ui
             .checkbox(&mut app.lrc_overlay_enabled, "LRC overlay")
             .changed();
+        overlay_setting_changed |= ui
+            .checkbox(&mut app.fft_overlay_enabled, "FFT overlay")
+            .changed();
     });
-    if lrc_overlay_changed {
+    if overlay_setting_changed {
         app.save_state();
     }
     
@@ -179,7 +183,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         
         // 表示用テクスチャの選択
         // LRCオーバーレイ有効時はぼかし処理済みの画像を優先（歌詞の可読性向上のため）
-        let display_texture = if app.lrc_overlay_enabled {
+        let display_texture = if app.lrc_overlay_enabled || app.fft_overlay_enabled {
             app.play_artwork_blur_handle.as_ref().or(app.play_artwork_handle.as_ref())
         } else {
             app.play_artwork_handle.as_ref()
@@ -248,6 +252,10 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     };
                     render_lrc_overlay(ui, rect, lyrics, current_time_ms);
                 }
+            }
+
+            if app.fft_overlay_enabled {
+                render_fft_overlay(ui, response.rect, &app.play_path, app.play_position_ms);
             }
 
             ui.add_space(12.0);

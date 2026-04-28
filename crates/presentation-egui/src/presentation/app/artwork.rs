@@ -58,7 +58,7 @@ impl GuiApp {
         // - ぼかしテクスチャ：LRCオーバーレイ有効かつ（ソース変更 or 未生成）
         let need_regular_texture = self.play_artwork_source.as_ref() != Some(&artwork_source)
             || self.play_artwork_handle.is_none();
-        let need_blur_texture = self.lrc_overlay_enabled
+        let need_blur_texture = (self.lrc_overlay_enabled || self.fft_overlay_enabled)
             && (self.play_artwork_blur_source.as_ref() != Some(&artwork_source)
                 || self.play_artwork_blur_handle.is_none());
 
@@ -91,7 +91,7 @@ impl GuiApp {
             }
 
             // ぼかしテクスチャの生成
-            if self.lrc_overlay_enabled {
+            if self.lrc_overlay_enabled || self.fft_overlay_enabled {
                 if need_blur_texture {
                     // 通常テクスチャも同時に生成する場合、ぼかし生成は次フレームに遅延
                     // これにより初回表示時の引っかかりを軽減する

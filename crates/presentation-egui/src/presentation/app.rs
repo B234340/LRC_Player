@@ -118,6 +118,7 @@ pub struct GuiApp {
     pub(crate) play_artwork_blur_source: Option<PathBuf>,
 
     pub(crate) lrc_overlay_enabled: bool,
+    pub(crate) fft_overlay_enabled: bool,
     pub(crate) lyrics_files: Vec<PathBuf>,
     pub(crate) selected_lyrics_index: Option<usize>,
     pub(crate) loaded_lyrics: Option<Lyrics>,

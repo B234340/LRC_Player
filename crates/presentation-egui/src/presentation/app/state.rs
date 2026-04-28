@@ -555,6 +555,7 @@ impl GuiApp {
             play_artwork_blur_handle: None,
             play_artwork_blur_source: None,
             lrc_overlay_enabled: state.lrc_overlay_enabled,
+            fft_overlay_enabled: false,
             
             // アルバムアートワークキャッシュ
             album_meta_cache: MetaCache::open_default().ok(),
