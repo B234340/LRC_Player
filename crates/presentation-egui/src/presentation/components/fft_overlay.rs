@@ -11,12 +11,14 @@ use rustfft::FftPlanner;
 const FFT_MIN_FREQ_HZ: usize = 50;
 const FFT_MAX_FREQ_HZ: usize = 20_000;
 const FFT_REFERENCE_FREQ_HZ: f32 = 1_000.0;
-const FFT_LOG_BAND_COUNT: usize = 50;
-const ANALYSIS_FPS: f32 = 10.0;
+const FFT_LOG_BAND_COUNT: usize = 40;
+const ANALYSIS_FPS: f32 = 15.0;
 const DISPLAY_FPS: f32 = 60.0;
 const FFT_WINDOW_SIZE: usize = 4096;
 const MIN_DB: f32 = -60.0;
 const MAX_DB: f32 = 0.0;
+const PEAK_HOLD_MS: u64 = 200;
+const PEAK_FALL_DB_PER_SEC: f32 = 45.0;
 
 #[derive(Clone)]
 struct FftOverlayData {
@@ -61,8 +63,76 @@ struct FftOverlayCache {
 
 static FFT_OVERLAY_CACHE: OnceLock<Mutex<FftOverlayCache>> = OnceLock::new();
 
+#[derive(Clone)]
+struct PeakHoldState {
+	track_path: String,
+	held_db: Vec<f32>,
+	hold_until_ms: Vec<u64>,
+	last_time_ms: u64,
+}
+
+#[derive(Default)]
+struct PeakHoldCache {
+	state: Option<PeakHoldState>,
+}
+
+static PEAK_HOLD_CACHE: OnceLock<Mutex<PeakHoldCache>> = OnceLock::new();
+
 fn fft_cache() -> &'static Mutex<FftOverlayCache> {
 	FFT_OVERLAY_CACHE.get_or_init(|| Mutex::new(FftOverlayCache::default()))
+}
+
+fn peak_hold_cache() -> &'static Mutex<PeakHoldCache> {
+	PEAK_HOLD_CACHE.get_or_init(|| Mutex::new(PeakHoldCache::default()))
+}
+
+fn update_peak_hold_db(track_path: &str, current_db: &[f32], current_time_ms: u64) -> Vec<f32> {
+	let cache = peak_hold_cache();
+	let mut cache = if let Ok(cache) = cache.lock() {
+		cache
+	} else {
+		return current_db.to_vec();
+	};
+
+	let reset_required = match &cache.state {
+		Some(state) => {
+			state.track_path != track_path
+				|| state.held_db.len() != current_db.len()
+				|| current_time_ms < state.last_time_ms
+		}
+		None => true,
+	};
+
+	if reset_required {
+		cache.state = Some(PeakHoldState {
+			track_path: track_path.to_owned(),
+			held_db: current_db.to_vec(),
+			hold_until_ms: vec![current_time_ms.saturating_add(PEAK_HOLD_MS); current_db.len()],
+			last_time_ms: current_time_ms,
+		});
+		return current_db.to_vec();
+	}
+
+	let state = if let Some(state) = cache.state.as_mut() {
+		state
+	} else {
+		return current_db.to_vec();
+	};
+	let delta_ms = current_time_ms.saturating_sub(state.last_time_ms).min(1000);
+	let fall_step_db = PEAK_FALL_DB_PER_SEC * (delta_ms as f32 / 1000.0);
+
+	let mut out = Vec::with_capacity(current_db.len());
+	for (idx, db) in current_db.iter().enumerate() {
+		if *db >= state.held_db[idx] {
+			state.held_db[idx] = *db;
+			state.hold_until_ms[idx] = current_time_ms.saturating_add(PEAK_HOLD_MS);
+		} else if current_time_ms >= state.hold_until_ms[idx] {
+			state.held_db[idx] = (state.held_db[idx] - fall_step_db).max(*db);
+		}
+		out.push(state.held_db[idx]);
+	}
+	state.last_time_ms = current_time_ms;
+	out
 }
 
 fn build_fft_overlay_data(track_path: &str) -> Option<FftOverlayData> {
@@ -278,9 +348,10 @@ pub fn render_fft_overlay(
 	let Some(interpolated_db) = data.interpolated_db_frame(current_time_ms) else {
 		return;
 	};
+    let peak_hold_db = update_peak_hold_db(play_path, &interpolated_db, current_time_ms);
 
 	let painter = ui.painter().with_clip_rect(rect);
-	painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(110));
+	painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(100));
 
 	let left_pad = 44.0;
 	let right_pad = 12.0;
@@ -298,12 +369,8 @@ pub fn render_fft_overlay(
 	let grid_color = egui::Color32::from_white_alpha(32);
 	let text_color = egui::Color32::from_white_alpha(170);
 	let spectrum_color = egui::Color32::from_rgb(80, 220, 255);
-	let display_max_hz = data
-		.bin_freqs_hz
-		.last()
-		.copied()
-		.unwrap_or(FFT_MAX_FREQ_HZ as f32)
-		.min(FFT_MAX_FREQ_HZ as f32);
+	let peak_color = egui::Color32::from_rgba_unmultiplied(255, 70, 70, 180);
+	let display_max_hz = data.max_freq_hz.min(FFT_MAX_FREQ_HZ as f32);
 
 	painter.rect_stroke(plot, 0.0, egui::Stroke::new(1.0, axis_color));
 
@@ -375,6 +442,7 @@ pub fn render_fft_overlay(
 		let left = map_freq_to_x(plot, left_hz, display_max_hz);
 		let right = map_freq_to_x(plot, right_hz, display_max_hz);
 		let y = map_db_to_y(plot, *db);
+		let peak_y = map_db_to_y(plot, peak_hold_db[idx]);
 
 		let width = (right - left).abs().max(1.0);
 		let inset = (width * 0.05).min(0.75);
@@ -387,6 +455,12 @@ pub fn render_fft_overlay(
 
 		let bar_rect = egui::Rect::from_min_max(egui::pos2(left, y), egui::pos2(right, plot.max.y));
 		painter.rect_filled(bar_rect, 0.0, spectrum_color.gamma_multiply(0.85));
+
+		// Dynamic range visualization: draw red only above the blue bar and use the same horizontal width.
+		if peak_y < y {
+			let peak_rect = egui::Rect::from_min_max(egui::pos2(left, peak_y), egui::pos2(right, y));
+			painter.rect_filled(peak_rect, 0.0, peak_color);
+		}
 	}
 
 	// 解析は30fpsだが表示は60fpsで補間するため、16ms周期で再描画を要求する。

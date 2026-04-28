@@ -244,7 +244,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             if app.lrc_overlay_enabled {
                 let rect = response.rect;
                 // 半透明の黒いオーバーレイで歌詞の可読性を向上
-                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_black_alpha(120));
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_black_alpha(100));
                 if let Some(lyrics) = &app.loaded_lyrics {
                     // 歌詞オフセットを適用した現在再生時間を計算
                     let current_time_ms = if app.lyrics_offset_ms.is_negative() {
