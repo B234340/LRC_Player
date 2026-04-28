@@ -491,3 +491,41 @@ pub fn render_fft_overlay(
 	ui.ctx()
 		.request_repaint_after(Duration::from_secs_f32(1.0 / DISPLAY_FPS));
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn test_overlay_data() -> FftOverlayData {
+		FftOverlayData {
+			track_path: "test_track".to_owned(),
+			bin_freqs_hz: vec![100.0, 1000.0],
+			min_freq_hz: 50.0,
+			max_freq_hz: 20_000.0,
+			frames_db: vec![vec![-12.0, -24.0], vec![-6.0, -18.0]],
+			analysis_frame_ms: 100.0,
+		}
+	}
+
+	#[test]
+	fn interpolated_db_frame_clamps_after_last_frame() {
+		let data = test_overlay_data();
+
+		let out = data
+			.interpolated_db_frame(100_000)
+			.expect("frame should be returned");
+
+		assert_eq!(out, vec![-6.0, -18.0]);
+	}
+
+	#[test]
+	fn interpolated_db_frame_clamps_out_of_range_time() {
+		let data = test_overlay_data();
+
+		let out = data
+			.interpolated_db_frame(u64::MAX)
+			.expect("frame should be returned");
+
+		assert_eq!(out, vec![-6.0, -18.0]);
+	}
+}
