@@ -27,6 +27,8 @@ image = "0.24"
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 fontdb = "0.10"
 rustfft = "6.2"
+# Native folder picker for `UiAction::AddFolder` (XDG portal on Linux, no GTK dev libs needed).
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 lrc_player_domain = { path = "../domain" }
 lrc_player_ports = { path = "../ports" }
 lrc_player_application = { path = "../application" }
@@ -45,3 +47,5 @@ features = ["winuser"]
 [dev-dependencies]
 tempfile = "3"
 criterion = "0.4"
+# Headless rendering of the `presentation::ui` component gallery (screenshots via wgpu/lavapipe).
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
