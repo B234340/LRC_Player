@@ -4,6 +4,7 @@ pub mod cpal_backend;
 pub mod cpal_output;
 pub mod decoder;
 pub mod device_watcher;
+pub mod engine;
 pub mod stream_adapter;
 
 // keep existing backend file (if present) accessible through cpal_output wrapper
