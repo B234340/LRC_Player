@@ -123,6 +123,8 @@ pub enum UiAction {
     /// Rows of a reorderable track table were dragged: `from`/`to` are indices into the
     /// table's *source rows* (`to` is the insertion index before removal).
     Reorder { from: usize, to: usize },
+    /// Remove rows (source-row indices) from the list the table shows (e.g. a playlist).
+    RemoveRows(Vec<usize>),
 
     // ----- queue -----
     QueuePlayIndex(usize),

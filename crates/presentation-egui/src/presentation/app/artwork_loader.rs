@@ -1,4 +1,5 @@
-//! Background artwork loading for list rows, the album grid and the Play tab.
+//! Background artwork loading for list rows, the album grid and the Now Playing page
+//! (cover + blurred backdrop made with `make_backdrop` on the worker).
 //!
 //! Before: every visible row scanned its folder (`read_dir` + stats) on every frame, the
 //! egui temp-data texture cache was deep-cloned on each lookup, album covers were decoded
@@ -25,6 +26,8 @@ use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use lrc_player_application::infrastructure::persistence::MetaCache;
+
+use crate::presentation::ui::views::make_backdrop;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardVisualKey};
@@ -37,8 +40,6 @@ const ROW_THUMB_SIDE: u32 = 128;
 const ALBUM_THUMB_SIDE: u32 = 256;
 /// Max side of the Play-tab artwork.
 const PLAY_ART_SIDE: u32 = 1024;
-/// Side of the blurred background; the GPU's linear upscaling does the blur.
-const PLAY_BLUR_SIDE: u32 = 24;
 /// Texture budget for row/album thumbnails before LRU eviction.
 const MAX_TEXTURES: usize = 384;
 /// Backlog limit; older requests are dropped (they are re-requested when visible again).
@@ -122,7 +123,8 @@ pub(crate) struct ArtworkLoader {
 }
 
 impl ArtworkLoader {
-    pub(crate) fn new(ctx: egui::Context) -> Self {
+    /// `db_path`: library database used to find album covers (default: the shared one).
+    pub(crate) fn new(ctx: egui::Context, db_path: Option<PathBuf>) -> Self {
         let queue: Arc<(Mutex<Queue>, Condvar)> = Arc::default();
         let known_sources: Arc<Mutex<HashSet<String>>> = Arc::default();
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -131,7 +133,7 @@ impl ArtworkLoader {
             let known = Arc::clone(&known_sources);
             std::thread::Builder::new()
                 .name("artwork-loader".into())
-                .spawn(move || Worker::new(queue, known, tx, ctx).run())
+                .spawn(move || Worker::new(queue, known, tx, ctx, db_path).run())
                 .ok()
         };
         Self {
@@ -365,6 +367,7 @@ struct Worker {
     dirs: HashMap<PathBuf, Arc<Vec<DirEntryInfo>>>,
     dir_order: VecDeque<PathBuf>,
     db: Option<MetaCache>,
+    db_path: Option<PathBuf>,
     db_failed: bool,
 }
 
@@ -374,6 +377,7 @@ impl Worker {
         known_sources: Arc<Mutex<HashSet<String>>>,
         tx: Sender<Done>,
         ctx: egui::Context,
+        db_path: Option<PathBuf>,
     ) -> Self {
         Self {
             queue,
@@ -383,6 +387,7 @@ impl Worker {
             dirs: HashMap::new(),
             dir_order: VecDeque::new(),
             db: None,
+            db_path,
             db_failed: false,
         }
     }
@@ -548,7 +553,11 @@ impl Worker {
     fn load_album(&mut self, title: &str) -> Option<egui::ColorImage> {
         if self.db.is_none() && !self.db_failed {
             // Own connection: never contends with the UI's shared handle.
-            match MetaCache::open_default() {
+            let opened = match &self.db_path {
+                Some(path) => MetaCache::new(path),
+                None => MetaCache::open_default(),
+            };
+            match opened {
                 Ok(db) => self.db = Some(db),
                 Err(err) => {
                     tracing::warn!("artwork worker cannot open the library database: {err:#}");
@@ -581,12 +590,13 @@ impl Worker {
                 blur: None,
             };
         };
-        let regular = square_thumbnail(image, PLAY_ART_SIDE);
-        let blur = regular.resize_exact(PLAY_BLUR_SIDE, PLAY_BLUR_SIDE, FilterType::Triangle);
+        let regular = to_color_image(square_thumbnail(image, PLAY_ART_SIDE));
+        // Small, blurred, darkened backdrop for the Now Playing page (GPU upscales it).
+        let backdrop = make_backdrop(&regular);
         Done::Play {
             track,
-            regular: Some(to_color_image(regular)),
-            blur: Some(to_color_image(blur)),
+            regular: Some(regular),
+            blur: Some(backdrop),
         }
     }
 }

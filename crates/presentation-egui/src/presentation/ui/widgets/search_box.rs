@@ -27,6 +27,19 @@ pub fn search_box(
     focus: bool,
     tr: &Tr,
 ) -> SearchBoxOutput {
+    search_box_with_hint(ui, id, query, width, focus, tr, tr.t("search.placeholder"))
+}
+
+/// [`search_box`] with a custom placeholder.
+pub fn search_box_with_hint(
+    ui: &mut Ui,
+    id: Id,
+    query: &mut String,
+    width: f32,
+    focus: bool,
+    tr: &Tr,
+    hint: &str,
+) -> SearchBoxOutput {
     let pal = theme::palette(ui);
     let height = 32.0;
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
@@ -67,7 +80,7 @@ pub fn search_box(
                     .id(edit_id)
                     .frame(egui::Frame::NONE)
                     .margin(Margin::ZERO)
-                    .hint_text(egui::RichText::new(tr.t("search.placeholder")).color(pal.text_faint))
+                    .hint_text(egui::RichText::new(hint).color(pal.text_faint))
                     .desired_width(edit_rect.width())
                     .background_color(Color32::TRANSPARENT),
             )

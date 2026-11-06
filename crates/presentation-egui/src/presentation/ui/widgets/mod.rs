@@ -13,7 +13,7 @@ pub mod volume;
 pub use artwork::{artwork, cover_uv, paint_artwork, paint_placeholder, Tex};
 pub use card::{badge, button, card, primary_button, secondary_button, section_header, ButtonKind};
 pub use empty_state::empty_state;
-pub use search_box::{search_box, SearchBoxOutput};
+pub use search_box::{search_box, search_box_with_hint, SearchBoxOutput};
 pub use seek_bar::{seek_bar, SeekBarOutput};
 pub use slider::{slim_slider, SlimSliderOutput, SlimSliderStyle};
 pub use toast::{Toast, ToastKind, Toasts};

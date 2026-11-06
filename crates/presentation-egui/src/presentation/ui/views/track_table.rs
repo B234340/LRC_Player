@@ -146,6 +146,8 @@ pub struct TrackTableProps<'a> {
     pub reorderable: bool,
     /// Playlists for the "Add to playlist" submenu.
     pub playlists: &'a [PlaylistEntry<'a>],
+    /// Offer "Remove from playlist" (context menu, Delete key) emitting `RemoveRows`.
+    pub removable: bool,
     pub tr: Tr,
 }
 
@@ -643,7 +645,7 @@ fn handle_keys(ui: &Ui, props: &TrackTableProps<'_>, state: &mut TrackTableState
     if n == 0 {
         return;
     }
-    let (down, up, enter, home, end, all, pgdn, pgup, mods) = ui.input_mut(|i| {
+    let (down, up, enter, home, end, all, pgdn, pgup, mods, delete) = ui.input_mut(|i| {
         (
             i.count_and_consume_key(Modifiers::NONE, Key::ArrowDown) + i.count_and_consume_key(Modifiers::SHIFT, Key::ArrowDown),
             i.count_and_consume_key(Modifiers::NONE, Key::ArrowUp) + i.count_and_consume_key(Modifiers::SHIFT, Key::ArrowUp),
@@ -654,6 +656,7 @@ fn handle_keys(ui: &Ui, props: &TrackTableProps<'_>, state: &mut TrackTableState
             i.consume_key(Modifiers::NONE, Key::PageDown),
             i.consume_key(Modifiers::NONE, Key::PageUp),
             i.modifiers,
+            props.removable && i.consume_key(Modifiers::NONE, Key::Delete),
         )
     });
     let page = ((state.last_viewport_h / ROW_H) as usize).saturating_sub(1).max(1);
@@ -686,6 +689,11 @@ fn handle_keys(ui: &Ui, props: &TrackTableProps<'_>, state: &mut TrackTableState
     }
     if all {
         state.selected = view.iter().copied().collect();
+    }
+    if delete && !state.selected.is_empty() {
+        let mut rows: Vec<usize> = state.selected.iter().copied().collect();
+        rows.sort_unstable();
+        actions.push(UiAction::RemoveRows(rows));
     }
     if enter {
         if let Some(pos) = state.cursor {
@@ -754,6 +762,19 @@ fn context_menu(
     if item(ui, Icon::Info, tr.t("menu.details")) {
         actions.push(UiAction::ShowDetails(row.path.clone()));
         ui.close();
+    }
+    if props.removable {
+        ui.separator();
+        if item(ui, Icon::Trash, tr.t("menu.remove_from_playlist")) {
+            let mut rows: Vec<usize> = view.iter().copied().filter(|i| state.selected.contains(i)).collect();
+            if rows.is_empty() {
+                if let Some(i) = props.rows.iter().position(|r| std::ptr::eq(r, row)) {
+                    rows.push(i);
+                }
+            }
+            actions.push(UiAction::RemoveRows(rows));
+            ui.close();
+        }
     }
 }
 

@@ -1,9 +1,9 @@
-//! Live spectrum overlay.
+//! Live spectrum (slim strip on the Now Playing page).
 //!
 //! Fed by the engine's lock-free spectrum tap (post-gain mono samples that were actually
 //! played), so it is in sync with what is heard and needs no file decoding. One 4096-point
 //! FFT per repaint at most, with a planner, window and buffers reused across frames; nothing
-//! is computed when no new audio arrived (paused) or when the overlay is hidden (the caller
+//! is computed when no new audio arrived (paused) or when the strip is hidden (the caller
 //! only calls [`FftAnalyzer::update`] while it is drawn).
 
 use std::f32::consts::PI;
@@ -26,27 +26,6 @@ const PEAK_HOLD_SECS: f32 = 0.2;
 const PEAK_FALL_DB_PER_SEC: f32 = 45.0;
 /// Bars fall at most this fast (dB/s) so the display does not flicker at 30 fps.
 const BAR_RELEASE_DB_PER_SEC: f32 = 90.0;
-
-const DB_LABELS: [(i32, &str); 7] = [
-    (-60, "-60 dB"),
-    (-50, "-50 dB"),
-    (-40, "-40 dB"),
-    (-30, "-30 dB"),
-    (-20, "-20 dB"),
-    (-10, "-10 dB"),
-    (0, "0 dB"),
-];
-const FREQ_TICKS: [(f32, &str); 9] = [
-    (50.0, "50"),
-    (100.0, "100"),
-    (200.0, "200"),
-    (500.0, "500"),
-    (1_000.0, "1k"),
-    (2_000.0, "2k"),
-    (5_000.0, "5k"),
-    (10_000.0, "10k"),
-    (20_000.0, "20k"),
-];
 
 /// Reusable FFT state + latest band levels.
 pub struct FftAnalyzer {
@@ -225,11 +204,6 @@ impl FftAnalyzer {
         self.has_data
     }
 
-    /// Current band levels in dB (after release smoothing).
-    pub fn bands_db(&self) -> &[f32] {
-        &self.bands_db
-    }
-
     /// Forget levels (e.g. on track change while stopped).
     pub fn reset(&mut self) {
         self.bands_db.iter_mut().for_each(|v| *v = MIN_DB);
@@ -238,107 +212,21 @@ impl FftAnalyzer {
     }
 }
 
-fn map_db_to_y(plot: egui::Rect, db: f32) -> f32 {
-    let t = ((db - MIN_DB) / (MAX_DB - MIN_DB)).clamp(0.0, 1.0);
-    plot.max.y - plot.height() * t
-}
-
-fn map_freq_to_x(plot: egui::Rect, freq_hz: f32, max_freq_hz: f32) -> f32 {
-    let min_f = FFT_MIN_FREQ_HZ;
-    let max_f = max_freq_hz.max(min_f + 1.0);
-    let f = freq_hz.clamp(min_f, max_f);
-    let log_min = (min_f / FFT_REFERENCE_FREQ_HZ).log2();
-    let log_max = (max_f / FFT_REFERENCE_FREQ_HZ).log2();
-    let t = (((f / FFT_REFERENCE_FREQ_HZ).log2() - log_min) / (log_max - log_min)).clamp(0.0, 1.0);
-    plot.min.x + plot.width() * t
-}
-
-/// Draws the latest spectrum of `analyzer` over `rect` (no analysis happens here).
-pub fn render_fft_overlay(ui: &mut egui::Ui, rect: egui::Rect, analyzer: &FftAnalyzer) {
-    if !analyzer.has_data() {
+/// Draws the latest spectrum of `analyzer` as a slim bar strip over `rect` (no analysis
+/// happens here). Bars use `color`; nothing is drawn before the first analysis.
+pub fn paint_spectrum_strip(painter: &egui::Painter, rect: egui::Rect, analyzer: &FftAnalyzer, color: egui::Color32) {
+    if !analyzer.has_data() || rect.width() <= 0.0 || rect.height() <= 0.0 {
         return;
     }
-    let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(100));
-
-    let plot = egui::Rect::from_min_max(
-        egui::pos2(rect.min.x + 44.0, rect.min.y + 12.0),
-        egui::pos2(rect.max.x - 12.0, rect.max.y - 24.0),
-    );
-    if plot.width() <= 0.0 || plot.height() <= 0.0 {
-        return;
-    }
-
-    let axis_color = egui::Color32::from_white_alpha(150);
-    let grid_color = egui::Color32::from_white_alpha(32);
-    let text_color = egui::Color32::from_white_alpha(170);
-    let spectrum_color = egui::Color32::from_rgb(80, 220, 255);
-    let peak_color = egui::Color32::from_rgba_unmultiplied(255, 70, 70, 180);
-    let max_hz = analyzer.max_freq_hz;
-    let label_font = egui::FontId::proportional(10.0);
-
-    painter.rect_stroke(plot, 0.0, egui::Stroke::new(1.0, axis_color), egui::StrokeKind::Middle);
-    for (db, label) in DB_LABELS {
-        let y = map_db_to_y(plot, db as f32);
-        painter.line_segment(
-            [egui::pos2(plot.min.x, y), egui::pos2(plot.max.x, y)],
-            egui::Stroke::new(1.0, grid_color),
-        );
-        painter.text(
-            egui::pos2(rect.min.x + 4.0, y),
-            egui::Align2::LEFT_CENTER,
-            label,
-            label_font.clone(),
-            text_color,
-        );
-    }
-    for (freq, label) in FREQ_TICKS {
-        if freq > max_hz {
-            continue;
-        }
-        let x = map_freq_to_x(plot, freq, max_hz);
-        let stroke = if freq == 1_000.0 {
-            egui::Stroke::new(1.5, egui::Color32::from_white_alpha(90))
-        } else {
-            egui::Stroke::new(1.0, grid_color)
-        };
-        painter.line_segment([egui::pos2(x, plot.min.y), egui::pos2(x, plot.max.y)], stroke);
-        painter.text(
-            egui::pos2(x, plot.max.y + 4.0),
-            egui::Align2::CENTER_TOP,
-            label,
-            label_font.clone(),
-            text_color,
-        );
-    }
-
-    for (i, (db, peak_db)) in analyzer.bands_db.iter().zip(&analyzer.peaks_db).enumerate() {
-        let Some(&(left_hz, right_hz)) = analyzer.band_edges_hz.get(i) else {
-            break;
-        };
-        let left = map_freq_to_x(plot, left_hz, max_hz);
-        let right = map_freq_to_x(plot, right_hz, max_hz);
-        let width = (right - left).abs().max(1.0);
-        let inset = (width * 0.05).min(0.75);
-        let left = (left + inset).clamp(plot.min.x, plot.max.x);
-        let right = (right - inset).clamp(plot.min.x, plot.max.x);
-        if right <= left {
-            continue;
-        }
-        let y = map_db_to_y(plot, *db);
-        let peak_y = map_db_to_y(plot, *peak_db);
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(left, y), egui::pos2(right, plot.max.y)),
-            0.0,
-            spectrum_color.gamma_multiply(0.85),
-        );
-        if peak_y < y {
-            painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(left, peak_y), egui::pos2(right, y)),
-                0.0,
-                peak_color,
-            );
-        }
+    let n = analyzer.bands_db.len().max(1);
+    let gap = 2.0;
+    let bar_w = ((rect.width() - gap * (n as f32 - 1.0)) / n as f32).max(1.0);
+    for (i, db) in analyzer.bands_db.iter().enumerate() {
+        let t = ((db - MIN_DB) / (MAX_DB - MIN_DB)).clamp(0.0, 1.0);
+        let h = (rect.height() * t).max(2.0);
+        let x = rect.left() + i as f32 * (bar_w + gap);
+        let bar = egui::Rect::from_min_max(egui::pos2(x, rect.bottom() - h), egui::pos2(x + bar_w, rect.bottom()));
+        painter.rect_filled(bar, 1.5, color.gamma_multiply(0.45 + 0.55 * t));
     }
 }
 

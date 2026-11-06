@@ -29,6 +29,10 @@ fontdb = "0.10"
 rustfft = "6.2"
 # Native folder picker for `UiAction::AddFolder` (XDG portal on Linux, no GTK dev libs needed).
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# OS media keys / overlay (Windows SMTC, macOS Now Playing, Linux MPRIS). `use_zbus` is the
+# pure-Rust D-Bus backend, so Linux builds need no libdbus-1 development package.
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
+raw-window-handle = "0.6"
 lrc_player_domain = { path = "../domain" }
 lrc_player_ports = { path = "../ports" }
 lrc_player_application = { path = "../application" }

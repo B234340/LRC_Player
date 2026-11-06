@@ -422,6 +422,7 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                                 index_mode: IndexMode::Position,
                                 reorderable: false,
                                 playlists: &playlists,
+                                removable: false,
                                 tr,
                             },
                             &mut s.table,
@@ -764,5 +765,5 @@ const ALL_ICONS: &[Icon] = &[
     Icon::HeartFilled, Icon::Note, Icon::NowPlaying, Icon::ChevronLeft, Icon::ChevronRight,
     Icon::ChevronDown, Icon::ChevronUp, Icon::Check, Icon::Trash, Icon::Refresh, Icon::Grip,
     Icon::SidebarToggle, Icon::Save, Icon::Info, Icon::Warning, Icon::Error, Icon::Success,
-    Icon::TextSmaller, Icon::TextLarger, Icon::Undo, Icon::ArrowDownToLine, Icon::Speaker,
+    Icon::TextSmaller, Icon::TextLarger, Icon::Undo, Icon::ArrowDownToLine, Icon::Speaker, Icon::Edit,
 ];
