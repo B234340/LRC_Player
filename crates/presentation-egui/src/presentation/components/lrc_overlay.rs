@@ -1,3 +1,13 @@
+//! Lyrics overlay drawn over the artwork.
+//!
+//! Layout work is cached in [`LrcLayoutCache`]: row splits (the expensive part, with prefix
+//! measurements) and karaoke segment widths are computed once per (lyrics, width, font size),
+//! and galleys are built lazily only for lines that are on screen and then reused. Lines are
+//! drawn at two fixed font sizes (body / heading) and cross-faded instead of animating the
+//! font size continuously, so egui never rasterizes a new glyph size per frame.
+
+use std::sync::Arc;
+
 use lrc_player_application::infrastructure::lyrics::Lyrics;
 use eframe::egui;
 
@@ -22,13 +32,11 @@ const TIMING_GAP_SPACE_CHAR: char = '\u{2009}'; // thin space
 /// 歌詞行を後ろから検索し、現在時刻以下の最大のタイムスタンプを持つ行を見つける
 /// これにより、曲の途中で一時停止した場合でも適切な行を表示できる
 fn find_current_lyric_line_index(lyrics: &Lyrics, current_time_ms: u64) -> Option<usize> {
+    // Lines are sorted by time: O(log n).
     lyrics
         .lines
-        .iter()
-        .enumerate()
-        .rev() // 後ろから検索することで、current_time_ms以下の最大の時間を持つ行を見つける
-        .find(|(_, line)| line.time_ms <= current_time_ms)
-        .map(|(index, _)| index)
+        .partition_point(|line| line.time_ms <= current_time_ms)
+        .checked_sub(1)
 }
 
 fn animated_center_line_index(lyrics: &Lyrics, current_time_ms: u64, current_index: usize) -> f32 {
@@ -119,104 +127,6 @@ fn timed_display_text(line: &lrc_player_application::infrastructure::lyrics::Lyr
         }
     }
     text
-}
-
-/// 歌詞行のハイライト表示幅を計算する関数
-/// 歌詞のセグメント情報に基づいて、現在の再生位置に応じた進行状況を幅として返す
-/// カラオケのような進行表示を実現するための補助関数
-///
-/// # 引数
-/// * `ui` - eguiのUIビルダー（フォントレイアウト計算に必要）
-/// * `line` - 歌詞行データ（テキストとタイミング情報を含む）
-/// * `current_time_ms` - 現在の再生時間（ミリ秒）
-/// * `font_id` - 使用するフォント（テキスト幅計算に使用）
-///
-/// # 戻り値
-/// ハイライト表示する幅（ピクセル単位）
-/// セグメントの進行度に応じて、部分的にハイライトされる
-fn highlight_width_for_line(
-    ui: &egui::Ui,
-    line: &lrc_player_application::infrastructure::lyrics::LyricLine,
-    current_time_ms: u64,
-    font_id: egui::FontId,
-) -> f32 {
-    let text_color = ui.style().visuals.text_color();
-    let display_text = timed_display_text(line);
-
-    // テキスト全体の幅を計算（ハイライト最大値の基準）
-    let full_text_width = ui.fonts_mut(|fonts| {
-        let mut job = egui::text::LayoutJob::default();
-        job.append(
-            &display_text,
-            0.0,
-            egui::TextFormat::simple(font_id.clone(), text_color),
-        );
-        fonts.layout_job(job).size().x
-    });
-
-    // セグメントが1つ以下の場合は全体幅を返す（部分ハイライト不可）
-    if line.segments.len() <= 1 {
-        return full_text_width;
-    }
-
-    let mut segment_end_times: Vec<Option<u64>> = Vec::with_capacity(line.segments.len());
-    let mut segment_widths: Vec<f32> = Vec::with_capacity(line.segments.len());
-
-    for (seg_index, segment) in line.segments.iter().enumerate() {
-        let next_segment = line.segments.get(seg_index + 1);
-        let seg_end = next_segment.map(|next| next.time_ms);
-        let gap_spaces = next_segment
-            .map(|next| timing_gap_spaces(next.time_ms.saturating_sub(segment.time_ms)))
-            .unwrap_or(0);
-
-        let mut timed_segment_text = segment.text.clone();
-        if gap_spaces > 0 {
-            timed_segment_text.push_str(&scaled_gap_text(gap_spaces));
-        }
-
-        let width = ui.fonts_mut(|fonts| {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(
-                &timed_segment_text,
-                0.0,
-                egui::TextFormat::simple(font_id.clone(), text_color),
-            );
-            fonts.layout_job(job).size().x
-        });
-
-        segment_end_times.push(seg_end);
-        segment_widths.push(width);
-    }
-
-    let mut prefix_width = 0.0;
-    let mut highlight_width = 0.0;
-
-    for (seg_index, segment) in line.segments.iter().enumerate() {
-        let seg_start = segment.time_ms;
-        let seg_end = segment_end_times[seg_index];
-        let segment_width = segment_widths[seg_index];
-
-        if let Some(end_ms) = seg_end {
-            if current_time_ms >= end_ms {
-                prefix_width += segment_width;
-                continue;
-            }
-        }
-
-        if current_time_ms < seg_start {
-            highlight_width = prefix_width;
-        } else if let Some(end_ms) = seg_end {
-            let elapsed = current_time_ms.saturating_sub(seg_start);
-            let duration = end_ms.saturating_sub(seg_start).max(1);
-            let ratio = (elapsed as f32 / duration as f32).clamp(0.0, 1.0);
-            highlight_width = prefix_width + segment_width * ratio;
-        } else {
-            highlight_width = full_text_width;
-        }
-        break;
-    }
-
-    highlight_width.min(full_text_width)
 }
 
 fn is_ascii_or_symbol(c: char) -> bool {
@@ -592,271 +502,346 @@ fn split_into_rows(ui: &egui::Ui, text: &str, font: egui::FontId, max_width: f32
     rows
 }
 
+/// Karaoke highlight geometry of one line at the heading font size.
+struct HighlightInfo {
+    full_width: f32,
+    segment_widths: Vec<f32>,
+}
+
+#[derive(Default)]
+struct CachedLine {
+    rows: Vec<String>,
+    body: Vec<Option<Arc<egui::Galley>>>,
+    heading: Vec<Option<Arc<egui::Galley>>>,
+    highlight: Option<HighlightInfo>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct LayoutKey {
+    generation: u64,
+    wrap_width: i32,
+    body_px: i32,
+    heading_px: i32,
+    pixels_per_point_bits: u32,
+}
+
+/// Per-lyrics layout cache for [`render_lrc_overlay`]. Call [`LrcLayoutCache::invalidate`]
+/// when different lyrics are loaded.
+#[derive(Default)]
+pub struct LrcLayoutCache {
+    generation: u64,
+    key: Option<LayoutKey>,
+    lines: Vec<CachedLine>,
+    last_atlas_fill: f32,
+    /// Galleys built since the cache was (re)keyed (diagnostics / tests).
+    galleys_built: usize,
+}
+
+impl LrcLayoutCache {
+    /// Forget everything (new lyrics).
+    pub fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.key = None;
+        self.lines.clear();
+    }
+
+    pub fn galleys_built(&self) -> usize {
+        self.galleys_built
+    }
+
+    fn prepare(&mut self, ui: &egui::Ui, lyrics: &Lyrics, key: LayoutKey, heading: &egui::FontId, wrap_width: f32) {
+        // egui rebuilds its font atlas when it gets full; cached galleys then point at stale
+        // glyph positions, so drop them (row splits stay valid).
+        let fill = ui.ctx().fonts(|f| f.font_atlas_fill_ratio());
+        let atlas_rebuilt = fill + 1e-4 < self.last_atlas_fill;
+        self.last_atlas_fill = fill;
+        if self.key == Some(key) && self.lines.len() == lyrics.lines.len() {
+            if atlas_rebuilt {
+                for line in &mut self.lines {
+                    line.body.iter_mut().for_each(|g| *g = None);
+                    line.heading.iter_mut().for_each(|g| *g = None);
+                }
+            }
+            return;
+        }
+        self.key = Some(key);
+        self.galleys_built = 0;
+        self.lines = lyrics
+            .lines
+            .iter()
+            .map(|line| {
+                let display_text = timed_display_text(line);
+                let rows = split_into_rows(ui, &display_text, heading.clone(), wrap_width);
+                let n = rows.len();
+                CachedLine {
+                    rows,
+                    body: vec![None; n],
+                    heading: vec![None; n],
+                    highlight: None,
+                }
+            })
+            .collect();
+    }
+
+    fn galley(&mut self, ui: &egui::Ui, line: usize, row: usize, heading: bool, font: &egui::FontId, wrap_width: f32) -> Option<Arc<egui::Galley>> {
+        let cached = self.lines.get_mut(line)?;
+        let slot = if heading {
+            cached.heading.get_mut(row)?
+        } else {
+            cached.body.get_mut(row)?
+        };
+        if slot.is_none() {
+            let mut job = egui::text::LayoutJob::default();
+            // Placeholder color: the real color (with animated alpha) is applied when painting.
+            job.append(
+                &cached.rows[row],
+                0.0,
+                egui::TextFormat::simple(font.clone(), egui::Color32::PLACEHOLDER),
+            );
+            job.wrap.max_width = wrap_width;
+            job.break_on_newline = true;
+            *slot = Some(ui.fonts_mut(|f| f.layout_job(job)));
+            self.galleys_built += 1;
+        }
+        slot.clone()
+    }
+
+    fn highlight_info(&mut self, ui: &egui::Ui, lyrics: &Lyrics, line: usize, font: &egui::FontId) -> Option<&HighlightInfo> {
+        let cached = self.lines.get_mut(line)?;
+        if cached.highlight.is_none() {
+            let lyric = lyrics.lines.get(line)?;
+            let measure = |text: &str| {
+                ui.fonts_mut(|fonts| {
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(text, 0.0, egui::TextFormat::simple(font.clone(), egui::Color32::WHITE));
+                    fonts.layout_job(job).size().x
+                })
+            };
+            let full_width = measure(&timed_display_text(lyric));
+            let segment_widths = if lyric.segments.len() > 1 {
+                lyric
+                    .segments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, segment)| {
+                        let gap = lyric
+                            .segments
+                            .get(i + 1)
+                            .map(|next| timing_gap_spaces(next.time_ms.saturating_sub(segment.time_ms)))
+                            .unwrap_or(0);
+                        let mut text = segment.text.clone();
+                        text.push_str(&scaled_gap_text(gap));
+                        measure(&text)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            cached.highlight = Some(HighlightInfo {
+                full_width,
+                segment_widths,
+            });
+        }
+        cached.highlight.as_ref()
+    }
+}
+
+/// Highlight width (at the heading size) for `line` at lyric time `current_time_ms`.
+fn highlight_width(line: &lrc_player_application::infrastructure::lyrics::LyricLine, info: &HighlightInfo, current_time_ms: u64) -> f32 {
+    if line.segments.len() <= 1 || info.segment_widths.len() != line.segments.len() {
+        return info.full_width;
+    }
+    let mut prefix = 0.0;
+    for (i, segment) in line.segments.iter().enumerate() {
+        let width = info.segment_widths[i];
+        let end = line.segments.get(i + 1).map(|next| next.time_ms);
+        if let Some(end) = end {
+            if current_time_ms >= end {
+                prefix += width;
+                continue;
+            }
+        }
+        if current_time_ms < segment.time_ms {
+            return prefix.min(info.full_width);
+        }
+        return match end {
+            Some(end) => {
+                let elapsed = current_time_ms.saturating_sub(segment.time_ms);
+                let duration = end.saturating_sub(segment.time_ms).max(1);
+                let ratio = (elapsed as f32 / duration as f32).clamp(0.0, 1.0);
+                (prefix + width * ratio).min(info.full_width)
+            }
+            None => info.full_width,
+        };
+    }
+    prefix.min(info.full_width)
+}
+
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// LRCオーバーレイを描画する関数
-/// アルバムアートの上に歌詞を半透明のオーバーレイとして表示する
-/// ミュージックビデオのような視覚効果を実現
 ///
-/// # 引数
-/// * `ui` - eguiのUIビルダー
-/// * `rect` - 描画領域の矩形（通常はアルバムアート画像の領域）
-/// * `lyrics` - 歌詞データ
-/// * `current_time_ms` - 現在の再生時間（ミリ秒）
+/// `current_time_ms` is the lyric-clock time (offsets already applied once by the caller).
 pub fn render_lrc_overlay(
     ui: &mut egui::Ui,
     rect: egui::Rect,
     lyrics: &Lyrics,
     current_time_ms: u64,
+    cache: &mut LrcLayoutCache,
 ) {
     let highlighted_index = find_current_lyric_line_index(lyrics, current_time_ms);
     let animated_center_line = highlighted_index
         .map(|index| animated_center_line_index(lyrics, current_time_ms, index))
         .unwrap_or(0.0);
-    let overlay_lines: Vec<_> = lyrics
-        .lines
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(index, line)| (line, index))
-        .collect();
 
-    // 半透明の黒背景を描画（歌詞の可読性向上）
-    let background = egui::Color32::from_black_alpha(150);
     let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, 0.0, background);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(150));
 
-    // フォントサイズを計算（画面サイズに応じて動的に調整）
-    let base_font_size = rect.height() * 0.04;
-    let heading_font_size = base_font_size * 1.75; // 現在行は大きく
-    let body_font_size = base_font_size;
-    let wrap_width = rect.width() - 24.0; // 左右のパディングを確保
-    let non_highlight_line_height = ui.ctx().fonts_mut(|fonts| {
-        let mut job = egui::text::LayoutJob::default();
-        job.append(
-            "あ",
-            0.0,
-            egui::TextFormat::simple(
-                egui::FontId::proportional(body_font_size),
-                egui::Color32::WHITE,
-            ),
-        );
-        fonts.layout_job(job).size().y
-    });
-    let normal_spacing = non_highlight_line_height * 0.2; // 通常行の前後に0.2行分のスペースを追加
-    let highlight_spacing = non_highlight_line_height; // ハイライト行前後に1行分のスペースを追加
-
-    // 各行の Galley（テキストレイアウト情報）を先に作成してトータル高さを計算する
-    // これにより中央揃えが正確になる
-    let mut render_rows = Vec::new();
-    for (line, absolute_index) in overlay_lines {
-        let distance = (absolute_index as f32 - animated_center_line).abs();
-        let emphasis = (1.0 - distance).clamp(0.0, 1.0);
-        let emphasis = emphasis * emphasis * (3.0 - 2.0 * emphasis); // smoothstep
-        let font_size = body_font_size + (heading_font_size - body_font_size) * emphasis;
-        let alpha = (170.0 + 85.0 * emphasis).round() as u8;
-        let font = egui::FontId::proportional(font_size);
-        let text_color = egui::Color32::from_white_alpha(alpha);
-
-        let display_text = timed_display_text(&line);
-        // 行の分割はハイライト時に決定し、非ハイライトでも同じ分割を使う。
-        let split_font = egui::FontId::proportional(heading_font_size);
-        let row_texts = split_into_rows(ui, &display_text, split_font, wrap_width);
-        let row_count = row_texts.len();
-        let is_current_line = highlighted_index == Some(absolute_index);
-        for (row_index, row_text) in row_texts.into_iter().enumerate() {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(
-                &row_text,
-                0.0,
-                egui::TextFormat::simple(font.clone(), text_color),
-            );
-            job.wrap.max_width = wrap_width;
-            job.break_on_newline = true;
-
-            let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
-            let align_right =
-                (row_count == 2 && row_index == 1) || (row_count == 3 && row_index == 2);
-            let align_center = row_count == 3 && row_index == 1;
-            render_rows.push((
-                galley,
-                line.clone(),
-                is_current_line,
-                font.clone(),
-                align_right,
-                align_center,
-                absolute_index,
-                row_index,
-                row_count,
-            ));
-        }
+    // Two fixed, whole-pixel font sizes (no per-frame size animation).
+    let body_px = (rect.height() * 0.04).round().max(6.0);
+    let heading_px = (body_px * 1.75).round();
+    let body_font = egui::FontId::proportional(body_px);
+    let heading_font = egui::FontId::proportional(heading_px);
+    let wrap_width = (rect.width() - 24.0).max(1.0).round();
+    let key = LayoutKey {
+        generation: cache.generation,
+        wrap_width: wrap_width as i32,
+        body_px: body_px as i32,
+        heading_px: heading_px as i32,
+        pixels_per_point_bits: ui.ctx().pixels_per_point().to_bits(),
+    };
+    cache.prepare(ui, lyrics, key, &heading_font, wrap_width);
+    if cache.lines.is_empty() {
+        return;
     }
 
-    // 行間は、中央付近に来る行ほど normal -> highlight へ滑らかに拡大する。
-    let boundary_spacing = |left_line_index: usize, right_line_index: usize| {
-        if left_line_index == right_line_index {
-            return normal_spacing;
-        }
-
-        let left_dist = (left_line_index as f32 - animated_center_line).abs();
-        let right_dist = (right_line_index as f32 - animated_center_line).abs();
-        let left_emphasis = (1.0 - left_dist).clamp(0.0, 1.0);
-        let right_emphasis = (1.0 - right_dist).clamp(0.0, 1.0);
-        let t = left_emphasis.max(right_emphasis);
-        let eased_t = t * t * (3.0 - 2.0 * t);
-
-        normal_spacing + (highlight_spacing - normal_spacing) * eased_t
+    let (body_row_h, heading_row_h) = ui.fonts_mut(|f| (f.row_height(&body_font), f.row_height(&heading_font)));
+    let normal_spacing = body_row_h * 0.2;
+    let highlight_spacing = body_row_h;
+    let emphasis_of = |line: usize| smoothstep(1.0 - (line as f32 - animated_center_line).abs());
+    let row_height_of = |line: usize| body_row_h + (heading_row_h - body_row_h) * emphasis_of(line);
+    let boundary_spacing = |left: usize, right: usize| {
+        let t = emphasis_of(left).max(emphasis_of(right));
+        normal_spacing + (highlight_spacing - normal_spacing) * t
     };
 
-    let mut row_tops = Vec::with_capacity(render_rows.len());
-    let mut current_row_y = 0.0;
-    for i in 0..render_rows.len() {
-        row_tops.push(current_row_y);
-        let galley_size = render_rows[i].0.size();
-        current_row_y += galley_size.y;
-        if i + 1 < render_rows.len() {
-            let current_line_index = render_rows[i].6;
-            let next_line_index = render_rows[i + 1].6;
-            current_row_y += boundary_spacing(current_line_index, next_line_index);
+    // Group (line) tops relative to the first line: arithmetic only, no text layout.
+    let line_count = cache.lines.len();
+    let mut group_tops = Vec::with_capacity(line_count);
+    let mut group_heights = Vec::with_capacity(line_count);
+    let mut y = 0.0;
+    for i in 0..line_count {
+        let rows = cache.lines[i].rows.len().max(1);
+        let h = row_height_of(i) * rows as f32 + normal_spacing * (rows - 1) as f32;
+        group_tops.push(y);
+        group_heights.push(h);
+        y += h;
+        if i + 1 < line_count {
+            y += boundary_spacing(i, i + 1);
         }
     }
-
-    let mut group_positions = Vec::new();
-    let mut group_start = 0;
-    while group_start < render_rows.len() {
-        let line_index = render_rows[group_start].6;
-        let group_top = row_tops[group_start];
-        let mut group_height = 0.0;
-        let mut idx = group_start;
-        while idx < render_rows.len() && render_rows[idx].6 == line_index {
-            group_height += render_rows[idx].0.size().y;
-            if idx + 1 < render_rows.len() && render_rows[idx + 1].6 == line_index {
-                group_height += normal_spacing;
-            }
-            idx += 1;
+    let group_offset = |i: usize| rect.center().y - group_heights[i] / 2.0 - group_tops[i];
+    let y_offset = match highlighted_index {
+        Some(current) if current < line_count => {
+            let base = group_offset(current);
+            let target = if current + 1 < line_count { group_offset(current + 1) } else { base };
+            let t = (animated_center_line - current as f32).clamp(0.0, 1.0);
+            base + (target - base) * t
         }
-        group_positions.push((line_index, group_top, group_height));
-        group_start = idx;
-    }
-
-    let current_group_offset = highlighted_index.and_then(|current_index| {
-        group_positions
-            .iter()
-            .find(|(line_index, _, _)| *line_index == current_index)
-            .map(|(_, top, height)| rect.center().y - height / 2.0 - top)
-    });
-    let next_group_offset = highlighted_index.and_then(|current_index| {
-        group_positions
-            .iter()
-            .find(|(line_index, _, _)| *line_index == current_index + 1)
-            .map(|(_, top, height)| rect.center().y - height / 2.0 - top)
-    });
-
-    let y_offset = if let Some(current_index) = highlighted_index {
-        let base_offset = current_group_offset.unwrap_or(0.0);
-        let target_offset = next_group_offset.unwrap_or(base_offset);
-        let t = (animated_center_line - current_index as f32).clamp(0.0, 1.0);
-        base_offset + (target_offset - base_offset) * t
-    } else {
-        0.0
+        _ => 0.0,
     };
 
-    let mut current_highlight_line_index: Option<usize> = None;
-    let mut current_line_remaining: f32 = 0.0;
-    for i in 0..render_rows.len() {
-        let (
-            galley,
-            line,
-            is_current,
-            font,
-            align_right,
-            align_center,
-            line_index,
-            row_index,
-            row_count,
-        ) = &render_rows[i];
-        let galley_size = galley.size();
-        let base_x = rect.min.x + 12.0;
-        let center_x = rect.min.x + 12.0 + (wrap_width - galley_size.x) / 2.0;
-        let mut text_pos = egui::pos2(center_x, y_offset + row_tops[i]);
-        let is_next = highlighted_index.map(|idx| idx + 1) == Some(*line_index);
-        if *is_current && *row_count > 1 {
-            let target_x = if *row_index == 0 {
-                base_x
-            } else if *align_center {
-                center_x
-            } else if *align_right {
-                rect.min.x + 12.0 + wrap_width - galley_size.x
-            } else {
-                center_x
-            };
-            if animated_center_line > (*line_index) as f32 {
-                let progress = (animated_center_line - (*line_index) as f32).clamp(0.0, 1.0);
-                let ease = progress * progress * (3.0 - 2.0 * progress);
-                text_pos.x = target_x + (center_x - target_x) * ease;
-            } else {
-                text_pos.x = target_x;
-            }
-        } else if is_next && *row_count > 1 {
-            let target_x = if *row_index == 0 {
-                base_x
-            } else if *align_center {
-                center_x
-            } else if *align_right {
-                rect.min.x + 12.0 + wrap_width - galley_size.x
-            } else {
-                center_x
-            };
-            let start_x = center_x;
-            let distance = (*line_index as f32 - animated_center_line).abs();
-            let emphasis = (1.0_f32 - distance).clamp(0.0, 1.0);
-            let ease = emphasis * emphasis * (3.0 - 2.0 * emphasis);
-            text_pos.x = start_x + (target_x - start_x) * ease;
-        }
-
-        let row_y = y_offset + row_tops[i];
-        if row_y + galley_size.y < rect.min.y || row_y > rect.max.y {
+    let base_x = rect.min.x + 12.0;
+    for line_index in 0..line_count {
+        let top = y_offset + group_tops[line_index];
+        let bottom = top + group_heights[line_index];
+        if bottom < rect.min.y || top > rect.max.y {
             continue;
         }
+        let emphasis = emphasis_of(line_index);
+        let alpha = 170.0 + 85.0 * emphasis;
+        let is_current = highlighted_index == Some(line_index);
+        let is_next = highlighted_index.map(|i| i + 1) == Some(line_index);
+        let row_count = cache.lines[line_index].rows.len();
+        let row_h = row_height_of(line_index);
 
-        // 現在行の場合は、進行度に応じたハイライトを描画
-        if *is_current {
-            if current_highlight_line_index != Some(*line_index) {
-                current_highlight_line_index = Some(*line_index);
-                let adjusted_time_ms =
-                    adjusted_highlight_time_ms(lyrics, *line_index, current_time_ms);
-                current_line_remaining =
-                    highlight_width_for_line(ui, line, adjusted_time_ms, font.clone());
-            }
-
-            let mut remaining = current_line_remaining;
-            for row in &galley.rows {
-                if remaining <= 0.0 {
-                    break;
-                }
-                let row_width = row.rect().width();
-                let current_width = remaining.min(row_width);
-                if current_width > 0.0 {
-                    let highlight_rect = egui::Rect::from_min_size(
-                        text_pos + row.rect().min.to_vec2(),
-                        egui::vec2(current_width, row.rect().height()),
-                    );
-                    painter.rect_filled(
-                        highlight_rect,
-                        0.0,
-                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 80),
-                    );
-                }
-                remaining -= row_width;
-            }
-            current_line_remaining = remaining;
-        }
-
-        // 太字らしい見た目にするため、現在行は複製描画で重みを付ける
-        if *is_current {
-            let bold_offsets = [egui::vec2(-0.6, 0.0), egui::vec2(0.6, 0.0)];
-            for offset in bold_offsets {
-                painter.galley(text_pos + offset, galley.clone(), egui::Color32::WHITE);
+        let mut highlight_remaining = 0.0;
+        if is_current {
+            let adjusted = adjusted_highlight_time_ms(lyrics, line_index, current_time_ms);
+            if let Some(info) = cache.highlight_info(ui, lyrics, line_index, &heading_font) {
+                let scale = (body_px + (heading_px - body_px) * emphasis) / heading_px;
+                highlight_remaining = highlight_width(&lyrics.lines[line_index], info, adjusted) * scale;
             }
         }
-        painter.galley(text_pos, galley.clone(), egui::Color32::WHITE);
+
+        for row in 0..row_count {
+            let row_top = top + row as f32 * (row_h + normal_spacing);
+            // Draw the body-size galley fading out and the heading-size galley fading in.
+            let layers = [(false, 1.0 - emphasis), (true, emphasis)];
+            for (is_heading, weight) in layers {
+                if weight <= 0.01 {
+                    continue;
+                }
+                let font = if is_heading { &heading_font } else { &body_font };
+                let Some(galley) = cache.galley(ui, line_index, row, is_heading, font, wrap_width) else {
+                    continue;
+                };
+                let size = galley.size();
+                let center_x = base_x + (wrap_width - size.x) / 2.0;
+                let align_right = (row_count == 2 && row == 1) || (row_count == 3 && row == 2);
+                let align_center = row_count == 3 && row == 1;
+                let target_x = if row == 0 {
+                    base_x
+                } else if align_center {
+                    center_x
+                } else if align_right {
+                    base_x + wrap_width - size.x
+                } else {
+                    center_x
+                };
+                let mut x = center_x;
+                if row_count > 1 && is_current {
+                    x = if animated_center_line > line_index as f32 {
+                        let ease = smoothstep(animated_center_line - line_index as f32);
+                        target_x + (center_x - target_x) * ease
+                    } else {
+                        target_x
+                    };
+                } else if row_count > 1 && is_next {
+                    x = center_x + (target_x - center_x) * emphasis;
+                }
+                // Vertically center the galley in the interpolated row box.
+                let pos = egui::pos2(x, row_top + (row_h - size.y) / 2.0);
+
+                if is_current && is_heading == (emphasis >= 0.5) && highlight_remaining > 0.0 {
+                    for galley_row in &galley.rows {
+                        if highlight_remaining <= 0.0 {
+                            break;
+                        }
+                        let row_rect = galley_row.rect();
+                        let w = highlight_remaining.min(row_rect.width());
+                        if w > 0.0 {
+                            painter.rect_filled(
+                                egui::Rect::from_min_size(pos + row_rect.min.to_vec2(), egui::vec2(w, row_rect.height())),
+                                0.0,
+                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 80),
+                            );
+                        }
+                        highlight_remaining -= row_rect.width();
+                    }
+                }
+
+                let color = egui::Color32::from_white_alpha((alpha * weight).round().clamp(0.0, 255.0) as u8);
+                if is_current && is_heading {
+                    for dx in [-0.6, 0.6] {
+                        painter.galley(pos + egui::vec2(dx, 0.0), galley.clone(), color);
+                    }
+                }
+                painter.galley(pos, galley, color);
+            }
+        }
     }
 }

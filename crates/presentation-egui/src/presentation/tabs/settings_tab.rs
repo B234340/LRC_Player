@@ -18,9 +18,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             .unwrap_or("<default>")
     ));
     ui.label(format!("{} {}", translate("resampler_taps", app.language), app.taps));
+    if let Some(device) = &app.active_output_device {
+        ui.label(format!("Active device: {}", device));
+    }
 
     ui.separator();
     ui.label(translate("theme", app.language));
+    let previous_theme = app.theme;
     egui::ComboBox::from_id_salt("theme_combo")
         .selected_text(match app.theme {
             Theme::System => translate("theme_system", app.language),
@@ -32,10 +36,16 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             ui.selectable_value(&mut app.theme, Theme::Light, translate("theme_light", app.language));
             ui.selectable_value(&mut app.theme, Theme::Dark, translate("theme_dark", app.language));
         });
+    // Applied immediately; the button persists it.
+    if app.theme != previous_theme {
+        crate::presentation::app::apply_theme(ui.ctx(), app.theme);
+    }
     if ui.button(translate("save_theme", app.language)).clicked() {
         let mut cfg = Config::load();
         cfg.theme = app.theme;
-        let _ = cfg.save();
+        if let Err(err) = cfg.save() {
+            tracing::warn!("saving config failed: {err:#}");
+        }
     }
 
     ui.separator();
@@ -58,15 +68,16 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     if ui.button(translate("save_log_level", app.language)).clicked() {
         let mut cfg = Config::load();
         cfg.log_level = app.log_level;
-        let _ = cfg.save();
+        if let Err(err) = cfg.save() {
+            tracing::warn!("saving config failed: {err:#}");
+        }
     }
+    ui.label("Log level changes apply on the next start (RUST_LOG overrides it).");
 
     ui.separator();
     ui.label(translate("keyboard_shortcuts", app.language));
     ui.group(|ui| {
         ui.label("Space: Play/Pause");
-        ui.label("Arrow Left/Right: Seek backward/forward");
-        ui.label("Ctrl+S: Save current playlist");
-        ui.label("Ctrl+O: Open library scan dialog");
+        ui.label("Arrow Left/Right: Seek 5 s backward/forward (hold to scan)");
     });
 }

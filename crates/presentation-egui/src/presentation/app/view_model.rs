@@ -4,10 +4,9 @@
 
 use lrc_player_application::config::Config;
 use lrc_player_application::dto::{LibraryDto, PlaylistDto, SettingsDto, StateDto};
-use lrc_player_application::infrastructure::persistence::MetaCache;
+use lrc_player_application::infrastructure::library_snapshot::LibrarySelection;
 use lrc_player_application::usecases::build_app_vm::build_app_vm;
 use lrc_player_application::view_model::AppVm;
-use lrc_player_domain::model::PlaybackMode;
 
 use crate::presentation::app::{GuiApp, Tab};
 
@@ -60,23 +59,11 @@ impl GuiApp {
         // 注: 一部のフィールドは初期化時のデフォルト値が使用される
         let state = StateDto {
             last_tab: Some(active_tab.label().to_string()),
-            last_play_path: None,                    // 起動時は再生パスなし
-            last_play_position_ms: None,             // 起動時は再生位置なし
-            last_scan_status,                         // 前回終了時のスキャンステータス
-            scan_scanned: None,                       // ランタイムで更新される
-            scan_parsed: None,                        // ランタイムで更新される
-            scan_registered: None,                    // ランタイムで更新される
-            scan_targets,                             // ユーザー設定のスキャン対象
-            scan_lrc_targets,                         // ユーザー設定のLRCスキャン対象
-            scan_excludes,                            // ユーザー設定の除外パターン
-            queue_tracks: Vec::new(),                 // キューは別途管理
-            selected_queue_index: None,               // キュー選択は別途管理
-            queue_playback_mode: PlaybackMode::Sequential, // デフォルトは順次再生
-            artist_view_mode: crate::presentation::app::ArtistViewMode::Artist,
-            lrc_overlay_enabled: false,               // デフォルトは無効
-            fft_overlay_enabled: false,               // デフォルトは無効
-            side_panel_expanded: true,                // デフォルトは展開
-            favorite_directories: Vec::new(),         // お気に入りディレクトリは別途管理
+            last_scan_status,
+            scan_targets,
+            scan_lrc_targets,
+            scan_excludes,
+            ..Default::default()
         };
 
         // usecase層の関数を使用してViewModelを構築
@@ -101,114 +88,59 @@ impl GuiApp {
     /// 
     /// # 戻り値
     /// 現在のライブラリ状態を表すLibraryDto
-    pub(crate) fn library_dto(&self) -> LibraryDto {
-        // デフォルト値で初期化
-        let mut library = LibraryDto {
+    pub(crate) fn library_dto(&mut self) -> LibraryDto {
+        let selection = LibrarySelection {
+            favorite_directories: self.favorite_directories.clone(),
+            selected_album: self.selected_album.clone(),
+            selected_artist: self.selected_artist.clone(),
+            selected_directory: self.selected_directory.clone(),
+        };
+        let empty = || LibraryDto {
             album_count: 0,
             track_count: 0,
             recent_locations: Vec::new(),
             recent_directories: Vec::new(),
             directory_tree: Vec::new(),
-            favorite_directories: self.favorite_directories.clone(),
+            favorite_directories: selection.favorite_directories.clone(),
             albums: Vec::new(),
-            selected_album: self.selected_album.clone(),
+            selected_album: selection.selected_album.clone(),
             selected_album_tracks: Vec::new(),
             artists: Vec::new(),
-            selected_artist: self.selected_artist.clone(),
+            selected_artist: selection.selected_artist.clone(),
             selected_artist_tracks: Vec::new(),
-            selected_directory: self.selected_directory.clone(),
+            selected_directory: selection.selected_directory.clone(),
             selected_directory_tracks: Vec::new(),
         };
-
-        // メタキャッシュから情報を取得
-        if let Ok(cache) = MetaCache::open_default() {
-            // ライブラリ統計（アルバム数、トラック数）
-            if let Ok((album_count, track_count)) = cache.library_counts() {
-                library.album_count = album_count;
-                library.track_count = track_count;
-            }
-            
-            // 最近追加されたトラック（最大20件）
-            if let Ok(recent_locations) = cache.recent_locations(20) {
-                library.recent_locations = recent_locations;
-            }
-            
-            // 最近追加されたディレクトリ（最大20件）
-            if let Ok(recent_directories) = cache.recent_directories(20) {
-                library.recent_directories = recent_directories;
-            }
-            
-            // ディレクトリツリー（最大深度20）
-            if let Ok(directory_tree) = cache.library_directories(20) {
-                library.directory_tree = directory_tree;
-            }
-            
-            // アルバム一覧
-            if let Ok(albums) = cache.library_albums() {
-                library.albums = albums;
-            }
-            
-            // アーティスト一覧（現在の表示モードに応じて）
-            // artist_view_mode.key() は "album_artist" または "track_artist" を返す
-            if let Ok(artists) = cache.library_artists_by_kind(self.artist_view_mode.key()) {
-                library.artists = artists;
-            }
-            
-            // 選択中のアルバムのトラック一覧
-            if let Some(album) = self.selected_album.as_deref() {
-                if let Ok(tracks) = cache.library_tracks_by_album_id(album) {
-                    library.selected_album_tracks = tracks;
-                }
-            }
-            
-            // 選択中のアーティストのトラック一覧
-            if let Some(artist) = self.selected_artist.as_deref() {
-                if let Ok(tracks) =
-                    cache.library_track_locations_by_artist_kind(self.artist_view_mode.key(), artist)
-                {
-                    library.selected_artist_tracks = tracks;
-                }
-            }
-            
-            // 選択中のディレクトリのトラック一覧
-            if let Some(directory) = self.selected_directory.as_deref() {
-                if let Ok(tracks) = cache.library_tracks_by_directory(directory) {
-                    library.selected_directory_tracks = tracks;
-                }
+        let kind = self.artist_view_mode.key();
+        let Some(meta) = &self.meta else {
+            return empty();
+        };
+        // The shared connection is only used from the UI thread (workers open their own),
+        // so this does not wait on other threads; queries run only when the DB changed.
+        let snapshot = &mut self.library_snapshot;
+        match meta.with(|cache| snapshot.library_dto(cache, kind, &selection)) {
+            Ok(dto) => dto,
+            Err(err) => {
+                tracing::warn!("loading library data failed: {err:#}");
+                empty()
             }
         }
-
-        library
     }
 
     /// アプリケーションのViewModelを更新します。
-    /// 
-    /// この関数は、アプリケーション状態が変更された際に呼び出され、
-    /// UIに表示されるデータを最新の状態に更新します。
-    /// 
-    /// 処理の流れ：
-    /// 1. 設定ファイルを再読み込み（言語設定などが変更されている可能性がある）
-    /// 2. 現在の状態からLibraryDtoを構築
-    /// 3. 新しいAppVmを生成
-    /// 4. アルバムアートワークキャッシュをライブラリと同期
-    /// 5. 状態をファイルに保存
-    /// 
-    /// この関数は以下のタイミングで呼び出されます：
-    /// - タブ切り替え時
-    /// - ライブラリ選択変更時
-    /// - プレイリスト変更時
-    /// - キュー変更時
-    /// - スキャン設定変更時
-    /// - 言語設定変更時
+    ///
+    /// 安価: ライブラリは [`LibrarySnapshotCache`] から（DB が変わった時だけ再クエリ）、
+    /// 設定ファイルの再読込みや同期的な state.json 書き込みは行いません。
+    /// キュー変更後のギャップレス次曲の再計算もここで行います。
+    ///
+    /// [`LibrarySnapshotCache`]: lrc_player_application::infrastructure::library_snapshot::LibrarySnapshotCache
     pub(crate) fn update_app_vm(&mut self) {
-        // 設定ファイルを再読み込み（言語設定の変更を反映）
-        let cfg = Config::load();
-        self.language = cfg.language;
-        
-        // 現在の状態からLibraryDtoを構築
         let library = self.library_dto();
-        
-        // 新しいAppVmを生成
+        let cfg = Config {
+            preferred_output_device: self.preferred_output_device.clone(),
+            resampler_taps: self.taps,
+            ..Config::default()
+        };
         self.app_vm = Self::default_app_vm(
             self.active_tab,
             &cfg,
@@ -220,12 +152,11 @@ impl GuiApp {
             &self.playlists,
             self.queue.clone(),
         );
-        
-        // アルバムアートワークキャッシュをライブラリと同期
-        // 削除されたアルバムのキャッシュをクリーンアップする
-        self.sync_album_artwork_cache_with_library();
-        
-        // 状態をファイルに保存
+        self.app_vm.scan.scan_scanned = self.scan_counts.0;
+        self.app_vm.scan.scan_parsed = self.scan_counts.1;
+        self.app_vm.scan.scan_registered = self.scan_counts.2;
+        self.rebuild_favorite_set();
+        self.update_gapless_next();
         self.save_state();
     }
 

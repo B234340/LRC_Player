@@ -1,7 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use lrc_player::infrastructure::scan::file_scanner::FileScanner;
-use std::fs::{self, File};
-use std::io::Write;
 use std::path::Path;
 
 

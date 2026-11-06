@@ -28,6 +28,7 @@ mod tests {
             fft_overlay_enabled: false,
             side_panel_expanded: true,
             favorite_directories: Vec::new(),
+            ..Default::default()
         };
         let playlists = vec![PlaylistDto {
             id: "pl1".into(),
