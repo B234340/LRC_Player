@@ -210,6 +210,7 @@ mod tests {
         let mut out = Vec::new();
         conv.process(&[0.0, 0.0, 1.0, 0.0, 0.0, 0.0], 6, 48_000, &mut out);
         assert_eq!(out.len(), 2);
-        assert!(out[0] > 0.7 && out[1] > 0.7);
+        // Centre at -3 dB relative to the fronts, in a downmix normalised against clipping.
+        assert!(out[0] > 0.25 && out[0] == out[1]);
     }
 }

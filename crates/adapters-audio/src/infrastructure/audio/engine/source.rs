@@ -82,7 +82,8 @@ fn info_from_track(path: &Path, track: &symphonia::core::formats::Track) -> Trac
     let p = &track.codec_params;
     let duration_ms = match (p.n_frames, p.time_base, p.sample_rate) {
         (Some(n), Some(tb), _) => Some(time_to_ms(tb.calc_time(n))),
-        (Some(n), None, Some(sr)) if sr > 0 => Some(n * 1000 / sr as u64),
+        // u128: a corrupt header can claim an absurd frame count.
+        (Some(n), None, Some(sr)) if sr > 0 => Some((n as u128 * 1000 / sr as u128) as u64),
         _ => None,
     };
     TrackInfo {
@@ -95,7 +96,9 @@ fn info_from_track(path: &Path, track: &symphonia::core::formats::Track) -> Trac
 }
 
 fn time_to_ms(t: Time) -> u64 {
-    t.seconds * 1000 + (t.frac * 1000.0).round() as u64
+    t.seconds
+        .saturating_mul(1000)
+        .saturating_add((t.frac * 1000.0).round() as u64)
 }
 
 fn apply_tags(info: &mut TrackInfo, rev: &MetadataRevision) {
@@ -114,6 +117,9 @@ fn apply_tags(info: &mut TrackInfo, rev: &MetadataRevision) {
         }
     }
 }
+
+/// Corrupt packets in a row before a track is abandoned.
+const MAX_CONSECUTIVE_ERRORS: u32 = 64;
 
 /// An open, decodable track.
 pub(crate) struct TrackSource {
@@ -255,6 +261,17 @@ impl TrackSource {
                     self.eof = true;
                     return Err(anyhow!("read error: {e}"));
                 }
+                Err(SymError::DecodeError(e)) => {
+                    // Corrupt container data (bad frame header, lost sync...): the reader
+                    // resynchronises on the next call. Give up only on a long run of errors.
+                    self.consecutive_errors += 1;
+                    tracing::debug!("demux error in {}: {e}", self.path.display());
+                    if self.consecutive_errors > MAX_CONSECUTIVE_ERRORS {
+                        self.eof = true;
+                        return Err(anyhow!("too many demux errors: {e}"));
+                    }
+                    continue;
+                }
                 Err(e) => {
                     self.eof = true;
                     return Err(anyhow!("demux error: {e}"));
@@ -269,7 +286,7 @@ impl TrackSource {
                 Err(SymError::DecodeError(e)) => {
                     self.consecutive_errors += 1;
                     tracing::debug!("decode error in {}: {e}", self.path.display());
-                    if self.consecutive_errors > 64 {
+                    if self.consecutive_errors > MAX_CONSECUTIVE_ERRORS {
                         self.eof = true;
                         return Err(anyhow!("too many decode errors: {e}"));
                     }

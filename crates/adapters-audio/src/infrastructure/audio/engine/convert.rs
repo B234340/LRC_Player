@@ -439,4 +439,32 @@ mod tests {
             .fold(0.0, f32::max);
         assert!(max < 1e-6, "chunked differs by {max}");
     }
+
+    /// Final packets shorter than the resampler's chunk (and whole tracks shorter than its
+    /// delay) must still come out with the right length.
+    #[test]
+    fn tiny_inputs_resample_to_the_right_length() {
+        for kind in [ResamplerKind::Fft, ResamplerKind::Sinc { sinc_len: 64 }] {
+            for (src_rate, dst_rate) in [(44_100, 48_000), (192_000, 48_000), (8_000, 48_000)] {
+                for frames in [1usize, 7, 50, 1023, 1025] {
+                    let src = SourceFormat {
+                        rate: src_rate,
+                        channels: 2,
+                        layout: None,
+                    };
+                    let mut conv = Converter::new(src, dst_rate, 2, kind).unwrap();
+                    let input = sine(src_rate, 100.0, frames, 2, 0.5);
+                    let out = run_chunked(&mut conv, &input, 2, &[3]);
+                    let expected =
+                        (frames as u64 * dst_rate as u64 + src_rate as u64 / 2) / src_rate as u64;
+                    assert_eq!(
+                        (out.len() / 2) as u64,
+                        expected,
+                        "{kind:?} {src_rate}->{dst_rate} {frames} frames"
+                    );
+                    assert!(out.iter().all(|v| v.is_finite() && v.abs() < 1.0));
+                }
+            }
+        }
+    }
 }

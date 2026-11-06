@@ -10,6 +10,12 @@
 //! monotonic clock, which is vDSO / QueryPerformanceCounter). It owns the transport envelope
 //! (fade in/out for pause/resume/seek/flush/underrun), smoothed volume and mute, the EQ and
 //! limiter, sample-accurate position bookkeeping, and the spectrum tap.
+//!
+//! Click protection: every transport change is a gain ramp on the real signal (pause, resume,
+//! flush, starvation, priming). Where audio stops before a ramp can complete (the ring ran dry
+//! exactly at a callback boundary, a flush with too little stale audio left, the end of the
+//! last track on a non-zero sample) a short *declick tail* - a linear ramp from the last output
+//! value to zero - is mixed in, so the output never steps. EQ changes are crossfaded.
 
 use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -108,6 +114,35 @@ impl ClockReading {
     }
 }
 
+/// Makes the reported position monotonic within one segment.
+///
+/// The latency-compensated reading can step backwards: on resume after a pause (the first
+/// callback's frames are only heard after the output latency, while the paused reading already
+/// showed every rendered frame) and when a callback arrives late or the reported latency
+/// jitters. A UI slider / lyrics view must never move backwards within a segment.
+#[derive(Debug, Default)]
+pub(crate) struct PositionGuard {
+    key: Option<(u64, u64)>,
+    pos: u64,
+}
+
+impl PositionGuard {
+    /// `key` identifies the segment (generation, track); `None` resets the guard.
+    pub(crate) fn apply(&mut self, key: Option<(u64, u64)>, pos: u64) -> u64 {
+        match key {
+            Some(k) if self.key == Some(k) => {
+                self.pos = self.pos.max(pos);
+                self.pos
+            }
+            _ => {
+                self.key = key;
+                self.pos = pos;
+                pos
+            }
+        }
+    }
+}
+
 impl Clock {
     fn publish(&self, r: ClockReading) {
         let s = self.seq.load(Ordering::Relaxed);
@@ -123,10 +158,18 @@ impl Clock {
     }
 
     pub(crate) fn read(&self) -> ClockReading {
+        let mut spins = 0u32;
         loop {
             let s1 = self.seq.load(Ordering::Acquire);
             if s1 & 1 == 1 {
-                std::hint::spin_loop();
+                // The writer (audio callback) is mid-publish. It finishes within nanoseconds
+                // unless it was preempted; then yield instead of burning the reader's core.
+                spins += 1;
+                if spins > 64 {
+                    std::thread::yield_now();
+                } else {
+                    std::hint::spin_loop();
+                }
                 continue;
             }
             let r = ClockReading {
@@ -469,12 +512,25 @@ pub(crate) fn new_pair(cfg: RenderConfig, shared: Arc<RtShared>) -> (Feeder, Ren
         // One-pole smoother, ~10 ms time constant.
         vol_coef: 1.0 - (-1.0 / (cfg.rate.max(1) as f32 * 0.010)).exp(),
         eq: EqState::new(),
+        eq_old: EqState::new(),
+        eq_xfade_left: 0,
+        // ~20 ms crossfade between the old and new EQ (both filters run meanwhile).
+        eq_xfade_len: (cfg.rate as usize / 50).max(1),
+        eq_pending: None,
         track_seq: 0,
         base: 0,
         track_pos: 0,
-        prebuffer_samples: (cfg.prebuffer_frames * ch).min(cap.saturating_sub(ch)),
+        // The engine thread stops refilling at 15/16 of the ring, so a prebuffer close to the
+        // ring size could never be reached (stuck priming). Keep it at most half the ring.
+        prebuffer_samples: cfg.prebuffer_frames.min(cap / ch / 2) * ch,
         tap_w,
         realtime_clock: true,
+        last_raw: vec![0.0; ch].into_boxed_slice(),
+        cut_from: vec![0.0; ch].into_boxed_slice(),
+        cut_at: None,
+        tail_val: vec![0.0; ch].into_boxed_slice(),
+        tail_dec: vec![0.0; ch].into_boxed_slice(),
+        tail_left: 0,
     };
     (feeder, renderer)
 }
@@ -500,12 +556,30 @@ pub struct Renderer {
     vol: f32,
     vol_coef: f32,
     eq: EqState,
+    /// Previous EQ (with its filter state) while crossfading to `eq`.
+    eq_old: EqState,
+    eq_xfade_left: usize,
+    eq_xfade_len: usize,
+    /// Latest EQ received during a crossfade; applied when it completes.
+    eq_pending: Option<EqCoeffs>,
     track_seq: u64,
     base: u64,
     track_pos: u64,
     prebuffer_samples: usize,
     tap_w: u64,
     realtime_clock: bool,
+    /// Last frame written by the previous `render` call (before the declick tail was mixed in).
+    last_raw: Box<[f32]>,
+    /// Declick: frame index (in the current call) where audio stopped abruptly, and the
+    /// output value just before it.
+    cut_from: Box<[f32]>,
+    cut_at: Option<usize>,
+    /// Declick tail in progress: a linear ramp from the last audible value to 0, mixed into
+    /// the output so a hard stop (underrun, flush without enough audio to fade on) never
+    /// produces a step.
+    tail_val: Box<[f32]>,
+    tail_dec: Box<[f32]>,
+    tail_left: usize,
 }
 
 impl Renderer {
@@ -534,8 +608,85 @@ impl Renderer {
             match cmd {
                 RtCommand::Flush { gen, until } => self.pending_flush = Some((gen, until)),
                 RtCommand::SetPaused(p) => self.paused = p,
-                RtCommand::SetEq(c) => self.eq.set(c),
+                RtCommand::SetEq(c) => self.set_eq(c),
             }
+        }
+    }
+
+    /// Switches the EQ. While audio is audible the old and new filters are crossfaded (a hard
+    /// coefficient/preamp switch is an audible click); while silent it switches at once.
+    fn set_eq(&mut self, c: EqCoeffs) {
+        if self.eq_xfade_left > 0 {
+            self.eq_pending = Some(c);
+            return;
+        }
+        if *self.eq.coeffs() == c {
+            return;
+        }
+        if self.mode != Mode::Playing || self.env <= 0.0 {
+            self.eq.set(c);
+            return;
+        }
+        self.eq_old = self.eq;
+        self.eq.set(c);
+        self.eq_xfade_left = self.eq_xfade_len;
+    }
+
+    /// Records that audio stops abruptly at frame `k` of `out` (a declick tail starts there).
+    fn mark_cut(&mut self, out: &[f32], k: usize) {
+        let ch = self.ch;
+        let mut audible = false;
+        for c in 0..ch {
+            let v = if k > 0 {
+                out[(k - 1) * ch + c]
+            } else {
+                self.last_raw[c]
+            };
+            self.cut_from[c] = v;
+            audible |= v.abs() > 1.0e-6;
+        }
+        if audible || self.tail_left > 0 {
+            self.cut_at = Some(k);
+        }
+    }
+
+    /// Mixes the declick tail into `out` (`frames` frames).
+    fn mix_tail(&mut self, out: &mut [f32], frames: usize) {
+        let cut = self.cut_at.take();
+        if self.tail_left == 0 && cut.is_none() {
+            return;
+        }
+        let ch = self.ch;
+        let len = self.fade_frames.max(1);
+        let start = match cut {
+            Some(c) if self.tail_left == 0 => c,
+            _ => 0,
+        };
+        for j in start..frames {
+            if cut == Some(j) {
+                let running = self.tail_left > 0;
+                for c in 0..ch {
+                    let v = self.cut_from[c] + if running { self.tail_val[c] } else { 0.0 };
+                    self.tail_val[c] = v;
+                    self.tail_dec[c] = v / len as f32;
+                }
+                self.tail_left = len;
+            }
+            if self.tail_left == 0 {
+                match cut {
+                    Some(c) if c > j => continue,
+                    _ => break,
+                }
+            }
+            for c in 0..ch {
+                let i = j * ch + c;
+                out[i] = (out[i] + self.tail_val[c]).clamp(-1.0, 1.0);
+                self.tail_val[c] -= self.tail_dec[c];
+            }
+            self.tail_left -= 1;
+        }
+        if self.tail_left == 0 {
+            self.tail_val.iter_mut().for_each(|v| *v = 0.0);
         }
     }
 
@@ -671,23 +822,14 @@ impl Renderer {
         self.read_total += count as u64;
         self.track_pos += n as u64;
 
-        let tail = if starving {
-            n.min(self.fade_frames).max(1)
-        } else {
-            0
-        };
+        // Starving: fade out over the last available frames at the normal fade slope; if the
+        // envelope cannot reach 0 in time, the declick tail in `render` covers the rest.
+        let tail = if starving { n.min(self.fade_frames) } else { 0 };
         let tail_start = n - tail;
-        let mut tail_step = 0.0f32;
-        let eq_active = self.eq.active();
-        let pre = self.eq.preamp();
-        let soft = eq_active || vol_target > 1.0;
         let inv_ch = 1.0 / ch as f32;
         for i in 0..n {
-            if tail > 0 && i >= tail_start {
-                if i == tail_start {
-                    tail_step = self.env / tail as f32;
-                }
-                self.env = (self.env - tail_step).max(0.0);
+            if i >= tail_start {
+                self.env = (self.env - self.env_step).max(0.0);
             } else if self.env < target {
                 self.env = (self.env + self.env_step).min(target);
             } else if self.env > target {
@@ -699,19 +841,42 @@ impl Renderer {
                     self.vol = vol_target;
                 }
             }
-            let g = self.env * self.vol * pre;
+            let g = self.env * self.vol;
+            let xfade = self.eq_xfade_left > 0;
+            let eq_active = self.eq.active();
+            let soft = xfade || eq_active || vol_target > 1.0 || self.vol > 1.0;
             let frame = &mut dst[i * ch..(i + 1) * ch];
             let mut mono = 0.0f32;
-            for (c, s) in frame.iter_mut().enumerate() {
-                let x = if eq_active {
-                    self.eq.process(c, *s)
-                } else {
-                    *s
-                };
-                let y = x * g;
-                let y = if soft { soft_limit(y) } else { hard_limit(y) };
-                *s = y;
-                mono += y;
+            if xfade {
+                let a = 1.0 - self.eq_xfade_left as f32 / self.eq_xfade_len as f32;
+                let (pa, pb) = (self.eq_old.preamp(), self.eq.preamp());
+                for (c, s) in frame.iter_mut().enumerate() {
+                    let yo = self.eq_old.process(c, *s) * pa;
+                    let yn = self.eq.process(c, *s) * pb;
+                    let y = soft_limit((yo + (yn - yo) * a) * g);
+                    *s = y;
+                    mono += y;
+                }
+                self.eq_xfade_left -= 1;
+                if self.eq_xfade_left == 0 {
+                    if let Some(p) = self.eq_pending.take() {
+                        self.set_eq(p);
+                    }
+                }
+            } else if eq_active {
+                let pre = self.eq.preamp();
+                for (c, s) in frame.iter_mut().enumerate() {
+                    let y = soft_limit(self.eq.process(c, *s) * pre * g);
+                    *s = y;
+                    mono += y;
+                }
+            } else {
+                for s in frame.iter_mut() {
+                    let y = *s * g;
+                    let y = if soft { soft_limit(y) } else { hard_limit(y) };
+                    *s = y;
+                    mono += y;
+                }
             }
             self.tap_write(mono * inv_ch);
         }
@@ -752,8 +917,14 @@ impl Renderer {
                     continue;
                 }
             }
+            let was_ended = self.mode == Mode::Ended;
             if self.apply_due_markers() {
                 clock_dirty = true;
+            }
+            if !was_ended && self.mode == Mode::Ended {
+                // End of the last track: a track that does not end at a zero crossing (or
+                // whose EQ-filtered output does not) must not stop with a step.
+                self.mark_cut(out, k);
             }
             match self.mode {
                 Mode::Priming => {
@@ -786,12 +957,23 @@ impl Renderer {
                         let stale = until.saturating_sub(self.read_total) as usize / ch;
                         n = n.min(stale).min(self.fade_frames);
                     }
+                    if target == 0.0 {
+                        // Fading out (pause/flush): consume only the frames the fade needs.
+                        // Anything more would be played silently and lost on resume.
+                        let need = (self.env / self.env_step).ceil() as usize;
+                        n = n.min(need.max(1));
+                    }
                     if n == 0 {
                         if flushing {
+                            // Not enough stale audio left to finish the fade on.
+                            if self.env > 0.0 {
+                                self.mark_cut(out, k);
+                            }
                             self.env = 0.0;
                         } else if to_marker != Some(0) {
                             self.shared.underruns.fetch_add(1, Ordering::Relaxed);
                             self.mode = Mode::Priming;
+                            self.mark_cut(out, k);
                         }
                         continue;
                     }
@@ -813,6 +995,11 @@ impl Renderer {
         } else {
             out[frames * ch..].iter_mut().for_each(|s| *s = 0.0);
         }
+        if frames > 0 {
+            self.last_raw
+                .copy_from_slice(&out[(frames - 1) * ch..frames * ch]);
+        }
+        self.mix_tail(out, frames);
         self.shared
             .tap
             .inner
@@ -1020,5 +1207,188 @@ mod tests {
         assert_eq!(shared.tap.read_latest(&mut tap), 16);
         assert_eq!(tap[15], 2047.0 / 4096.0);
         assert_eq!(tap[0], 2032.0 / 4096.0);
+    }
+
+    fn left(out: &[f32]) -> Vec<f32> {
+        out.iter().step_by(2).copied().collect()
+    }
+
+    fn max_abs_step(v: &[f32]) -> f32 {
+        v.windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    /// The ring runs dry exactly at a callback boundary (no frames left to fade on inside the
+    /// callback that consumed the last audio). The next callback must not start with a step
+    /// from full level to silence.
+    #[test]
+    fn underrun_at_callback_boundary_is_declicked() {
+        let (mut f, mut r, shared) = pair(64, 32);
+        start(&mut f, 1, 1, 0);
+        f.push(&vec![0.5; 2 * 256 * 3]);
+        let mut out = Vec::new();
+        let mut buf = vec![0.0f32; 2 * 256];
+        for _ in 0..5 {
+            r.render(&mut buf, 0);
+            out.extend_from_slice(&buf);
+        }
+        let l = left(&out);
+        let m = max_abs_step(&l);
+        assert!(m <= 0.5 / 32.0 + 1e-4, "step at underrun {m}");
+        assert_eq!(*l.last().unwrap(), 0.0);
+        assert_eq!(shared.underruns.load(Ordering::Relaxed), 1);
+    }
+
+    /// A flush (seek/stop) arrives when only a few stale frames remain: the fade-out cannot
+    /// complete on stale audio, and must not end in a hard cut.
+    #[test]
+    fn flush_with_little_stale_audio_is_declicked() {
+        let (mut f, mut r, _shared) = pair(64, 32);
+        start(&mut f, 1, 1, 0);
+        f.push(&vec![0.5; 2 * (256 + 8)]);
+        let mut buf = vec![0.0f32; 2 * 256];
+        let mut out = Vec::new();
+        r.render(&mut buf, 0);
+        out.extend_from_slice(&buf);
+        start(&mut f, 2, 1, 0);
+        f.push(&vec![0.5; 2 * 4000]);
+        for _ in 0..4 {
+            r.render(&mut buf, 0);
+            out.extend_from_slice(&buf);
+        }
+        let l = left(&out);
+        let m = max_abs_step(&l);
+        assert!(m <= 0.5 / 32.0 + 1e-4, "step at flush {m}");
+        assert_eq!(*l.last().unwrap(), 0.5);
+    }
+
+    /// Pausing must consume only the frames the fade-out needs; with large callbacks the old
+    /// code consumed (and silently discarded) the whole callback's worth of audio.
+    #[test]
+    fn pause_consumes_only_the_fade_and_resume_continues_seamlessly() {
+        let (mut f, mut r, shared) = pair(64, 32);
+        start(&mut f, 1, 1, 0);
+        let input = ramp(30_000, 0);
+        f.push(&input);
+        let mut buf = vec![0.0f32; 2 * 512];
+        r.render(&mut buf, 0);
+        let before = shared.clock.read().pos_end;
+        f.command(RtCommand::SetPaused(true));
+        let mut big = vec![0.0f32; 2 * 4096];
+        r.render(&mut big, 0);
+        let after = shared.clock.read().pos_end;
+        assert!(
+            after - before <= 33,
+            "pause consumed {} frames",
+            after - before
+        );
+        f.command(RtCommand::SetPaused(false));
+        r.render(&mut big, 0);
+        // After the 32-frame fade-in, playback continues exactly at the next unplayed frame.
+        let idx = after as usize;
+        for k in 40..200 {
+            assert_eq!(big[k * 2], input[(idx + k) * 2], "frame {k}");
+        }
+    }
+
+    /// Changing the EQ preamp/bands while playing must not switch gains instantaneously.
+    #[test]
+    fn eq_change_while_playing_is_crossfaded() {
+        use super::super::dsp::EqSettings;
+        let (mut f, mut r, _shared) = pair(64, 32);
+        let quiet = EqSettings {
+            enabled: true,
+            preamp_db: -12.0,
+            ..Default::default()
+        };
+        f.command(RtCommand::SetEq(EqCoeffs::from_settings(&quiet, 48_000)));
+        start(&mut f, 1, 1, 0);
+        // 0.3 amplitude 200 Hz sine: max natural step 0.3 * 2π * 200 / 48000 ≈ 0.0079.
+        let sine: Vec<f32> = (0..40_000)
+            .flat_map(|n| {
+                let v = 0.3 * (2.0 * std::f32::consts::PI * 200.0 * n as f32 / 48_000.0).sin();
+                [v, v]
+            })
+            .collect();
+        f.push(&sine);
+        let mut buf = vec![0.0f32; 2 * 1000];
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            r.render(&mut buf, 0);
+            out.extend_from_slice(&buf);
+        }
+        let mut loud = quiet;
+        loud.preamp_db = 0.0;
+        loud.bands_db[2] = 12.0;
+        f.command(RtCommand::SetEq(EqCoeffs::from_settings(&loud, 48_000)));
+        for _ in 0..3 {
+            r.render(&mut buf, 0);
+            out.extend_from_slice(&buf);
+        }
+        // Disabling the EQ entirely is crossfaded as well.
+        f.command(RtCommand::SetEq(EqCoeffs::BYPASS));
+        for _ in 0..3 {
+            r.render(&mut buf, 0);
+            out.extend_from_slice(&buf);
+        }
+        let l = left(&out);
+        let m = max_abs_step(&l[200..]);
+        assert!(m < 0.03, "EQ switch step {m}");
+        assert!(l.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
+    }
+
+    /// A prebuffer larger than what the engine keeps in the ring (it stops refilling at 15/16)
+    /// used to leave the renderer priming forever.
+    #[test]
+    fn oversized_prebuffer_still_primes() {
+        let shared = Arc::new(RtShared::new(1.0));
+        let cfg = RenderConfig {
+            rate: 48_000,
+            channels: 2,
+            ring_frames: 4096,
+            prebuffer_frames: 100_000,
+            fade_frames: 16,
+        };
+        let (mut f, mut r) = new_pair(cfg, shared);
+        start(&mut f, 1, 1, 0);
+        f.push(&vec![0.25; 2 * 4096 * 15 / 16]);
+        let mut buf = vec![0.0f32; 2 * 256];
+        r.render(&mut buf, 0);
+        assert!(buf.iter().any(|&s| s != 0.0), "renderer never primed");
+    }
+
+    /// With real output latency, the raw reading drops back by the latency when playback
+    /// resumes after a pause; the guard keeps the reported position monotonic.
+    #[test]
+    fn resume_after_pause_does_not_move_position_backwards() {
+        let (mut f, mut r, shared) = pair(64, 32);
+        start(&mut f, 1, 1, 0);
+        f.push(&vec![0.25; 2 * 40_000]);
+        let latency_ns = 50_000_000;
+        let mut buf = vec![0.0f32; 2 * 480];
+        for _ in 0..4 {
+            r.render(&mut buf, latency_ns);
+        }
+        f.command(RtCommand::SetPaused(true));
+        r.render(&mut buf, latency_ns);
+        // Let the pause fade become "audible".
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let mut guard = PositionGuard::default();
+        let c = shared.clock.read();
+        let key = Some((c.gen, c.track_seq));
+        let paused_pos = guard.apply(key, c.audible_frames(shared.now_ns()));
+        assert_eq!(paused_pos, c.pos_end);
+        f.command(RtCommand::SetPaused(false));
+        r.render(&mut buf, latency_ns);
+        let c = shared.clock.read();
+        let raw = c.audible_frames(shared.now_ns());
+        assert!(
+            raw < paused_pos,
+            "raw reading did not go back ({raw} vs {paused_pos})"
+        );
+        assert_eq!(guard.apply(key, raw), paused_pos);
+        // A new segment resets the guard.
+        assert_eq!(guard.apply(Some((c.gen + 1, c.track_seq)), 5), 5);
     }
 }
