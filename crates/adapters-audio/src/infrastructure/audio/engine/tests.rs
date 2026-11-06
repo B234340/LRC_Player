@@ -181,6 +181,34 @@ fn last_nonzero_frame(out: &[f32], ch: usize) -> usize {
         .expect("no audio rendered")
 }
 
+/// Last frame of actual track audio: the last non-zero frame, minus the declick ramp
+/// (`fade` frames repeating the last value and decaying linearly to 0) the renderer appends
+/// when a track ends on a non-zero sample. Also checks the ramp's shape.
+fn audio_end_frame(out: &[f32], ch: usize, fade: usize) -> usize {
+    let last = last_nonzero_frame(out, ch);
+    if last < fade {
+        return last;
+    }
+    let end = last - fade;
+    let is_ramp = (0..ch).all(|c| {
+        let v = out[end * ch + c];
+        let first = out[(end + 1) * ch + c];
+        let tail_last = out[last * ch + c];
+        v != 0.0 && first == v && (tail_last - v / fade as f32).abs() < 1e-4
+    });
+    if is_ramp {
+        for j in 1..fade {
+            for c in 0..ch {
+                let (a, b) = (out[(end + j) * ch + c], out[(end + j + 1) * ch + c]);
+                assert!(b.abs() <= a.abs() + 1e-7, "declick tail is not decaying");
+            }
+        }
+        end
+    } else {
+        last
+    }
+}
+
 fn max_step(out: &[f32], ch: usize, range: std::ops::Range<usize>) -> f32 {
     let mut m = 0.0f32;
     for n in range.start.max(1)..range.end {
@@ -222,7 +250,7 @@ fn equal_rate_playback_is_bit_exact_with_eq_at_0db_and_reports_finish() {
         "pass-through is not bit-exact"
     );
     // Nothing duplicated or dropped: audio ends exactly after `frames` frames.
-    assert_eq!(last_nonzero_frame(&out, 2), first + frames - 1);
+    assert_eq!(audio_end_frame(&out, 2, fade), first + frames - 1);
     assert_eq!(engine.snapshot().underruns, 0);
     assert!(events.iter().any(|e| matches!(
         e,
@@ -253,7 +281,7 @@ fn resampled_44k1_to_48k_playback_is_continuous_with_correct_length() {
     engine.load(path, 0, true);
     let (out, _events) = render_until_finished(&engine, 2, 512, 48_000 * 4);
     let first = first_nonzero_frame(&out, 2);
-    let last = last_nonzero_frame(&out, 2);
+    let last = audio_end_frame(&out, 2, 48_000 * 5 / 1000);
     let len = last + 1 - first;
     let expected = frames * 48_000 / 44_100;
     assert!(
@@ -443,7 +471,7 @@ fn gapless_equal_rate_join_is_seamless() {
             .all(|(x, y)| x.to_bits() == y.to_bits()),
         "gapless join is not an exact concatenation"
     );
-    assert_eq!(last_nonzero_frame(&out, 2), first + na + nb - 1);
+    assert_eq!(audio_end_frame(&out, 2, fade), first + na + nb - 1);
     let adv = events
         .iter()
         .position(|e| matches!(e, EngineEvent::AdvancedToNext { path, .. } if *path == b));
@@ -483,7 +511,7 @@ fn gapless_join_through_resampler_has_no_discontinuity() {
     engine.set_next(Some(b));
     let (out, _events) = render_until_finished(&engine, 2, 500, (na + nb) * 3);
     let first = first_nonzero_frame(&out, 2);
-    let last = last_nonzero_frame(&out, 2);
+    let last = audio_end_frame(&out, 2, 48_000 * 5 / 1000);
     let expected = (na + nb) * 48_000 / 44_100;
     assert!(((last + 1 - first) as i64 - expected as i64).abs() <= 2);
     let bound = 0.5 * 2.0 * std::f32::consts::PI * 1000.0 / 48_000.0;
@@ -624,4 +652,522 @@ fn eq_near_zero_gain_is_near_identity_and_boost_is_limited() {
         }
     }
     assert!(max_err < 0.01, "near-0 dB EQ deviates by {max_err}");
+}
+
+// ---------- randomized stress -------------------------------------------------------------
+
+/// Tiny deterministic PRNG (xorshift64*), so failures are reproducible from the seed.
+struct XorShift(u64);
+
+impl XorShift {
+    fn new(seed: u64) -> Self {
+        XorShift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+    }
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    /// Uniform in `lo..hi`.
+    fn range(&mut self, lo: u64, hi: u64) -> u64 {
+        lo + self.next() % (hi - lo).max(1)
+    }
+    fn chance(&mut self, percent: u64) -> bool {
+        self.range(0, 100) < percent
+    }
+    fn unit(&mut self) -> f32 {
+        (self.next() >> 40) as f32 / (1u64 << 24) as f32
+    }
+}
+
+/// 100 Hz sine, amplitude 0.5, an integer number of cycles: every file starts and ends at a
+/// zero crossing, so any join (gapless, track change) is continuous in the signal itself and
+/// any step larger than the signal's own slope is an engine artefact.
+fn cycles_sine(rate: u32, channels: u16, cycles: usize) -> Vec<i16> {
+    let period = rate as usize / 100;
+    let frames = period * cycles;
+    let mut v = Vec::with_capacity(frames * channels as usize);
+    for n in 0..frames {
+        let x = q(0.5 * (2.0 * std::f64::consts::PI * n as f64 / period as f64).sin());
+        for _ in 0..channels {
+            v.push(x);
+        }
+    }
+    v
+}
+
+struct StressFiles {
+    _dir: TempDir,
+    good: Vec<PathBuf>,
+    bad: Vec<PathBuf>,
+}
+
+fn stress_files(tag: &str) -> StressFiles {
+    let dir = TempDir::new(tag);
+    let a = dir.file("a48.wav");
+    write_wav(&a, 48_000, 2, &cycles_sine(48_000, 2, 120));
+    let b = dir.file("b44.wav");
+    write_wav(&b, 44_100, 2, &cycles_sine(44_100, 2, 100));
+    let c = dir.file("c48_mono.wav");
+    write_wav(&c, 48_000, 1, &cycles_sine(48_000, 1, 30));
+    let d = dir.file("d44_short.wav");
+    write_wav(&d, 44_100, 2, &cycles_sine(44_100, 2, 5));
+    let e = dir.file("e96.wav");
+    write_wav(&e, 96_000, 2, &cycles_sine(96_000, 2, 50));
+    // Header claims twice the data that is present (truncated download).
+    let t = dir.file("truncated.wav");
+    write_wav(&t, 48_000, 2, &cycles_sine(48_000, 2, 100));
+    let mut bytes = std::fs::read(&t).unwrap();
+    let keep = 44 + 480 * 2 * 2 * 50;
+    bytes.truncate(keep);
+    std::fs::write(&t, bytes).unwrap();
+    let corrupt = dir.file("corrupt.flac");
+    let mut rng = XorShift::new(99);
+    let junk: Vec<u8> = (0..20_000).map(|_| rng.next() as u8).collect();
+    std::fs::write(&corrupt, junk).unwrap();
+    let missing = dir.file("missing.mp3");
+    StressFiles {
+        good: vec![a, b, c, d, e, t],
+        bad: vec![corrupt, missing],
+        _dir: dir,
+    }
+}
+
+/// Largest legitimate sample-to-sample change: the signal's own slope at the highest possible
+/// gain (100 Hz at amplitude 0.5 x volume 2 x EQ <= +6 dB: ~0.026 before the soft limiter),
+/// plus the fade slope (1/240) and the volume smoother's per-sample move. Engine artefacts
+/// (hard cuts, gain switches) are an order of magnitude larger.
+const STRESS_STEP_BOUND: f32 = 0.035;
+
+#[derive(Default)]
+struct StressCheck {
+    prev: Option<[f32; 2]>,
+    worst_step: f32,
+    samples: u64,
+}
+
+impl StressCheck {
+    fn check(&mut self, out: &[f32], ctx: &str) {
+        for f in out.chunks_exact(2) {
+            for c in 0..2 {
+                let v = f[c];
+                assert!(v.is_finite(), "non-finite sample {v} ({ctx})");
+                assert!(v.abs() <= 1.0, "sample out of range {v} ({ctx})");
+                if let Some(p) = self.prev {
+                    let d = (v - p[c]).abs();
+                    self.worst_step = self.worst_step.max(d);
+                    assert!(
+                        d <= STRESS_STEP_BOUND,
+                        "discontinuity {d} ({} -> {v}) after {} samples ({ctx})",
+                        p[c],
+                        self.samples
+                    );
+                }
+            }
+            self.prev = Some([f[0], f[1]]);
+            self.samples += 1;
+        }
+    }
+}
+
+fn random_eq(rng: &mut XorShift) -> EqSettings {
+    let mut eq = EqSettings {
+        enabled: rng.chance(70),
+        preamp_db: -6.0 * rng.unit(),
+        ..Default::default()
+    };
+    for b in eq.bands_db.iter_mut() {
+        *b = if rng.chance(40) {
+            12.0 * rng.unit() - 6.0
+        } else {
+            0.0
+        };
+    }
+    eq
+}
+
+fn run_stress(seed: u64, ops: usize) {
+    let files = stress_files(&format!("stress{seed}"));
+    let engine = AudioEngine::new(EngineConfig {
+        output: OutputMode::Manual {
+            sample_rate: 48_000,
+            channels: 2,
+        },
+        ring_ms: 300,
+        prebuffer_ms: 50,
+        fade_ms: 5,
+        ..Default::default()
+    })
+    .unwrap();
+    engine.sync();
+    let mut rng = XorShift::new(seed);
+    let mut check = StressCheck::default();
+    let mut buf = vec![0.0f32; 4096 * 2];
+    // (path, position) of the last snapshot taken since the last position-resetting command.
+    let mut last_pos: Option<(Option<PathBuf>, u64)> = None;
+    let mut log: Vec<String> = Vec::new();
+
+    for step in 0..ops {
+        let pick =
+            |rng: &mut XorShift, v: &Vec<PathBuf>| v[rng.range(0, v.len() as u64) as usize].clone();
+        let r = rng.range(0, 100);
+        let mut resets_position = false;
+        let op = match r {
+            0..=9 => {
+                let p = if rng.chance(90) {
+                    pick(&mut rng, &files.good)
+                } else {
+                    pick(&mut rng, &files.bad)
+                };
+                let start = if rng.chance(50) {
+                    0
+                } else {
+                    rng.range(0, 1600)
+                };
+                let auto = rng.chance(80);
+                engine.load(p.clone(), start, auto);
+                resets_position = true;
+                format!("load {:?} {start} {auto}", p.file_name().unwrap())
+            }
+            10..=17 => {
+                let ms = if rng.chance(3) {
+                    u64::MAX
+                } else {
+                    rng.range(0, 1500)
+                };
+                engine.seek(ms);
+                resets_position = true;
+                format!("seek {ms}")
+            }
+            18..=25 => {
+                engine.pause();
+                "pause".into()
+            }
+            26..=35 => {
+                engine.play();
+                // play() from Stopped reloads from 0.
+                resets_position = true;
+                "play".into()
+            }
+            36..=39 => {
+                engine.stop();
+                resets_position = true;
+                "stop".into()
+            }
+            40..=49 => {
+                let p = match rng.range(0, 10) {
+                    0 => None,
+                    1 => Some(pick(&mut rng, &files.bad)),
+                    _ => Some(pick(&mut rng, &files.good)),
+                };
+                engine.set_next(p.clone());
+                format!("set_next {:?}", p.as_ref().and_then(|p| p.file_name()))
+            }
+            50..=56 => {
+                let v = 2.0 * rng.unit();
+                engine.set_volume(v);
+                format!("volume {v}")
+            }
+            57..=59 => {
+                let m = rng.chance(50);
+                engine.set_muted(m);
+                format!("muted {m}")
+            }
+            60..=66 => {
+                // A burst of EQ updates, like a dragged slider.
+                for _ in 0..rng.range(1, 6) {
+                    engine.set_eq(random_eq(&mut rng));
+                }
+                "eq".into()
+            }
+            67..=70 => {
+                // Callback starvation: the device stops pulling for a while.
+                let ms = rng.range(1, 120);
+                std::thread::sleep(Duration::from_millis(ms));
+                format!("no render {ms} ms")
+            }
+            71..=74 => {
+                // Engine-thread starvation: block it (it publishes into `info`) while the
+                // "device" keeps pulling audio, until the ring runs dry.
+                let frames = rng.range(1_000, 30_000) as usize;
+                let guard = engine.info.lock().unwrap();
+                let mut done = 0;
+                while done < frames {
+                    let n = (rng.range(1, 4097) as usize).min(frames - done);
+                    assert!(engine.render_manual(&mut buf[..n * 2]));
+                    check.check(&buf[..n * 2], "engine starved");
+                    done += n;
+                }
+                drop(guard);
+                format!("engine starved for {frames} frames")
+            }
+            _ => "render".into(),
+        };
+        log.push(op);
+        if log.len() > 12 {
+            log.remove(0);
+        }
+        let ctx = || format!("seed {seed} step {step}: {:?}", log);
+
+        // Render a burst of irregular blocks, sometimes faster than the decoder can keep up.
+        let blocks = rng.range(1, 6);
+        for _ in 0..blocks {
+            let n = match rng.range(0, 10) {
+                0 => 1,
+                1 => rng.range(1, 16) as usize,
+                _ => rng.range(1, 4097) as usize,
+            };
+            assert!(engine.render_manual(&mut buf[..n * 2]));
+            check.check(&buf[..n * 2], &ctx());
+            if rng.chance(30) {
+                std::thread::sleep(Duration::from_micros(rng.range(0, 3000)));
+            }
+        }
+
+        // Position must not go backwards unless a command moved it or the track changed.
+        // After sync() every track change the renderer made so far has been turned into an
+        // event (the engine's housekeeping runs before it answers).
+        engine.sync();
+        while let Some(ev) = engine.try_recv_event() {
+            if matches!(
+                ev,
+                EngineEvent::AdvancedToNext { .. }
+                    | EngineEvent::TrackStarted { .. }
+                    | EngineEvent::TrackFinished { .. }
+            ) {
+                resets_position = true;
+            }
+        }
+        let snap = engine.snapshot();
+        if resets_position || snap.state == EngineState::Stopped {
+            last_pos = None;
+        }
+        if let Some(d) = snap.duration_ms {
+            assert!(
+                snap.position_ms <= d,
+                "position beyond duration ({})",
+                ctx()
+            );
+        }
+        if snap.state != EngineState::Stopped {
+            if let Some((p, pos)) = &last_pos {
+                if *p == snap.path {
+                    assert!(
+                        snap.position_ms >= *pos,
+                        "position went back {pos} -> {} ({})",
+                        snap.position_ms,
+                        ctx()
+                    );
+                }
+            }
+            last_pos = Some((snap.path.clone(), snap.position_ms));
+        }
+    }
+
+    // Still functional: a fresh load plays audio.
+    engine.set_volume(1.0);
+    engine.set_muted(false);
+    engine.load(files.good[0].clone(), 0, true);
+    let mut heard = false;
+    for _ in 0..200 {
+        let out = render(&engine, 2, 480);
+        check.check(&out, "final");
+        if out.iter().any(|&s| s.abs() > 0.1) {
+            heard = true;
+            break;
+        }
+    }
+    assert!(heard, "engine stopped producing audio after the stress run");
+
+    let weak = engine.rt_weak();
+    let t = Instant::now();
+    drop(engine);
+    assert!(
+        t.elapsed() < Duration::from_secs(2),
+        "drop took {:?}",
+        t.elapsed()
+    );
+    assert!(weak.upgrade().is_none(), "threads/state leaked after drop");
+    eprintln!(
+        "stress seed {seed}: {} frames checked, worst step {:.4}",
+        check.samples, check.worst_step
+    );
+}
+
+#[test]
+fn stress_random_transport_seed_1() {
+    run_stress(1, 400);
+}
+
+#[test]
+fn stress_random_transport_seed_2() {
+    run_stress(0xC0FFEE, 400);
+}
+
+#[test]
+fn stress_random_transport_seed_3() {
+    run_stress(31337, 400);
+}
+
+/// The engine thread may be blocked in `render` waits; dropping with a full ring and nobody
+/// rendering must still join promptly.
+#[test]
+fn drop_with_full_ring_and_no_rendering_is_prompt() {
+    let files = stress_files("drop_full");
+    let engine = manual_engine(48_000, 2);
+    engine.load(files.good[0].clone(), 0, true);
+    engine.set_next(Some(files.good[1].clone()));
+    std::thread::sleep(Duration::from_millis(200));
+    let weak = engine.rt_weak();
+    let t = Instant::now();
+    drop(engine);
+    assert!(t.elapsed() < Duration::from_secs(1));
+    assert!(weak.upgrade().is_none());
+}
+
+/// Longer randomized run: `LRC_STRESS_SEEDS=200 cargo test -p lrc_player_adapters_audio
+/// --release stress_many_seeds -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn stress_many_seeds() {
+    let n: u64 = std::env::var("LRC_STRESS_SEEDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    for seed in 100..100 + n {
+        run_stress(seed, 300);
+    }
+}
+
+/// The GUI re-sends `set_next(B)` while A is still audible but B was already spliced in
+/// (A's decoding finished): B must still play only once.
+#[test]
+fn repeated_set_next_after_splice_does_not_play_next_twice() {
+    let dir = TempDir::new("next_dup");
+    let a = dir.file("a.wav");
+    let b = dir.file("b.wav");
+    write_wav(&a, 48_000, 2, &cycles_sine(48_000, 2, 20)); // 0.2 s: fully decoded at once
+    write_wav(&b, 48_000, 2, &cycles_sine(48_000, 2, 30)); // 0.3 s
+    let engine = manual_engine(48_000, 2);
+    engine.load(a.clone(), 0, true);
+    engine.set_next(Some(b.clone()));
+    engine.sync();
+    // Let the engine decode A to EOF and splice B.
+    std::thread::sleep(Duration::from_millis(100));
+    engine.sync();
+    engine.set_next(Some(b.clone()));
+    engine.sync();
+    let (out, events) = render_until_finished(&engine, 2, 480, 48_000 * 3);
+    let advanced = events
+        .iter()
+        .filter(|e| matches!(e, EngineEvent::AdvancedToNext { .. }))
+        .count();
+    assert_eq!(advanced, 1, "events: {events:?}");
+    let first = first_nonzero_frame(&out, 2);
+    let last = last_nonzero_frame(&out, 2);
+    let len = last + 1 - first;
+    assert!(
+        len < 48_000 * 6 / 10,
+        "played {len} frames: B was played twice"
+    );
+}
+
+/// The renderer's command queue overflows while the output does not pull (stalled device /
+/// nobody rendering) and commands keep coming. The lost flush used to desynchronise the
+/// renderer for good (seek target never reached, position frozen).
+#[test]
+fn renderer_queue_overflow_recovers() {
+    let dir = TempDir::new("overflow");
+    let path = dir.file("a.wav");
+    write_wav(&path, 48_000, 2, &cycles_sine(48_000, 2, 300)); // 3 s
+    let engine = manual_engine(48_000, 2);
+    engine.load(path, 0, true);
+    for _ in 0..10 {
+        render(&engine, 2, 480);
+    }
+    wait_state(&engine, EngineState::Playing);
+    // No rendering from here on: 400 pause/play pairs overflow the 256-entry queue.
+    for _ in 0..400 {
+        engine.pause();
+        engine.play();
+    }
+    engine.seek(1_000);
+    engine.sync();
+    engine.sync();
+    let mut last = 0;
+    for _ in 0..60 {
+        render(&engine, 2, 480);
+        last = engine.snapshot().position_ms;
+    }
+    // (Loading -> Playing is reported by the engine thread shortly after priming.)
+    wait_state(&engine, EngineState::Playing);
+    assert!(
+        (1_100..1_700).contains(&last),
+        "position {last}: renderer did not resynchronise after the overflow"
+    );
+}
+
+/// The last owner of the engine may be released inside the waker (which runs on the engine
+/// thread). Drop must not try to join the thread it is running on.
+#[test]
+fn dropping_engine_from_its_own_waker_is_safe() {
+    let slot: std::sync::Arc<std::sync::Mutex<Option<AudioEngine>>> = Default::default();
+    let engine = manual_engine(48_000, 2);
+    let weak = engine.rt_weak();
+    let s2 = slot.clone();
+    engine.set_waker(std::sync::Arc::new(move || {
+        let taken = s2.lock().unwrap().take();
+        drop(taken);
+    }));
+    *slot.lock().unwrap() = Some(engine);
+    // Any event (here: a load error) invokes the waker on the engine thread.
+    slot.lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .load(PathBuf::from("/nope/x.wav"), 0, true);
+    let t = Instant::now();
+    while weak.upgrade().is_some() {
+        assert!(
+            t.elapsed() < Duration::from_secs(3),
+            "engine thread did not exit after being dropped from its waker"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Absurd positions from the UI (e.g. a garbage duration) must not overflow the frame/time
+/// arithmetic and kill the engine thread (debug builds panic on overflow).
+#[test]
+fn huge_seek_and_load_offsets_do_not_kill_the_engine() {
+    let files = stress_files("huge_seek");
+    let engine = manual_engine(48_000, 2);
+    engine.load(files.good[0].clone(), u64::MAX, true);
+    engine.sync();
+    engine.load(files.good[1].clone(), 0, true);
+    for _ in 0..5 {
+        render(&engine, 2, 480);
+    }
+    engine.seek(u64::MAX);
+    engine.sync();
+    engine.seek(u64::MAX / 3);
+    engine.sync();
+    for _ in 0..5 {
+        render(&engine, 2, 480);
+    }
+    let _ = engine.snapshot();
+    // Still alive and functional.
+    engine.load(files.good[0].clone(), 0, true);
+    engine.sync();
+    let mut heard = false;
+    for _ in 0..100 {
+        if render(&engine, 2, 480).iter().any(|s| s.abs() > 0.1) {
+            heard = true;
+            break;
+        }
+    }
+    assert!(heard);
 }

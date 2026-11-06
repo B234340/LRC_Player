@@ -47,7 +47,7 @@ pub use renderer::SpectrumTap;
 pub use source::{probe_track, TrackInfo};
 
 use engine_thread::{Command, EngineThread, EntryInfo, SharedInfo};
-use renderer::{Renderer, RtShared};
+use renderer::{PositionGuard, Renderer, RtShared};
 
 /// Where the engine sends audio.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,6 +194,8 @@ pub struct AudioEngine {
     waker: Arc<Mutex<Option<Waker>>>,
     manual: Arc<Mutex<Option<Renderer>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// Keeps `snapshot().position_ms` monotonic within a segment.
+    pos_guard: Mutex<PositionGuard>,
 }
 
 impl AudioEngine {
@@ -224,6 +226,7 @@ impl AudioEngine {
             waker,
             manual,
             thread: Mutex::new(Some(handle)),
+            pos_guard: Mutex::new(PositionGuard::default()),
         })
     }
 
@@ -243,6 +246,13 @@ impl AudioEngine {
 
     /// Queues the track to splice in gaplessly when the current one ends (`None` clears).
     /// Call again after every `AdvancedToNext`/`TrackStarted` with the following track.
+    ///
+    /// The successor is spliced into the ring when the current track finishes *decoding*,
+    /// up to `ring_ms` before it finishes playing. From then on it is committed: calling
+    /// `set_next` again with the same path is a no-op (it will not play twice), and a
+    /// different path (or `None`) only affects what follows the spliced track. A `set_next`
+    /// arriving after the current track has already finished playing starts the next track
+    /// after a short prebuffer instead of gaplessly.
     pub fn set_next(&self, path: Option<PathBuf>) {
         self.send(Command::SetNext(path));
     }
@@ -260,7 +270,10 @@ impl AudioEngine {
     }
 
     /// Sample-accurate seek within the audible track (container seek index, no decode from
-    /// the start). Rapid successive seeks are coalesced.
+    /// the start). Rapid successive seeks are coalesced. Seeking past the end finishes the
+    /// track (`TrackFinished`). If the file cannot be repositioned at all (e.g. it vanished),
+    /// an `Error` is emitted and the engine stops. From `Stopped`, loads the last track
+    /// paused at `ms`.
     pub fn seek(&self, ms: u64) {
         self.send(Command::Seek(ms));
     }
@@ -283,6 +296,9 @@ impl AudioEngine {
         self.send(Command::SetDevice(name));
     }
 
+    /// `position_ms` never decreases while the same track segment plays (it may hold still for
+    /// the output latency right after a resume); it changes discontinuously only on
+    /// load/seek/stop/track change.
     pub fn snapshot(&self) -> EngineSnapshot {
         let clock = self.rt.clock.read();
         let now = self.rt.now_ns();
@@ -293,6 +309,7 @@ impl AudioEngine {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
+        let mut segment = None;
         let (path, position_ms, duration_ms) = if info.state == EngineState::Stopped {
             match &info.last {
                 Some(e) => (Some(e.path.clone()), 0, e.duration_ms),
@@ -304,10 +321,18 @@ impl AudioEngine {
                 .iter()
                 .find(|e| e.seq == clock.track_seq && clock.gen >= e.gen);
             match (live, info.entries.first()) {
-                (Some(e), _) => (Some(e.path.clone()), clock.audible_ms(now), e.duration_ms),
+                (Some(e), _) => {
+                    segment = Some((clock.gen, clock.track_seq));
+                    (Some(e.path.clone()), clock.audible_ms(now), e.duration_ms)
+                }
                 (None, Some(e)) => (Some(e.path.clone()), e.base_ms, e.duration_ms),
                 (None, None) => (None, 0, None),
             }
+        };
+        // Lock order: info -> pos_guard (pos_guard is only ever locked here).
+        let position_ms = match self.pos_guard.lock() {
+            Ok(mut g) => g.apply(segment, position_ms),
+            Err(p) => p.into_inner().apply(segment, position_ms),
         };
         let position_ms = match duration_ms {
             Some(d) => position_ms.min(d),
@@ -376,6 +401,15 @@ impl AudioEngine {
         self.manual.lock().ok()?.as_ref().map(|r| r.available())
     }
 
+    /// Waits until the engine thread handled (and published) every command sent so far.
+    #[cfg(test)]
+    pub(crate) fn sync(&self) {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.send(Command::Sync(tx));
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("engine thread did not answer");
+    }
+
     #[cfg(test)]
     pub(crate) fn rt_weak(&self) -> std::sync::Weak<RtShared> {
         Arc::downgrade(&self.rt)
@@ -390,7 +424,12 @@ impl Drop for AudioEngine {
             Err(p) => p.into_inner().take(),
         };
         if let Some(h) = handle {
-            let _ = h.join();
+            // Dropped from the engine thread itself (e.g. the last owner released inside the
+            // waker callback): joining would deadlock/panic. The thread exits on its own
+            // after processing the Shutdown command.
+            if h.thread().id() != std::thread::current().id() {
+                let _ = h.join();
+            }
         }
         if let Ok(mut m) = self.manual.lock() {
             m.take();

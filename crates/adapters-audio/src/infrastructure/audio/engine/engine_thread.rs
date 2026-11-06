@@ -31,6 +31,9 @@ pub(crate) enum Command {
     SetEq(EqSettings),
     SetDevice(Option<String>),
     Shutdown,
+    /// Test hook: answered once every earlier command was handled and published.
+    #[cfg(test)]
+    Sync(Sender<()>),
 }
 
 /// Snapshot data published for [`super::AudioEngine::snapshot`].
@@ -112,9 +115,19 @@ pub(crate) struct EngineThread {
     last_callbacks: (u64, Instant),
     /// A segment was started and Loading -> Playing/Paused waits for the renderer to prime it.
     awaiting_prime: bool,
+    /// A renderer queue overflowed (callbacks stalled while commands kept coming): the
+    /// renderer has lost a command/marker and must be rebuilt to resynchronise.
+    needs_rebuild: bool,
+    #[cfg(test)]
+    sync_waiters: Vec<Sender<()>>,
 }
 
 const STALL_TIMEOUT: Duration = Duration::from_secs(3);
+/// Upper bound for positions coming from the API (~2 years). Keeps every ms <-> frame <->
+/// container-timestamp conversion far from u64 overflow (a debug-build panic would kill the
+/// engine thread; a release build would wrap to garbage). Larger values simply mean "past
+/// the end".
+const MAX_POSITION_MS: u64 = 1 << 36;
 const MAX_PUMP_SLICE: Duration = Duration::from_millis(20);
 
 impl EngineThread {
@@ -155,6 +168,9 @@ impl EngineThread {
             last_poll: Instant::now(),
             last_callbacks: (0, Instant::now()),
             awaiting_prime: false,
+            needs_rebuild: false,
+            #[cfg(test)]
+            sync_waiters: Vec::new(),
         }
     }
 
@@ -188,6 +204,16 @@ impl EngineThread {
                     i += 1;
                     continue;
                 }
+                // EQ updates (e.g. a dragged slider) commute with everything else: only the
+                // last one of a batch is sent to the renderer.
+                if matches!(batch[i], Command::SetEq(_))
+                    && batch[i + 1..]
+                        .iter()
+                        .any(|c| matches!(c, Command::SetEq(_)))
+                {
+                    i += 1;
+                    continue;
+                }
                 let cmd = std::mem::replace(&mut batch[i], Command::Play);
                 if !self.handle(cmd) {
                     break 'outer;
@@ -196,6 +222,10 @@ impl EngineThread {
             }
             self.housekeeping();
             self.publish();
+            #[cfg(test)]
+            for tx in self.sync_waiters.drain(..) {
+                let _ = tx.send(());
+            }
             self.pump();
             self.publish();
         }
@@ -248,7 +278,18 @@ impl EngineThread {
     fn rt_cmd(&mut self, c: RtCommand) {
         if let Some(out) = self.output.as_mut() {
             if !out.feeder.command(c) {
-                tracing::warn!("renderer command queue full");
+                tracing::warn!("renderer command queue full; rebuilding output");
+                self.needs_rebuild = true;
+            }
+        }
+    }
+
+    /// Pushes a marker; an overflow (renderer not running) schedules a rebuild.
+    fn rt_marker(&mut self, m: Marker) {
+        if let Some(out) = self.output.as_mut() {
+            if !out.feeder.marker(m) {
+                tracing::warn!("renderer marker queue full; rebuilding output");
+                self.needs_rebuild = true;
             }
         }
     }
@@ -259,12 +300,12 @@ impl EngineThread {
                 path,
                 start_ms,
                 autoplay,
-            } => self.load(path, start_ms, autoplay),
+            } => self.load(path, start_ms.min(MAX_POSITION_MS), autoplay),
             Command::SetNext(p) => self.set_next(p),
             Command::Play => self.play(),
             Command::Pause => self.pause(),
             Command::Stop => self.stop(),
-            Command::Seek(ms) => self.seek(ms),
+            Command::Seek(ms) => self.seek(ms.min(MAX_POSITION_MS)),
             Command::SetEq(eq) => {
                 self.eq = eq;
                 if let Some(rate) = self.output.as_ref().map(|o| o.feeder.rate()) {
@@ -276,6 +317,8 @@ impl EngineThread {
                 self.reopen_output(true);
             }
             Command::Shutdown => return false,
+            #[cfg(test)]
+            Command::Sync(tx) => self.sync_waiters.push(tx),
         }
         true
     }
@@ -350,26 +393,37 @@ impl EngineThread {
         };
         if front.base_ms > 0 {
             if let Err(e) = src.seek_ms(front.base_ms) {
+                // The source position is now undefined (and the file could not be reopened):
+                // playing on would put audio and position out of sync.
                 self.emit(EngineEvent::Error {
                     path: Some(front.path.clone()),
                     message: format!("seek failed: {e:#}"),
                 });
+                self.stop();
+                return;
             }
         }
         self.gen += 1;
         let gen = self.gen;
         let paused = self.paused;
         let out = self.output.as_mut().expect("output");
-        out.feeder.flush(gen);
-        out.feeder.command(RtCommand::SetPaused(paused));
+        let ok = out.feeder.flush(gen) && out.feeder.command(RtCommand::SetPaused(paused));
         let at = out.feeder.logical_written();
         let rate = out.feeder.rate() as u64;
-        out.feeder.marker(Marker::TrackStart {
-            gen,
-            at,
-            seq: front.seq,
-            base_frames: front.base_ms * rate / 1000,
-        });
+        // Round up so that the reported position (frames -> ms, rounded down) never shows
+        // less than the requested target.
+        let base_frames = (front.base_ms * rate).div_ceil(1000);
+        let ok = ok
+            && out.feeder.marker(Marker::TrackStart {
+                gen,
+                at,
+                seq: front.seq,
+                base_frames,
+            });
+        if !ok {
+            tracing::warn!("renderer queues full while restarting; rebuilding output");
+            self.needs_rebuild = true;
+        }
         front.gen = gen;
         self.awaiting_prime = true;
         self.entries.clear();
@@ -385,6 +439,16 @@ impl EngineThread {
 
     fn set_next(&mut self, path: Option<PathBuf>) {
         if path.is_some() && path == self.next_path && self.next_src.is_some() {
+            return;
+        }
+        // The successor was already spliced into the ring (the current track hit EOF) but is
+        // not reported as current yet: queueing it again would play it twice.
+        if path.is_some()
+            && self.entries.len() > 1
+            && self.entries.back().map(|e| &e.path) == path.as_ref()
+        {
+            self.next_src = None;
+            self.next_path = None;
             return;
         }
         self.next_src = None;
@@ -439,14 +503,12 @@ impl EngineThread {
         self.seq += 1;
         let seq = self.seq;
         let gen = self.gen;
-        if let Some(out) = self.output.as_mut() {
-            out.feeder.marker(Marker::TrackStart {
-                gen,
-                at,
-                seq,
-                base_frames: 0,
-            });
-        }
+        self.rt_marker(Marker::TrackStart {
+            gen,
+            at,
+            seq,
+            base_frames: 0,
+        });
         self.entries.push_back(Entry {
             seq,
             gen,
@@ -501,7 +563,9 @@ impl EngineThread {
         self.gen += 1;
         let gen = self.gen;
         if let Some(out) = self.output.as_mut() {
-            out.feeder.flush(gen);
+            if !out.feeder.flush(gen) {
+                self.needs_rebuild = true;
+            }
         }
         if let Some(front) = self.entries.front() {
             let mut e = front.clone();
@@ -542,6 +606,7 @@ impl EngineThread {
 
     fn pump(&mut self) {
         let deadline = Instant::now() + MAX_PUMP_SLICE;
+        let mut steps = 0u32;
         loop {
             let Some(out) = self.output.as_mut() else {
                 return;
@@ -552,9 +617,12 @@ impl EngineThread {
             if out.feeder.free() < out.feeder.capacity() / 16 {
                 return;
             }
-            if !self.cmd_rx.is_empty() || Instant::now() > deadline {
+            // Always make some progress, even when commands keep arriving (e.g. a dragged EQ
+            // slider): otherwise a steady command stream could starve the ring.
+            if steps > 0 && (!self.cmd_rx.is_empty() || Instant::now() > deadline) {
                 return;
             }
+            steps += 1;
             self.decode_step();
         }
     }
@@ -656,7 +724,8 @@ impl EngineThread {
                     out.feeder.push(&self.scratch);
                 }
                 let at = out.feeder.logical_written();
-                out.feeder.marker(Marker::End { gen: self.gen, at });
+                let gen = self.gen;
+                self.rt_marker(Marker::End { gen, at });
                 self.end_index = Some(at);
             }
         }
@@ -665,6 +734,9 @@ impl EngineThread {
     // ----- housekeeping --------------------------------------------------------------------
 
     fn housekeeping(&mut self) {
+        if std::mem::take(&mut self.needs_rebuild) && self.output.is_some() {
+            self.reopen_output(false);
+        }
         let mut err = None;
         while let Ok(e) = self.err_rx.try_recv() {
             err = Some(e);
@@ -711,14 +783,24 @@ impl EngineThread {
                         self.restart_front(None);
                     }
                 }
-                Some(out) if self.device_pref.is_none() => {
-                    let current = output::default_output_device_name();
-                    if current.is_some() && current.as_deref() != Some(out.info.name.as_str()) {
-                        tracing::info!("default output device changed to {:?}", current);
+                Some(out) => {
+                    let name = out.info.name.clone();
+                    // Fell back to the default because the preferred device was missing:
+                    // switch back once it reappears.
+                    let pref_back = self.device_pref.as_ref().is_some_and(|p| {
+                        *p != name && output::output_device_names().iter().any(|n| n == p)
+                    });
+                    if pref_back {
+                        tracing::info!("preferred output device {:?} is back", self.device_pref);
                         self.reopen_output(true);
+                    } else if out.info.follows_default {
+                        let current = output::default_output_device_name();
+                        if current.is_some() && current.as_deref() != Some(name.as_str()) {
+                            tracing::info!("default output device changed to {:?}", current);
+                            self.reopen_output(true);
+                        }
                     }
                 }
-                Some(_) => {}
             }
         }
 
@@ -873,23 +955,37 @@ impl EngineThread {
 
     /// Rebuilds the output (device change/error) and resumes the audible track where it was.
     /// `graceful`: the old device still works, so fade out before tearing it down.
-    fn reopen_output(&mut self, graceful: bool) {
-        let audible = self.state == EngineState::Playing && !self.paused;
-        if graceful && audible {
-            if let Some(Output {
+    /// Time for a fade-out sent now to have left the device (fade + device buffer + margin);
+    /// `None` when there is no cpal stream to wait for.
+    fn drain_wait(&self) -> Option<Duration> {
+        match self.output.as_ref() {
+            Some(Output {
                 backend: Backend::Cpal(_),
                 info,
                 ..
-            }) = self.output.as_ref()
-            {
+            }) => {
+                // Unknown (default) buffer: assume a generous 50 ms.
                 let buffer_ms = info
                     .buffer_frames
                     .map(|f| f as u64 * 1000 / info.sample_rate.max(1) as u64)
-                    .unwrap_or(20);
+                    .unwrap_or(50);
+                Some(Duration::from_millis(
+                    self.cfg.fade_ms as u64 + buffer_ms + 20,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn reopen_output(&mut self, graceful: bool) {
+        // Make `entries` reflect what is audible right now (a gapless advance may not have
+        // been processed yet), so the resume position refers to the right track.
+        self.track_progress();
+        let audible = self.state == EngineState::Playing && !self.paused;
+        if graceful && audible {
+            if let Some(wait) = self.drain_wait() {
                 self.rt_cmd(RtCommand::SetPaused(true));
-                std::thread::sleep(Duration::from_millis(
-                    self.cfg.fade_ms as u64 + buffer_ms + 10,
-                ));
+                std::thread::sleep(wait);
             }
         }
         let resume_ms = self.entries.front().map(|front| {
@@ -946,12 +1042,10 @@ impl EngineThread {
     fn shutdown(&mut self) {
         if self.state == EngineState::Playing && self.output.is_some() {
             self.rt_cmd(RtCommand::SetPaused(true));
-            if matches!(
-                self.output.as_ref().map(|o| &o.backend),
-                Some(Backend::Cpal(_))
-            ) {
-                // Let the fade-out reach the device before the stream is torn down.
-                std::thread::sleep(Duration::from_millis(self.cfg.fade_ms as u64 + 30));
+            // Let the fade-out reach the speaker (not just the device buffer) before the
+            // stream is torn down; stopping a stream discards what is still buffered.
+            if let Some(wait) = self.drain_wait() {
+                std::thread::sleep(wait);
             }
         }
         self.dec = None;

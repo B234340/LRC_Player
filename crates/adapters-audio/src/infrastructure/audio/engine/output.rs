@@ -90,11 +90,10 @@ fn build_typed<T: OutSample>(
     } else {
         vec![0.0; SCRATCH_FRAMES * ch]
     };
-    let mut promoted = false;
+    let mut prio: Option<priority::AudioThreadGuard> = None;
     let data_cb = move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
-        if !promoted {
-            promoted = true;
-            priority::promote_audio_thread();
+        if prio.is_none() {
+            prio = Some(priority::promote_audio_thread());
         }
         let ts = info.timestamp();
         let latency_ns = ts

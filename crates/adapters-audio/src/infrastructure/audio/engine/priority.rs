@@ -4,7 +4,8 @@
 //! a handle is required, so the boost silently fails. We therefore promote the callback thread
 //! ourselves on its first callback:
 //! - Windows: MMCSS "Pro Audio" task (AvSetMmThreadCharacteristicsW + AVRT_PRIORITY_HIGH) and
-//!   THREAD_PRIORITY_TIME_CRITICAL on the pseudo-handle from GetCurrentThread().
+//!   THREAD_PRIORITY_TIME_CRITICAL on the pseudo-handle from GetCurrentThread(); the MMCSS
+//!   registration is reverted on that thread when the callback closure is dropped.
 //! - macOS: CoreAudio's IO thread is already realtime; nothing to do.
 //! - Linux/other unix: best-effort SCHED_FIFO (succeeds only with rtkit/RLIMIT_RTPRIO; failure
 //!   is ignored).
@@ -14,12 +15,41 @@
 //! need beyond these three calls; `windows-sys` cross-compiles cleanly for
 //! x86_64-pc-windows-gnu (import libraries come from `windows-link`/`windows_x86_64_gnu`).
 
-/// Promotes the calling (audio callback) thread. Call once, from the callback thread.
-pub(crate) fn promote_audio_thread() {
+/// Undoes the audio-thread promotion when dropped *on the promoted thread* (Windows: reverts
+/// the MMCSS registration with `AvRevertMmThreadCharacteristics`; elsewhere a no-op). Keep it
+/// in the stream callback closure: cpal's WASAPI backend drops the closure on its render
+/// thread when the stream ends.
+#[derive(Debug, Default)]
+pub(crate) struct AudioThreadGuard {
     #[cfg(windows)]
-    win::promote_audio_thread();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    unix::promote_audio_thread();
+    mmcss: usize,
+    #[cfg(windows)]
+    thread_id: u32,
+}
+
+impl Drop for AudioThreadGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        win::revert(self.mmcss, self.thread_id);
+    }
+}
+
+/// Promotes the calling (audio callback) thread. Call once, from the callback thread, and keep
+/// the returned guard alive for as long as the thread renders audio.
+#[must_use]
+pub(crate) fn promote_audio_thread() -> AudioThreadGuard {
+    #[cfg(windows)]
+    {
+        let (mmcss, thread_id) = win::promote_audio_thread();
+        AudioThreadGuard { mmcss, thread_id }
+    }
+    #[cfg(not(windows))]
+    {
+        #[cfg(unix)]
+        #[cfg(not(target_os = "macos"))]
+        unix::promote_audio_thread();
+        AudioThreadGuard::default()
+    }
 }
 
 /// Raises the calling (decoder/engine) thread slightly above normal priority.
@@ -33,11 +63,13 @@ pub(crate) fn promote_decoder_thread() {
 #[cfg(windows)]
 mod win {
     use windows_sys::Win32::System::Threading::{
-        AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority, GetCurrentThread, SetThreadPriority,
-        AVRT_PRIORITY_HIGH, THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_TIME_CRITICAL,
+        AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, AvSetMmThreadPriority,
+        GetCurrentThread, GetCurrentThreadId, SetThreadPriority, AVRT_PRIORITY_HIGH,
+        THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_TIME_CRITICAL,
     };
 
-    pub(super) fn promote_audio_thread() {
+    /// Returns the MMCSS handle (0 if registration failed) and the current thread id.
+    pub(super) fn promote_audio_thread() -> (usize, u32) {
         // "Pro Audio" as a NUL-terminated UTF-16 string.
         const TASK: [u16; 10] = [
             b'P' as u16,
@@ -59,6 +91,17 @@ mod win {
                 AvSetMmThreadPriority(h, AVRT_PRIORITY_HIGH);
             }
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            (h as usize, GetCurrentThreadId())
+        }
+    }
+
+    pub(super) fn revert(mmcss: usize, thread_id: u32) {
+        // SAFETY: the handle came from AvSetMmThreadCharacteristicsW on `thread_id`; MMCSS
+        // requires the revert to happen on that same thread, which is checked here.
+        unsafe {
+            if mmcss != 0 && GetCurrentThreadId() == thread_id {
+                AvRevertMmThreadCharacteristics(mmcss as _);
+            }
         }
     }
 

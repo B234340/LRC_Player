@@ -146,7 +146,9 @@ fn sanitize_db(v: f32) -> f32 {
     }
 }
 
-/// Per-channel filter state for the EQ cascade (fixed size, no allocation).
+/// Per-channel filter state for the EQ cascade (fixed size, no allocation; `Copy` so the
+/// renderer can snapshot it for crossfades without allocating).
+#[derive(Clone, Copy)]
 pub(crate) struct EqState {
     coeffs: EqCoeffs,
     /// [channel][band] = (s1, s2)
@@ -170,6 +172,11 @@ impl EqState {
 
     pub(crate) fn reset(&mut self) {
         self.state = [[[0.0; 2]; EQ_BANDS]; EQ_MAX_CHANNELS];
+    }
+
+    #[inline]
+    pub(crate) fn coeffs(&self) -> &EqCoeffs {
+        &self.coeffs
     }
 
     #[inline]

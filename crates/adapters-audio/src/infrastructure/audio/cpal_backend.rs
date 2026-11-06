@@ -112,14 +112,13 @@ fn build_legacy_stream<T: cpal::SizedSample + Send + 'static>(
     convert: fn(f32) -> T,
 ) -> std::result::Result<cpal::Stream, cpal::BuildStreamError> {
     let mut scratch = vec![0.0f32; LEGACY_SCRATCH];
-    let mut promoted = false;
+    let mut prio: Option<super::engine::priority::AudioThreadGuard> = None;
     let err_fn = |e| tracing::error!("cpal stream error: {}", e);
     device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-            if !promoted {
-                promoted = true;
-                super::engine::priority::promote_audio_thread();
+            if prio.is_none() {
+                prio = Some(super::engine::priority::promote_audio_thread());
             }
             for block in data.chunks_mut(LEGACY_SCRATCH) {
                 let tmp = &mut scratch[..block.len()];

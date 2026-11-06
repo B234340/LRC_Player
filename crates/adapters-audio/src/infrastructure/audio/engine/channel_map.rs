@@ -222,6 +222,24 @@ impl ChannelMatrix {
                 }
             }
         }
+        if dst < src {
+            // A downmix sums several full-scale channels into one (5.1 -> stereo: FL + 0.71 FC
+            // + 0.71 BL peaks at 2.4x). Without headroom that clips hard in the output stage
+            // (crackle on loud passages), so normalise so that no output can exceed the
+            // largest input.
+            let max_row = (0..dst)
+                .map(|d| {
+                    gains[d * src..(d + 1) * src]
+                        .iter()
+                        .map(|g| g.abs())
+                        .sum::<f32>()
+                })
+                .fold(0.0f32, f32::max);
+            if max_row > 1.0 {
+                let k = 1.0 / max_row;
+                gains.iter_mut().for_each(|g| *g *= k);
+            }
+        }
         Self { src, dst, gains }
     }
 
@@ -304,15 +322,32 @@ mod tests {
             | CH_REAR_LEFT
             | CH_REAR_RIGHT;
         let m = ChannelMatrix::new(6, Some(bits), 2);
-        assert_eq!(m.gain(0, 0), 1.0);
-        assert_eq!(m.gain(1, 1), 1.0);
-        assert!((m.gain(0, 2) - MINUS_3DB).abs() < 1e-6);
-        assert!((m.gain(1, 2) - MINUS_3DB).abs() < 1e-6);
+        // BS.775 proportions, normalised so the downmix cannot clip.
+        let k = m.gain(0, 0);
+        assert!((k - 1.0 / (1.0 + 2.0 * MINUS_3DB)).abs() < 1e-6);
+        assert_eq!(m.gain(1, 1), k);
+        assert!((m.gain(0, 2) - MINUS_3DB * k).abs() < 1e-6);
+        assert!((m.gain(1, 2) - MINUS_3DB * k).abs() < 1e-6);
         assert_eq!(m.gain(0, 3), 0.0);
         assert_eq!(m.gain(1, 3), 0.0);
-        assert!((m.gain(0, 4) - MINUS_3DB).abs() < 1e-6);
+        assert!((m.gain(0, 4) - MINUS_3DB * k).abs() < 1e-6);
         assert_eq!(m.gain(1, 4), 0.0);
-        assert!((m.gain(1, 5) - MINUS_3DB).abs() < 1e-6);
+        assert!((m.gain(1, 5) - MINUS_3DB * k).abs() < 1e-6);
+    }
+
+    #[test]
+    fn full_scale_downmix_never_exceeds_full_scale() {
+        let mut out = Vec::new();
+        for (src, dst) in [(6, 2), (8, 2), (6, 1), (8, 6), (2, 1), (3, 2)] {
+            let m = ChannelMatrix::new(src, None, dst);
+            out.clear();
+            m.apply(&vec![1.0; src], &mut out);
+            m.apply(&vec![-1.0; src], &mut out);
+            assert!(
+                out.iter().all(|v| v.abs() <= 1.0 + 1e-6),
+                "{src}->{dst}: {out:?}"
+            );
+        }
     }
 
     #[test]
