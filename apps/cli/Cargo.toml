@@ -6,9 +6,9 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
-cpal = "0.15"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "net", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 crossbeam-channel = "0.5"
 lrc_player = { path = "../../crates/presentation-egui" }
+lrc_player_adapters_audio = { path = "../../crates/adapters-audio" }

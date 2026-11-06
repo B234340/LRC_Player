@@ -1,8 +1,10 @@
-use lrc_player_ports::audio_output::{AudioFormat, AudioOutput};
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender};
+use lrc_player_ports::audio_output::{AudioFormat, AudioOutput};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 // Type aliases to reduce complex type signatures flagged by clippy
 type ArcF32Vec = Arc<Vec<f32>>;
@@ -45,29 +47,104 @@ impl BufferPool {
     }
 }
 
-/// CPAL-based output using a ring buffer for lower-latency, less-allocation playback.
-/// Uses a small Mutex only to guard the `Producer`/`Consumer` handles when accessed from
-/// the non-realtime and realtime threads respectively. This is a pragmatic compromise
-/// for demo purposes; a fully lock-free setup can be implemented if needed.
+/// Legacy CPAL output (decoder -> channel -> writer thread -> ring -> callback).
+///
+/// Superseded by [`super::engine::AudioEngine`]; kept for API compatibility. Fixes applied:
+/// the writer thread exits on `stop()`/drop even when the ring is full and the consumer is
+/// gone (F2), the callback never allocates (I16/U16 use a preallocated scratch buffer and
+/// rounding/clamping conversion), the ring is sized from the actual device format, a ~50 ms
+/// fixed device buffer is requested, and the callback thread is promoted to realtime priority.
 pub struct CpalOutput {
     stream: Option<cpal::Stream>,
     // Sender to a background writer thread that owns the Producer (no locks in realtime callback)
     producer_tx: Option<Sender<Arc<Vec<f32>>>>,
     writer_handle: Option<JoinHandle<()>>,
+    writer_stop: Option<Arc<AtomicBool>>,
     pool: Option<Arc<BufferPool>>,
     format: Option<AudioFormat>,
     selected_device_name: Option<String>,
+}
+
+/// Writer loop: drains `rx` into the ring. Exits when `stop` is set or all senders are gone,
+/// including while waiting for ring space (the consumer may already be dropped).
+fn spawn_writer(
+    mut producer: ringbuf::Producer<f32>,
+    rx: ProducerReceiver,
+    pool: Arc<BufferPool>,
+    stop: Arc<AtomicBool>,
+) -> std::io::Result<JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("lrc-producer-writer".to_string())
+        .spawn(move || loop {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            let buf_arc = match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(b) => b,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return,
+            };
+            let buf = &*buf_arc;
+            let mut offset = 0;
+            while offset < buf.len() {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                let pushed = producer.push_slice(&buf[offset..]);
+                if pushed == 0 {
+                    std::thread::sleep(Duration::from_millis(3));
+                } else {
+                    offset += pushed;
+                }
+            }
+            if let Ok(vec) = Arc::try_unwrap(buf_arc) {
+                pool.put(vec);
+            }
+        })
+}
+
+const LEGACY_SCRATCH: usize = 8192;
+
+fn build_legacy_stream<T: cpal::SizedSample + Send + 'static>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    mut consumer: ringbuf::Consumer<f32>,
+    convert: fn(f32) -> T,
+) -> std::result::Result<cpal::Stream, cpal::BuildStreamError> {
+    let mut scratch = vec![0.0f32; LEGACY_SCRATCH];
+    let mut promoted = false;
+    let err_fn = |e| tracing::error!("cpal stream error: {}", e);
+    device.build_output_stream(
+        config,
+        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            if !promoted {
+                promoted = true;
+                super::engine::priority::promote_audio_thread();
+            }
+            for block in data.chunks_mut(LEGACY_SCRATCH) {
+                let tmp = &mut scratch[..block.len()];
+                let popped = consumer.pop_slice(tmp);
+                tmp[popped..].iter_mut().for_each(|s| *s = 0.0);
+                for (d, s) in block.iter_mut().zip(tmp.iter()) {
+                    *d = convert(*s);
+                }
+            }
+        },
+        err_fn,
+        None,
+    )
 }
 
 impl CpalOutput {
     /// Start output, attempting to use `preferred` device name when provided.
     pub fn start_with_device(
         &mut self,
-        format: AudioFormat,
+        _requested: AudioFormat,
         preferred: Option<String>,
     ) -> Result<AudioFormat> {
+        // Restarting must not leak the previous writer.
+        let _ = AudioOutput::stop(self);
         let host = cpal::default_host();
-        // try to find device by preferred name if provided
         let device_opt = if let Some(pref) = preferred.clone() {
             match host.output_devices() {
                 Ok(devs) => devs
@@ -82,121 +159,81 @@ impl CpalOutput {
         let device = device_opt
             .or_else(|| host.default_output_device())
             .ok_or_else(|| anyhow!("no output device available"))?;
-        // record selected device name when possible
         self.selected_device_name = device.name().ok();
 
-        // attempt to use the device's default output config
         let supported = device.default_output_config()?;
-        let stream_config: cpal::StreamConfig = supported.config();
+        let base: cpal::StreamConfig = supported.config();
         let sample_format = supported.sample_format();
+        let rate = base.sample_rate.0;
+        let wanted = rate / 20; // ~50 ms
+        let fixed = match supported.buffer_size() {
+            cpal::SupportedBufferSize::Range { min, max } => wanted.clamp(*min, (*max).max(*min)),
+            cpal::SupportedBufferSize::Unknown => wanted,
+        };
 
-        // create a ring buffer sized to ~1 second of audio at requested rate (clamped)
-        let cap_frames = (format.sample_rate as usize).saturating_mul(format.channels as usize);
-        // clamp capacity to reasonable bounds
-        let cap = cap_frames.clamp(4096, 262_144);
-        let rb = RingBuffer::<f32>::new(cap);
-        let (prod, cons) = rb.split();
-
-        let err_fn = |e| tracing::error!("cpal stream error: {}", e);
-
-        // move `cons` directly into the audio callback to avoid locking in realtime thread
-        let cons_cb = cons;
-
-        // create buffer pool and a bounded channel to send write requests (Arc<Vec<f32>>) to the
-        // background writer that owns `prod`. Small capacity avoids unbounded memory growth while
-        // remaining mostly non-blocking for the caller via `try_send`.
         let pool = Arc::new(BufferPool::new());
-        let (tx, rx): (ProducerSender, ProducerReceiver) = bounded(16);
-
-        // spawn writer thread that owns `prod` and drains the channel, pushing into ring buffer
-        let pool_clone = pool.clone();
-        let writer = std::thread::Builder::new()
-            .name("lrc-producer-writer".to_string())
-            .spawn(move || {
-                let mut producer = prod;
-                // drain until sender is dropped
-                while let Ok(buf_arc) = rx.recv() {
-                    let buf = &*buf_arc;
-                    // try to push entire buffer; if only partial fits, we push what we can and drop rest
-                    let mut offset = 0;
-                    while offset < buf.len() {
-                        let pushed = producer.push_slice(&buf[offset..]);
-                        if pushed == 0 {
-                            // ring buffer full; yield briefly to allow consumer to catch up
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        } else {
-                            offset += pushed;
-                        }
-                    }
-
-                    // attempt to reclaim Vec from Arc to return to pool
-                    if let Ok(vec) = Arc::try_unwrap(buf_arc) {
-                        pool_clone.put(vec);
-                    }
+        let mut last_err: Option<anyhow::Error> = None;
+        for buffer_size in [cpal::BufferSize::Fixed(fixed), cpal::BufferSize::Default] {
+            let stream_config = cpal::StreamConfig {
+                buffer_size,
+                ..base.clone()
+            };
+            // ~1 s of audio at the ACTUAL device format.
+            let cap = (rate as usize)
+                .saturating_mul(stream_config.channels as usize)
+                .clamp(4096, 1 << 20);
+            let (prod, cons) = RingBuffer::<f32>::new(cap).split();
+            let built = match sample_format {
+                cpal::SampleFormat::F32 => {
+                    build_legacy_stream::<f32>(&device, &stream_config, cons, |v| v)
                 }
-            })?;
-
-        let stream = match sample_format {
-            cpal::SampleFormat::F32 => {
-                let mut consumer = cons_cb;
-                let cb = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    // pop as many samples as available into data
-                    let popped = consumer.pop_slice(data);
-                    if popped < data.len() {
-                        // zero-fill remainder
-                        for s in data.iter_mut().skip(popped) {
-                            *s = 0.0;
-                        }
-                    }
-                };
-                device.build_output_stream(&stream_config, cb, err_fn, None)?
-            }
-            cpal::SampleFormat::I16 => {
-                let mut consumer = cons_cb;
-                let cb = move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    let mut tmp = vec![0.0f32; data.len()];
-                    let popped = consumer.pop_slice(&mut tmp);
-                    for (i, sample) in data.iter_mut().enumerate() {
-                        let v = if i < popped { tmp[i] } else { 0.0 };
-                        *sample = (v * i16::MAX as f32) as i16;
-                    }
-                };
-                device.build_output_stream(&stream_config, cb, err_fn, None)?
-            }
-            cpal::SampleFormat::U16 => {
-                let mut consumer = cons_cb;
-                let cb = move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
-                    let mut tmp = vec![0.0f32; data.len()];
-                    let popped = consumer.pop_slice(&mut tmp);
-                    for (i, sample) in data.iter_mut().enumerate() {
-                        let v = if i < popped { tmp[i] } else { 0.0 };
-                        let scaled = ((v * 0.5 + 0.5) * u16::MAX as f32) as u16;
-                        *sample = scaled;
-                    }
-                };
-                device.build_output_stream(&stream_config, cb, err_fn, None)?
-            }
-            _ => return Err(anyhow!("unsupported sample format")),
-        };
-
-        stream.play()?;
-        self.stream = Some(stream);
-        self.producer_tx = Some(tx);
-        self.writer_handle = Some(writer);
-        self.pool = Some(pool);
-        let actual_format = AudioFormat {
-            sample_rate: stream_config.sample_rate.0,
-            channels: stream_config.channels,
-            sample_format: format.sample_format,
-        };
-        self.format = Some(actual_format);
-        Ok(actual_format)
+                cpal::SampleFormat::I16 => {
+                    build_legacy_stream::<i16>(&device, &stream_config, cons, |v| {
+                        (v.clamp(-1.0, 1.0) * 32767.0).round() as i16
+                    })
+                }
+                cpal::SampleFormat::U16 => {
+                    build_legacy_stream::<u16>(&device, &stream_config, cons, |v| {
+                        ((v.clamp(-1.0, 1.0) * 32767.0).round() as i32 + 32768) as u16
+                    })
+                }
+                _ => return Err(anyhow!("unsupported sample format")),
+            };
+            let stream = match built {
+                Ok(s) => s,
+                Err(e) => {
+                    last_err = Some(anyhow!("{e}"));
+                    continue;
+                }
+            };
+            let (tx, rx): (ProducerSender, ProducerReceiver) = bounded(16);
+            let stop = Arc::new(AtomicBool::new(false));
+            let writer = spawn_writer(prod, rx, pool.clone(), stop.clone())?;
+            stream.play()?;
+            self.stream = Some(stream);
+            self.producer_tx = Some(tx);
+            self.writer_handle = Some(writer);
+            self.writer_stop = Some(stop);
+            self.pool = Some(pool);
+            let actual_format = AudioFormat {
+                sample_rate: rate,
+                channels: stream_config.channels,
+                sample_format: match sample_format {
+                    cpal::SampleFormat::I16 => lrc_player_ports::audio_output::SampleFormat::I16,
+                    _ => lrc_player_ports::audio_output::SampleFormat::F32,
+                },
+            };
+            self.format = Some(actual_format);
+            return Ok(actual_format);
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("could not open output stream")))
     }
     pub fn new() -> Self {
         CpalOutput {
             stream: None,
             producer_tx: None,
             writer_handle: None,
+            writer_stop: None,
             pool: None,
             format: None,
             selected_device_name: None,
@@ -218,8 +255,6 @@ impl CpalOutput {
         host.default_output_device().and_then(|d| d.name().ok())
     }
 
-    // Default impl will be provided at module scope below.
-
     /// Return a clone of the producer sender so callers can send Arc<Vec<f32>> directly.
     pub fn producer_sender(&self) -> Option<Sender<Arc<Vec<f32>>>> {
         self.producer_tx.clone()
@@ -237,12 +272,13 @@ impl AudioOutput for CpalOutput {
     }
 
     fn stop(&mut self) -> Result<()> {
-        // drop stream to stop
-        self.stream = None;
-        // drop the sender to signal writer to exit, then join the thread
-        if let Some(tx) = self.producer_tx.take() {
-            drop(tx);
+        // Signal the writer first: it may be waiting for ring space that will never come
+        // once the stream (and with it the consumer) is dropped.
+        if let Some(stop) = self.writer_stop.take() {
+            stop.store(true, Ordering::Release);
         }
+        self.stream = None;
+        self.producer_tx = None;
         if let Some(h) = self.writer_handle.take() {
             let _ = h.join();
         }
@@ -316,5 +352,42 @@ impl CpalOutput {
 impl Default for CpalOutput {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for CpalOutput {
+    fn drop(&mut self) {
+        let _ = AudioOutput::stop(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F2 regression: with the consumer dropped and the ring full, the writer used to spin
+    /// forever (and `stop()` hung in `join`). It must exit once stop is signalled.
+    #[test]
+    fn writer_exits_on_stop_with_full_ring_and_dropped_consumer() {
+        let (prod, cons) = RingBuffer::<f32>::new(64).split();
+        drop(cons);
+        let (tx, rx) = bounded::<Arc<Vec<f32>>>(4);
+        let stop = Arc::new(AtomicBool::new(false));
+        let h = spawn_writer(prod, rx, Arc::new(BufferPool::new()), stop.clone()).unwrap();
+        tx.send(Arc::new(vec![0.0; 1000])).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(
+            !h.is_finished(),
+            "writer should be blocked on the full ring"
+        );
+        // The sender is still alive (as the decoder's clone would be): only the flag stops it.
+        stop.store(true, Ordering::Release);
+        let t = std::time::Instant::now();
+        while !h.is_finished() {
+            assert!(t.elapsed() < Duration::from_secs(2), "writer leaked");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        h.join().unwrap();
+        drop(tx);
     }
 }
