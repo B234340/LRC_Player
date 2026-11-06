@@ -6,6 +6,7 @@ use eframe::egui;
 use fontdb::{Database, Family, Source, Style};
 use std::collections::HashSet;
 use std::fs;
+use std::sync::Arc;
 
 use crate::presentation::app::GuiApp;
 
@@ -39,7 +40,7 @@ impl GuiApp {
             for (name, bytes) in &fallback_fonts {
                 fonts
                     .font_data
-                    .insert(name.clone(), egui::FontData::from_owned(bytes.clone()));
+                    .insert(name.clone(), Arc::new(egui::FontData::from_owned(bytes.clone())));
             }
 
             // プロポーショナルフォントファミリーにフォールバックを追加

@@ -80,10 +80,22 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_stroke.color));
         }
 
-        ui.painter().add(frame.paint(row_rect));
+        // egui 0.31+ `Frame::paint` takes the content rect and grows it by margin + stroke;
+        // paint the frame over exactly `row_rect` with a centered stroke, as egui 0.22 did.
+        ui.painter().rect(
+            row_rect,
+            frame.corner_radius,
+            frame.fill,
+            frame.stroke,
+            egui::StrokeKind::Middle,
+        );
 
         let mut button_clicked = false;
-        let mut row_ui = ui.child_ui(row_rect.shrink(4.0), egui::Layout::left_to_right(egui::Align::Center));
+        let mut row_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(row_rect.shrink(4.0))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
         row_ui.add_space(8.0);
 
         let label_text = if is_favorite {

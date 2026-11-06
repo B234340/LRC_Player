@@ -375,13 +375,13 @@ pub fn render_track_artwork_with_metadata_first(
 
     let path = Path::new(track_path);
     if let Some(texture) = get_cached_embedded_artwork_texture(ui.ctx(), path, texture_id) {
-        ui.image(&texture, art_size);
+        ui.image((texture.id(), art_size));
         return;
     }
 
     if let Some(art_path) = discover_artwork_for_track(path) {
         if let Some(texture) = get_cached_artwork_texture(ui.ctx(), &art_path, texture_id) {
-            ui.image(&texture, art_size);
+            ui.image((texture.id(), art_size));
             return;
         }
     }
@@ -413,13 +413,13 @@ pub fn render_track_artwork_with_file_first(
     let path = Path::new(track_path);
     if let Some(art_path) = discover_artwork_for_track(path) {
         if let Some(texture) = get_cached_artwork_texture(ui.ctx(), &art_path, texture_id) {
-            ui.image(&texture, art_size);
+            ui.image((texture.id(), art_size));
             return;
         }
     }
 
     if let Some(texture) = get_cached_embedded_artwork_texture(ui.ctx(), path, texture_id) {
-        ui.image(&texture, art_size);
+        ui.image((texture.id(), art_size));
         return;
     }
 
@@ -534,7 +534,7 @@ pub fn render_track_artwork(
     if let Some(art_path) = discover_artwork_for_track(Path::new(track_path)) {
         // キャッシュからテクスチャを取得して表示
         if let Some(texture) = get_cached_artwork_texture(ui.ctx(), &art_path, texture_id) {
-            ui.image(&texture, art_size);
+            ui.image((texture.id(), art_size));
             return; // 画像表示成功
         }
     }

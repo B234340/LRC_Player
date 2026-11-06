@@ -84,7 +84,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             }
         }
 
-        egui::ComboBox::from_id_source("device_combo")
+        egui::ComboBox::from_id_salt("device_combo")
             .selected_text(filtered.get(sel_in_filtered).map(|(_, s)| *s).unwrap_or(default_label))
             .show_ui(ui, |ui| {
                 for (i, (_orig_idx, name)) in filtered.iter().enumerate() {
@@ -134,7 +134,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
     ui.add_space(8.0);
     ui.label(translate("resampler_taps", app.language));
-    ui.add(egui::DragValue::new(&mut app.taps).clamp_range(4..=256));
+    ui.add(egui::DragValue::new(&mut app.taps).range(4..=256));
     if ui.button(translate("save_taps", app.language)).clicked() {
         let mut cfg = Config::load();
         if let Some(idx) = app.selected {
@@ -151,7 +151,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.horizontal(|ui| {
         ui.label(translate("language", app.language));
         let mut selected_lang = app.language;
-        egui::ComboBox::from_id_source("language_combo")
+        egui::ComboBox::from_id_salt("language_combo")
             .selected_text(language_name(app.language))
             .show_ui(ui, |ui| {
                 for lang in supported_languages() {

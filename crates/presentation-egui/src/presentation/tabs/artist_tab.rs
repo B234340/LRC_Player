@@ -143,7 +143,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                         
                         // スクロール可能なアーティストリスト（仮想スクロールで効率的に表示）
                         egui::ScrollArea::vertical()
-                            .id_source("artist_list_scroll")  // スクロール位置記憶用の一意識別子
+                            .id_salt("artist_list_scroll")  // スクロール位置記憶用の一意識別子
                             .auto_shrink([false, false])      // コンテンツに合わせて縮小しない
                             .max_width(list_block_width)
                             .max_height(ui.available_height())
@@ -154,7 +154,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     let is_selected = selected_artist.as_deref() == Some(name);
                                     
                                     // 選択可能なラベルとしてアーティスト名を表示
-                                    let row = egui::SelectableLabel::new(is_selected, name);
+                                    let row = egui::Button::selectable(is_selected, name);
                                     if ui
                                         .add_sized([ui.available_width(), list_row_height], row)
                                         .clicked()

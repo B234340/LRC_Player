@@ -201,7 +201,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
         // ========== スクロール可能なアルバムカードグリッドの表示 ==========
         egui::ScrollArea::vertical()
-            .id_source("album_cards_scroll")  // スクロール位置記憶用の一意識別子
+            .id_salt("album_cards_scroll")  // スクロール位置記憶用の一意識別子
             .auto_shrink([false, false])      // コンテンツに合わせて縮小しない
             .show_rows(ui, card_row_height + grid_spacing_y, row_count, |ui, row_range| {
                 grid_visible_rect = Some(ui.clip_rect());  // 現在表示中の領域を記録
@@ -239,7 +239,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                     let art_size = egui::vec2(card_width - 16.0, card_width - 16.0);
                                     if let Some(texture) = app.album_artwork_texture(album.title.as_str()) {
                                         // アートワーク画像が読み込み済みの場合
-                                        ui.image(&texture, art_size);
+                                        ui.image((texture.id(), art_size));
                                     } else {
                                         // アートワークがない場合のプレースホルダー
                                         let (rect, _) = ui.allocate_exact_size(art_size, egui::Sense::hover());
