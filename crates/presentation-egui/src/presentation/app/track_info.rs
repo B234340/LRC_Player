@@ -7,6 +7,7 @@
 //! `Lyrics::discover_ranked` (each file parsed once) for the latest requested track; stale
 //! requests are dropped ("latest wins") and the result is posted back with a repaint.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -20,6 +21,49 @@ pub(crate) struct TrackInfoResult {
     pub(crate) path: String,
     pub(crate) info: Option<TrackInfo>,
     pub(crate) candidates: Vec<LyricsCandidate>,
+    /// Image file for the OS media overlay (cover file, or embedded art written to a temp file).
+    pub(crate) cover: Option<PathBuf>,
+}
+
+/// Cover file next to the track (cover/folder/front.*, then `<stem>.*`).
+pub(crate) fn find_cover_file(track: &Path) -> Option<PathBuf> {
+    let parent = track.parent()?;
+    let stem = track.file_stem()?.to_string_lossy().to_lowercase();
+    let mut best: Option<(u8, u64, PathBuf)> = None;
+    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        let Some((base, ext)) = name.rsplit_once('.') else { continue };
+        if !matches!(ext, "jpg" | "jpeg" | "png" | "webp") {
+            continue;
+        }
+        let priority = if matches!(base, "cover" | "folder" | "front") {
+            1
+        } else if base == stem {
+            2
+        } else {
+            continue;
+        };
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if best.as_ref().is_none_or(|(bp, bs, _)| priority < *bp || (priority == *bp && size > *bs)) {
+            best = Some((priority, size, entry.path()));
+        }
+    }
+    best.map(|(_, _, p)| p)
+}
+
+/// Embedded artwork written once to the temp directory (for the media overlay).
+fn embedded_cover_file(track: &Path) -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join("lrc_player_covers");
+    let name = blake3::hash(track.to_string_lossy().as_bytes()).to_hex();
+    let out = dir.join(format!("{}.png", &name[..24]));
+    if out.is_file() {
+        return Some(out);
+    }
+    let image = super::artwork_loader::extract_embedded(track)?;
+    let image = image.thumbnail(600, 600);
+    std::fs::create_dir_all(&dir).ok()?;
+    image.save_with_format(&out, image::ImageFormat::Png).ok()?;
+    Some(out)
 }
 
 struct Request {
@@ -101,11 +145,19 @@ fn worker_loop(slot: Arc<(Mutex<Slot>, Condvar)>, tx: Sender<TrackInfoResult>, c
         };
         let info = probe_track_info(&request.path).ok();
         let candidates = Lyrics::discover_ranked(&request.path, &request.lrc_targets);
+        let track = Path::new(&request.path);
+        let cover = find_cover_file(track).or_else(|| {
+            info.as_ref()
+                .is_some_and(|i| i.has_embedded_artwork)
+                .then(|| embedded_cover_file(track))
+                .flatten()
+        });
         if tx
             .send(TrackInfoResult {
                 path: request.path,
                 info,
                 candidates,
+                cover,
             })
             .is_err()
         {
@@ -119,11 +171,10 @@ impl GuiApp {
     /// Asks the worker for duration/tags and lyrics of the current track.
     pub(crate) fn request_track_info(&mut self) {
         if self.play_path.is_empty() {
-            self.lyrics_files.clear();
             self.lyrics_candidates.clear();
             self.selected_lyrics_index = None;
-            self.loaded_lyrics = None;
             self.loaded_timeline = None;
+            self.lyrics_revision += 1;
             return;
         }
         self.track_info
@@ -155,6 +206,7 @@ impl GuiApp {
                     }
                 }
             }
+            self.play_cover_path = result.cover;
             self.set_lyrics_candidates(result.candidates);
         }
     }

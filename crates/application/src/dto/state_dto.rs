@@ -91,6 +91,20 @@ pub fn legacy_playback_mode(shuffle: bool, repeat: RepeatMode) -> PlaybackMode {
     }
 }
 
+/// Last window geometry in logical points (position is `None` where the platform does
+/// not report it, e.g. Wayland).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowStateDto {
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub x: Option<f32>,
+    #[serde(default)]
+    pub y: Option<f32>,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
 /// Persisted equalizer settings (mirrors the engine's `EqSettings`; dB values).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct EqDto {
@@ -163,6 +177,17 @@ pub struct StateDto {
     /// Per-track lyrics offsets (track path -> ms, positive = lyrics earlier).
     #[serde(default)]
     pub lyrics_offsets: std::collections::HashMap<String, i64>,
+    /// `.lrc` files attached to tracks by drag & drop (track path -> lyrics path).
+    #[serde(default)]
+    pub lyrics_overrides: std::collections::HashMap<String, String>,
+    /// Right-hand panel of the shell: `"queue"`, `"lyrics"` or `None` (hidden).
+    #[serde(default)]
+    pub right_panel: Option<String>,
+    /// Sidebar collapsed to icons.
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
+    #[serde(default)]
+    pub window: Option<WindowStateDto>,
 }
 
 impl Default for StateDto {
@@ -192,6 +217,10 @@ impl Default for StateDto {
             shuffle: None,
             repeat: None,
             lyrics_offsets: std::collections::HashMap::new(),
+            lyrics_overrides: std::collections::HashMap::new(),
+            right_panel: None,
+            sidebar_collapsed: false,
+            window: None,
         }
     }
 }
@@ -263,6 +292,10 @@ mod tests {
         assert_eq!(state.shuffle, None);
         assert_eq!(state.shuffle_repeat(), (true, RepeatMode::Off));
         assert!(state.lyrics_offsets.is_empty());
+        assert!(state.lyrics_overrides.is_empty());
+        assert_eq!(state.right_panel, None);
+        assert!(!state.sidebar_collapsed);
+        assert_eq!(state.window, None);
     }
 
     #[test]
@@ -284,6 +317,9 @@ mod tests {
         state.eq.enabled = true;
         state.eq.bands_db[3] = -4.5;
         state.lyrics_offsets.insert("/x.flac".into(), 250);
+        state.right_panel = Some("lyrics".into());
+        state.sidebar_collapsed = true;
+        state.window = Some(WindowStateDto { width: 1000.0, height: 700.0, x: Some(10.0), y: None, maximized: false });
         let json = serde_json::to_string(&state).unwrap();
         let back: StateDto = serde_json::from_str(&json).unwrap();
         assert_eq!(back.volume, 0.5);
@@ -291,6 +327,9 @@ mod tests {
         assert_eq!(back.eq, state.eq);
         assert_eq!(back.shuffle_repeat(), (true, RepeatMode::All));
         assert_eq!(back.lyrics_offsets.get("/x.flac"), Some(&250));
+        assert_eq!(back.right_panel.as_deref(), Some("lyrics"));
+        assert!(back.sidebar_collapsed);
+        assert_eq!(back.window, state.window);
     }
 
     #[test]

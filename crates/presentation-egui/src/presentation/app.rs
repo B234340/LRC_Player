@@ -1,117 +1,142 @@
 //! GUIアプリケーションのメイン構造体と App トレイト実装を提供するモジュール。
 //!
 //! Playback is driven by one long-lived [`AudioEngine`] (see `app/playback.rs`). The public
-//! transport/volume/queue methods the UI should call are documented there
+//! transport/volume/queue methods the UI calls are documented there
 //! (`GuiApp::toggle_play_pause`, `seek_to`, `set_volume`, ...).
 //!
+//! The window is composed from the `ui` component library (`app/shell.rs`): sidebar,
+//! transport bar, optional right panel (queue / lyrics), the selected page (`app/pages`),
+//! toasts and the file-drop overlay. Components return [`UiAction`]s which
+//! `app/dispatch.rs` applies.
+//!
 //! Repaint policy (see [`GuiApp::schedule_repaint`]): the UI is event driven. Engine events
-//! wake it through the engine waker; while audio is playing it repaints at ~30 fps only when
-//! time-based content is visible (Play tab: lyrics / FFT / position), otherwise at ~4 fps;
-//! nothing is scheduled while paused, stopped or minimized.
+//! and workers wake it through `request_repaint`; while audio is playing it repaints at
+//! ~30 fps only when time-based content is visible (Now Playing, lyrics panel), otherwise
+//! at ~4 fps for the transport time; nothing is scheduled while paused, stopped or
+//! minimized. Animations (lyrics scroll easing, toasts, hover fades) request their own
+//! frames only while they run.
+//!
+//! [`UiAction`]: crate::presentation::ui::UiAction
 
 mod artwork;
 mod artwork_loader;
-mod fonts;
-mod library_cache;
+mod dispatch;
+mod drop;
+pub(crate) mod library_index;
 mod lyrics;
+mod media_controls;
+mod pages;
 mod playback;
+mod playlists;
+mod queue_ops;
+mod scan;
 pub mod scan_status;
 mod seek;
+mod shell;
+mod spectrum;
 mod state;
 mod track_info;
-mod track_meta;
-mod view_model;
 
+#[cfg(test)]
+mod screenshot_tests;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use eframe::{App, egui};
-use lrc_player_application::config::{Language, LogLevel, ResamplerSetting, Theme};
+use crossbeam_channel::Receiver;
+use eframe::{egui, App};
+use lrc_player_application::config::Config;
 use lrc_player_application::dto::PlaylistDto;
 use lrc_player_application::infrastructure::audio::engine::{AudioEngine, EngineSnapshot, EqSettings};
-use lrc_player_application::infrastructure::library_snapshot::LibrarySnapshotCache;
-use lrc_player_application::infrastructure::lyrics::{Lyrics, LyricsCandidate, LyricsTimeline};
+use lrc_player_application::infrastructure::lyrics::{LyricsCandidate, LyricsTimeline};
 use lrc_player_application::infrastructure::persistence::{SharedMetaCache, StateSaver};
-use lrc_player_application::localization::translate;
 use lrc_player_application::usecases::queue_navigation::QueueNavigator;
-use lrc_player_application::view_model::{AppVm, QueueVm};
 use lrc_player_domain::model::PlaybackState;
 
 pub use lrc_player_application::config::ArtistViewMode;
 pub use lrc_player_application::dto::RepeatMode;
 pub use playback::PlaybackView;
+pub use state::{initial_window, AppOptions};
 
 pub use artwork_loader::ArtworkMode;
 pub(crate) use artwork_loader::ArtworkLoader;
-pub(crate) use lyrics::overlay_time_ms as lyric_clock_ms;
-pub(crate) use state::apply_theme;
-pub(crate) use track_meta::TrackMetaCache;
 
-use crate::presentation::components::fft_overlay::FftAnalyzer;
-use crate::presentation::components::lrc_overlay::LrcLayoutCache;
-use crate::presentation::side_panel::output;
-use crate::presentation::tabs;
+use crate::presentation::ui::{
+    shell::SidebarState,
+    views::{LyricsViewState, NowPlayingState, TrackTableState},
+    widgets::Toasts,
+    Accent, Lang, Page, RightPanel, ThemeMode, Tr,
+};
 
-/// Repaint interval while playing and time-based content (lyrics / FFT / Play tab) is visible.
+/// Repaint interval while playing and time-based content (lyrics / spectrum) is visible.
 const REPAINT_TIME_BASED: Duration = Duration::from_millis(33);
-/// Repaint interval while playing on other tabs (enough for a time label).
+/// Repaint interval while playing elsewhere (enough for the transport time label).
 const REPAINT_IDLE_PLAYING: Duration = Duration::from_millis(250);
 /// How long a hot-path state change may stay unsaved before it is handed to the saver.
 const STATE_SUBMIT_INTERVAL: Duration = Duration::from_millis(1000);
 /// While playing, the position is persisted this often so a crash resumes nearby.
 const POSITION_PERSIST_INTERVAL: Duration = Duration::from_secs(10);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
-    Library,
-    Play,
-    Playlist,
-    Album,
-    Artist,
-    Queue,
-    Scan,
-    Settings,
+/// A confirmation / input dialog shown over the shell.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Modal {
+    /// New playlist (optionally pre-filled with tracks, e.g. "save queue as playlist").
+    CreatePlaylist { name: String, tracks: Vec<String> },
+    RenamePlaylist { id: String, name: String },
+    DeletePlaylist { id: String, name: String },
+    /// Remove every track from the library database.
+    ClearLibrary,
 }
 
-impl Tab {
-    fn label(&self) -> &'static str {
-        match self {
-            Tab::Library => "Library",
-            Tab::Play => "Play",
-            Tab::Playlist => "Playlists",
-            Tab::Album => "Albums",
-            Tab::Artist => "Artists",
-            Tab::Queue => "Queue",
-            Tab::Scan => "Scan",
-            Tab::Settings => "Settings",
-        }
-    }
+/// The "Details" dialog for one track.
+#[derive(Debug, Clone)]
+pub(crate) struct DetailsDialog {
+    pub(crate) path: String,
+}
 
-    fn from_label(label: &str) -> Option<Self> {
-        match label {
-            "Library" => Some(Tab::Library),
-            "Play" => Some(Tab::Play),
-            "Playlists" => Some(Tab::Playlist),
-            "Albums" => Some(Tab::Album),
-            "Artists" => Some(Tab::Artist),
-            "Queue" => Some(Tab::Queue),
-            "Scan" => Some(Tab::Scan),
-            "Settings" => Some(Tab::Settings),
-            _ => None,
-        }
-    }
+/// Shell / navigation state that only the UI uses.
+pub(crate) struct UiShell {
+    pub(crate) page: Page,
+    pub(crate) album_detail: Option<String>,
+    pub(crate) artist_detail: Option<String>,
+    pub(crate) playlist_detail: Option<String>,
+    pub(crate) right_panel: Option<RightPanel>,
+    pub(crate) sidebar: SidebarState,
+    pub(crate) eq_open: bool,
+    pub(crate) toasts: Toasts,
+    pub(crate) library_table: TrackTableState,
+    pub(crate) library_query: String,
+    /// Table of the album / artist / playlist detail page (reset on navigation).
+    pub(crate) detail_table: TrackTableState,
+    pub(crate) detail_query: String,
+    pub(crate) artist_query: String,
+    pub(crate) focus_search: bool,
+    pub(crate) now: NowPlayingState,
+    pub(crate) side_lyrics: LyricsViewState,
+    pub(crate) theme: ThemeMode,
+    pub(crate) accent: Accent,
+    pub(crate) modal: Option<Modal>,
+    pub(crate) details: Option<DetailsDialog>,
+    /// Pending native folder picker: (is lyrics folder, result channel).
+    pub(crate) folder_picker: Option<(bool, Receiver<Option<PathBuf>>)>,
+    /// Fonts being built on a worker.
+    pub(crate) fonts_rx: Option<Receiver<egui::FontDefinitions>>,
+    /// Pending folder expansion of dropped files (play now?, result channel).
+    pub(crate) drop_rx: Option<(bool, Receiver<Vec<String>>)>,
+    pub(crate) exclude_input: String,
+    /// Last (message, time) toast, to drop identical repeats.
+    pub(crate) last_toast: Option<(String, Instant)>,
+    pub(crate) window: Option<lrc_player_application::dto::WindowStateDto>,
+    /// Rows of the current detail page (album / artist / playlist), rebuilt on change.
+    pub(crate) detail_rows: pages::DetailRows,
 }
 
 pub struct GuiApp {
-    pub app_vm: AppVm,
-
-    active_tab: Tab,
-
     // ---- Audio engine ----
-    /// The one playback engine (None only if its thread could not be spawned).
+    /// The one playback engine (None only if its thread could not be spawned / disabled).
     pub(crate) engine: Option<AudioEngine>,
     /// Snapshot taken at the start of the current frame.
     pub(crate) engine_snapshot: Option<EngineSnapshot>,
@@ -119,11 +144,10 @@ pub struct GuiApp {
     pub(crate) device_names: Vec<String>,
     /// Configured output device; `None` follows the system default.
     pub(crate) preferred_output_device: Option<String>,
-    pub(crate) device_filter: String,
     /// Device the engine currently renders to (from `DeviceChanged`).
     pub(crate) active_output_device: Option<String>,
-    pub(crate) resampler: ResamplerSetting,
-    pub(crate) taps: usize,
+    /// Settings file contents (saved on change when persistence is on).
+    pub(crate) config: Config,
 
     // ---- Transport ----
     pub(crate) play_path: String,
@@ -146,17 +170,6 @@ pub struct GuiApp {
     pub(crate) seek_last_change_at: Option<Instant>,
     /// Target of the last seek sent to the engine, shown until the engine reports it.
     pub(crate) seek_display_hold: Option<(u64, Instant)>,
-    seek_interacting: bool,
-    seek_key_hold_direction: i8,
-    seek_key_hold_started_at: Option<Instant>,
-    seek_key_last_step_at: Option<Instant>,
-    seek_key_hold_steps: u32,
-
-    pub(crate) queue_scroll_to_playing: bool,
-    /// One-shot scroll request for a virtualized track list: (id_source, row index).
-    pub(crate) track_list_scroll_request: Option<(String, usize)>,
-
-    pub(crate) artist_view_mode: ArtistViewMode,
 
     pub(crate) play_position_ms: u64,
     pub(crate) play_duration_ms: Option<u64>,
@@ -167,93 +180,72 @@ pub struct GuiApp {
     pub(crate) track_info: track_info::TrackInfoLoader,
 
     pub(crate) play_artwork_handle: Option<egui::TextureHandle>,
-    pub(crate) play_artwork_blur_handle: Option<egui::TextureHandle>,
-    /// Track whose Play-tab artwork was requested from the worker (also caches "none").
+    pub(crate) play_backdrop_handle: Option<egui::TextureHandle>,
+    /// Track whose artwork was requested from the worker (also caches "none").
     pub(crate) play_artwork_requested_for: Option<String>,
+    /// Cover image file for the OS media overlay (cover file or extracted embedded art).
+    pub(crate) play_cover_path: Option<PathBuf>,
 
-    pub(crate) lrc_overlay_enabled: bool,
-    pub(crate) fft_overlay_enabled: bool,
-    pub(crate) lyrics_files: Vec<std::path::PathBuf>,
+    // ---- Lyrics ----
     pub(crate) lyrics_candidates: Vec<LyricsCandidate>,
     pub(crate) selected_lyrics_index: Option<usize>,
-    pub(crate) loaded_lyrics: Option<Lyrics>,
     /// Timeline of the loaded lyrics; owns the `[offset:]` tag + user offset (applied once).
     pub(crate) loaded_timeline: Option<LyricsTimeline>,
+    /// Bumped when `loaded_timeline` is replaced (lyrics view galley cache key).
+    pub(crate) lyrics_revision: u64,
     pub(crate) lyrics_offset_ms: i64,
     /// Per-track user lyrics offsets (persisted).
     pub(crate) lyrics_offsets: HashMap<String, i64>,
-    pub(crate) lrc_layout: LrcLayoutCache,
-    pub(crate) fft: FftAnalyzer,
+    /// `.lrc` files attached by drag & drop (track -> lyrics file, persisted).
+    pub(crate) lyrics_overrides: HashMap<String, String>,
+    pub(crate) spectrum: spectrum::FftAnalyzer,
 
-    pub(crate) play_status: Option<String>,
-
-    pub(crate) scan_target_input: String,
-    pub(crate) scan_lrc_target_input: String,
-    pub(crate) scan_exclude_input: String,
+    // ---- Library / scan ----
     pub(crate) scan_targets: Vec<String>,
     pub(crate) scan_lrc_targets: Vec<String>,
     pub(crate) scan_excludes: Vec<String>,
-
-    pub(crate) selected_album: Option<String>,
-    pub(crate) selected_artist: Option<String>,
-    pub(crate) selected_directory: Option<String>,
-    pub(crate) favorite_directories: Vec<String>,
-    pub(crate) favorite_directory_input: String,
-    pub(crate) library_expanded_directories: HashSet<String>,
-
-    pub(crate) playlists: Vec<PlaylistDto>,
-    /// Paths in the favorite playlist (playlists[0]) for O(1) per-row lookups.
-    pub(crate) favorite_set: HashSet<String>,
-    pub(crate) new_playlist_name: String,
-    pub(crate) selected_playlist: Option<usize>,
-    pub(crate) playlist_track_input: String,
-
-    pub(crate) queue: QueueVm,
-    pub(crate) queue_item_input: String,
-    pub(crate) selected_queue_index: Option<usize>,
-    pub(crate) selected_queue_indices: Vec<usize>,
-    pub(crate) queue_selection_anchor: Option<usize>,
-    pub(crate) queue_handle_hold_index: Option<usize>,
-    pub(crate) queue_handle_hold_started_at: Option<Instant>,
-    pub(crate) queue_drag_source_index: Option<usize>,
-
-    pub(crate) side_panel_expanded: bool,
-    pub(crate) theme: Theme,
-    pub(crate) log_level: LogLevel,
-    pub(crate) language: Language,
-
     pub(crate) last_scan_status: Option<String>,
     pub(crate) scan_counts: (Option<u64>, Option<u64>, Option<u64>),
+    pub(crate) scanning: bool,
+    /// Persisted for older builds (no longer shown).
+    pub(crate) favorite_directories: Vec<String>,
+    pub(crate) artist_view_mode: ArtistViewMode,
+
+    pub(crate) playlists: Vec<PlaylistDto>,
+    pub(crate) queue: Vec<String>,
+    pub(crate) queue_rows: shell::QueueRowsCache,
 
     // ---- Data layer ----
-    /// One long-lived SQLite connection for UI reads (`try_with` never blocks).
+    /// One long-lived SQLite connection for UI reads/writes.
     pub(crate) meta: Option<SharedMetaCache>,
-    pub(crate) library_snapshot: LibrarySnapshotCache,
-    /// Display metadata for track rows, filled by batched queries.
-    pub(crate) track_meta: TrackMetaCache,
-    /// Background artwork decoding / thumbnail cache (list rows, album grid, Play tab).
+    pub(crate) library: library_index::LibraryIndex,
+    /// Background artwork decoding / thumbnail cache.
     pub(crate) artwork: ArtworkLoader,
 
+    // ---- UI ----
+    pub(crate) ui: UiShell,
+    pub(crate) media: media_controls::MediaControlsBridge,
+
     // ---- Persistence ----
+    /// False in tests / screenshots: nothing is written to the data directory.
+    pub(crate) persist: bool,
     state_saver: Option<StateSaver>,
     state_dirty: bool,
     state_last_submit: Option<Instant>,
-
-    pub(crate) track_details_dialog: Option<TrackDetailsDialog>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct TrackDetailsDialog {
-    pub(crate) path: String,
-    pub(crate) title: String,
-    pub(crate) artist: String,
-    pub(crate) album: String,
 }
 
 impl GuiApp {
-    /// Currently shown tab.
-    pub fn active_tab(&self) -> Tab {
-        self.active_tab
+    /// Translator for the configured language.
+    pub(crate) fn tr(&self) -> Tr {
+        Tr::new(match self.config.language {
+            lrc_player_application::config::Language::Ja => Lang::Ja,
+            _ => Lang::En,
+        })
+    }
+
+    /// Currently shown page.
+    pub fn page(&self) -> Page {
+        self.ui.page
     }
 
     /// Repaint policy: event-driven with a low-rate tick only while audio plays.
@@ -270,9 +262,14 @@ impl GuiApp {
             ctx.request_repaint_after(seek::SEEK_DEBOUNCE);
             return;
         }
+        if self.ui.folder_picker.is_some() || self.ui.fonts_rx.is_some() || self.ui.drop_rx.is_some() {
+            // Results also wake the UI; this is only a safety net.
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
         match self.playback_state {
             PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
-                let time_based_visible = self.active_tab == Tab::Play;
+                let time_based_visible = self.ui.page == Page::NowPlaying
+                    || self.ui.right_panel == Some(RightPanel::Lyrics);
                 if time_based_visible {
                     ctx.request_repaint_after(REPAINT_TIME_BASED);
                 } else {
@@ -306,67 +303,29 @@ impl GuiApp {
 }
 
 impl App for GuiApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        self.poll_fonts(&ctx);
+        crate::presentation::ui::theme::sync(&ctx, self.ui.theme, self.ui.accent);
         self.poll_scan_status();
         self.poll_engine();
         self.poll_track_info();
+        self.poll_library();
+        self.poll_folder_picker();
+        self.poll_dropped();
         self.artwork.poll(&ctx);
-        self.handle_global_keyboard_shortcuts(&ctx);
+        self.ensure_play_artwork();
+        self.media.ensure_attached(frame, &ctx);
+        self.poll_media_controls();
+        self.track_window_geometry(&ctx);
 
-        egui::Panel::top("top_panel").show(ui, |ui| {
-            let tab_size = ui.spacing().interact_size * 2.0;
-            ui.heading(translate("title", self.language));
-            ui.horizontal(|ui| {
-                for tab in [
-                    Tab::Library,
-                    Tab::Play,
-                    Tab::Playlist,
-                    Tab::Album,
-                    Tab::Artist,
-                    Tab::Queue,
-                    Tab::Scan,
-                    Tab::Settings,
-                ] {
-                    if ui
-                        .add_sized(
-                            tab_size,
-                            egui::Button::selectable(self.active_tab == tab, tab.label()),
-                        )
-                        .clicked()
-                        && self.active_tab != tab
-                    {
-                        self.active_tab = tab;
-                        if tab == Tab::Queue {
-                            self.queue_scroll_to_playing = true;
-                        }
-                        // Cheap: library data comes from LibrarySnapshotCache.
-                        self.update_app_vm();
-                    }
-                }
-            });
-        });
+        self.draw_shell(ui);
 
-        egui::Panel::left("side_panel")
-            .resizable(false)
-            .min_size(if self.side_panel_expanded { 240.0 } else { 32.0 })
-            .default_size(if self.side_panel_expanded { 240.0 } else { 32.0 })
-            .show(ui, |ui| {
-                output::ui(ui, self);
-            });
-
-        egui::CentralPanel::default().show(ui, |ui| match self.active_tab {
-            Tab::Library => tabs::library_tab::ui(ui, self),
-            Tab::Play => tabs::play_tab::ui(ui, self),
-            Tab::Playlist => tabs::playlist_tab::ui(ui, self),
-            Tab::Album => tabs::album_tab::ui(ui, self),
-            Tab::Artist => tabs::artist_tab::ui(ui, self),
-            Tab::Queue => tabs::queue_tab::ui(ui, self),
-            Tab::Scan => tabs::scan_tab::ui(ui, self),
-            Tab::Settings => tabs::settings_tab::ui(ui, self),
-        });
-
+        if self.media.is_active() {
+            let view = self.playback_view();
+            self.media.sync(&view, self.play_cover_path.as_deref());
+        }
         self.artwork.end_frame();
         self.maybe_submit_state();
         self.schedule_repaint(&ctx);

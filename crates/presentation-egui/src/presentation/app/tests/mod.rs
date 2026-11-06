@@ -1,25 +1,9 @@
 //! Unit tests for GUI-side logic that does not need a window.
 
 use crate::presentation::app::playback::{eq_from_dto, eq_to_dto, map_engine_state};
-use crate::presentation::app::seek::hold_step_ms;
 use lrc_player_application::dto::EqDto;
 use lrc_player_application::infrastructure::audio::engine::EngineState;
 use lrc_player_domain::model::PlaybackState;
-
-#[test]
-fn key_hold_scan_is_faster_than_real_time() {
-    // PB-08: holding an arrow key must move the target forward faster than playback
-    // (120 ms per step), never backward.
-    let mut target = 0u64;
-    let mut wall = 0u64;
-    for step in 0..30 {
-        target += hold_step_ms(step);
-        wall += 120;
-        assert!(target > wall);
-    }
-    assert_eq!(hold_step_ms(0), 2_000);
-    assert_eq!(hold_step_ms(100), 10_000);
-}
 
 #[test]
 fn eq_dto_roundtrip() {
@@ -46,7 +30,8 @@ fn engine_states_map_to_ui_states() {
 // `TrackStarted`, which is enough to exercise the transport / queue wiring.
 // ---------------------------------------------------------------------------------------
 
-use crate::presentation::app::{GuiApp, RepeatMode, Tab};
+use crate::presentation::app::{AppOptions, GuiApp, RepeatMode};
+use crate::presentation::ui::{Page, RightPanel, UiAction};
 use eframe::egui;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -83,8 +68,23 @@ fn run_frame(ctx: &egui::Context, app: &mut GuiApp, frame: &mut eframe::Frame) {
     });
 }
 
+/// App with temp data: no persistence, a library DB in `dir`, real engine when `engine`.
+pub(crate) fn test_app(ctx: &egui::Context, dir: &Path, engine: bool) -> GuiApp {
+    GuiApp::with_options(
+        ctx,
+        AppOptions {
+            persist: false,
+            engine,
+            meta_path: Some(dir.join("meta_cache.db")),
+            load_fonts: false,
+            media_controls: false,
+            ..Default::default()
+        },
+    )
+}
+
 #[test]
-fn gui_app_smoke_transport_and_tabs() {
+fn gui_app_smoke_transport_and_pages() {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.wav");
     let b = dir.path().join("b.wav");
@@ -95,28 +95,23 @@ fn gui_app_smoke_transport_and_tabs() {
     let b = b.to_string_lossy().into_owned();
 
     let ctx = egui::Context::default();
-    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
-    let mut app = GuiApp::new(&cc);
+    let mut app = test_app(&ctx, dir.path(), true);
     let mut frame = eframe::Frame::_new_kittest();
 
     app.set_shuffle(false);
     app.set_repeat(RepeatMode::Off);
-    app.lrc_overlay_enabled = true;
-    app.fft_overlay_enabled = true;
     app.play_now(vec![a.clone(), b.clone()]);
     assert_eq!(app.current_queue_index, Some(0));
     assert_eq!(app.play_path, a);
 
     // Pump frames until the engine accepted the track and the worker found lyrics/duration.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && (app.play_duration_ms.is_none() || app.loaded_lyrics.is_none()) {
+    while Instant::now() < deadline && (app.play_duration_ms.is_none() || app.loaded_timeline.is_none()) {
         run_frame(&ctx, &mut app, &mut frame);
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(app.play_duration_ms, Some(1000));
-    assert!(app.loaded_lyrics.is_some(), "lyrics discovered on the worker");
-    // Gapless successor follows the queue order (only queued while the engine holds the
-    // track; without an output device the engine may report Stopped).
+    assert!(app.loaded_timeline.is_some(), "lyrics discovered on the worker");
     let engine_active = app
         .engine_snapshot
         .as_ref()
@@ -125,19 +120,13 @@ fn gui_app_smoke_transport_and_tabs() {
         assert_eq!(app.pending_next, Some((1, b.clone())));
     }
 
-    // Render every tab once (virtualized lists, artwork placeholders, overlays).
-    for tab in [
-        Tab::Play,
-        Tab::Library,
-        Tab::Playlist,
-        Tab::Album,
-        Tab::Artist,
-        Tab::Queue,
-        Tab::Scan,
-        Tab::Settings,
-    ] {
-        app.active_tab = tab;
-        run_frame(&ctx, &mut app, &mut frame);
+    // Render every page (and both right panels) once.
+    for page in [Page::NowPlaying, Page::Library, Page::Albums, Page::Artists, Page::Playlists, Page::Folders, Page::Settings] {
+        app.navigate(page);
+        for panel in [None, Some(RightPanel::Queue), Some(RightPanel::Lyrics)] {
+            app.ui.right_panel = panel;
+            run_frame(&ctx, &mut app, &mut frame);
+        }
     }
 
     // Next / Previous (restart threshold) / repeat.
@@ -168,4 +157,64 @@ fn gui_app_smoke_transport_and_tabs() {
     app.stop();
     assert_eq!(app.play_position_ms, 0);
     app.shutdown();
+}
+
+#[test]
+fn actions_edit_queue_playlists_and_lyrics() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = test_app(&ctx, dir.path(), false);
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    let (a, b, c) = (p("a.flac"), p("b.flac"), p("c.flac"));
+
+    // Queue: play from the middle of a view, play next, reorder, remove.
+    app.dispatch(&ctx, UiAction::PlayTracks { paths: vec![a.clone().into(), b.clone().into()], start: 1 });
+    assert_eq!(app.queue, vec![a.clone(), b.clone()]);
+    assert_eq!(app.current_queue_index, Some(1));
+    assert_eq!(app.play_path, b);
+    app.dispatch(&ctx, UiAction::PlayNext(vec![c.clone().into()]));
+    assert_eq!(app.queue, vec![a.clone(), b.clone(), c.clone()]);
+    app.dispatch(&ctx, UiAction::QueueReorder { from: 2, to: 0 });
+    assert_eq!(app.queue, vec![c.clone(), a.clone(), b.clone()]);
+    assert_eq!(app.current_queue_index, Some(2), "current entry follows the move");
+    app.dispatch(&ctx, UiAction::QueueRemove(0));
+    assert_eq!(app.queue, vec![a.clone(), b.clone()]);
+    assert_eq!(app.current_queue_index, Some(1));
+
+    // Save queue as playlist -> modal -> create.
+    app.dispatch(&ctx, UiAction::QueueSaveAsPlaylist);
+    let Some(super::Modal::CreatePlaylist { name, tracks }) = app.ui.modal.clone() else { panic!("modal") };
+    assert_eq!(tracks.len(), 2);
+    let id = app.create_playlist(&name, tracks).unwrap();
+    app.add_to_playlist(&id, vec![c.clone()]);
+    app.reorder_playlist(&id, 2, 0);
+    let list = &app.playlists[app.playlist_index(&id).unwrap()];
+    assert_eq!(list.tracks, vec![c.clone(), a.clone(), b.clone()]);
+    app.remove_from_playlist(&id, vec![0, 2]);
+    assert_eq!(app.playlists[app.playlist_index(&id).unwrap()].tracks, vec![a.clone()]);
+    assert!(app.rename_playlist(&id, "favorite").is_err());
+    app.rename_playlist(&id, "Night").unwrap();
+    app.delete_playlist(&id);
+    assert!(app.playlist_index(&id).is_none());
+    assert!(!app.ui.toasts.is_empty(), "edits report through toasts");
+
+    // Lyrics offsets are per track.
+    app.dispatch(&ctx, UiAction::LyricOffsetDelta(300));
+    assert_eq!(app.lyrics_offsets.get(&b), Some(&300));
+    app.dispatch(&ctx, UiAction::LyricOffsetReset);
+    assert!(!app.lyrics_offsets.contains_key(&b));
+
+    // Navigation and chrome state.
+    app.dispatch(&ctx, UiAction::OpenArtist("X".into()));
+    assert_eq!(app.page(), Page::Artists);
+    assert_eq!(app.ui.artist_detail.as_deref(), Some("X"));
+    app.dispatch(&ctx, UiAction::Navigate(Page::Library));
+    assert!(app.ui.artist_detail.is_none());
+    app.dispatch(&ctx, UiAction::ToggleRightPanel(RightPanel::Lyrics));
+    assert_eq!(app.ui.right_panel, Some(RightPanel::Lyrics));
+    app.dispatch(&ctx, UiAction::ToggleRightPanel(RightPanel::Lyrics));
+    assert_eq!(app.ui.right_panel, None);
+    let state = app.build_state_dto();
+    assert_eq!(state.last_tab.as_deref(), Some("library"));
+    assert_eq!(super::state::page_from_key("Play"), Some(Page::NowPlaying));
 }

@@ -3,6 +3,7 @@ pub mod audio;
 pub mod decode;
 pub mod dedup;
 pub mod library_snapshot;
+pub mod library_tracks;
 pub mod lyrics;
 pub mod persistence;
 pub mod scan;

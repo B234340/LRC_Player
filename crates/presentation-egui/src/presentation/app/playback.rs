@@ -86,10 +86,6 @@ pub(crate) fn eq_to_dto(eq: &EqSettings) -> EqDto {
     dto
 }
 
-fn message_is_seek_failure(status: &Option<String>) -> bool {
-    status.as_deref().is_some_and(|m| m.starts_with("seek failed"))
-}
-
 pub(crate) fn map_engine_state(state: EngineState) -> PlaybackState {
     match state {
         EngineState::Stopped => PlaybackState::Stopped,
@@ -189,7 +185,7 @@ impl GuiApp {
             if let Some(d) = snap.duration_ms {
                 self.play_duration_ms = Some(d);
             }
-            let showing_seek_target = self.pending_seek_ms.is_some() || self.is_seek_interacting();
+            let showing_seek_target = self.pending_seek_ms.is_some();
             if !showing_seek_target {
                 match self.seek_display_hold {
                     Some((target, at))
@@ -212,10 +208,11 @@ impl GuiApp {
         if skip_after_error {
             self.pending_error_skip = false;
             self.consecutive_errors += 1;
-            let len = self.queue.tracks.len();
+            let len = self.queue.len();
             if let Some(index) = self.navigator.next_manual(self.current_queue_index, len) {
                 if Some(index) != self.current_queue_index {
-                    self.play_status = Some("Playback failed, skipping to next queued track".to_string());
+                    let tr = self.tr();
+                    self.toast_warning(tr.t("toast.playback_skip").to_string());
                     self.start_queue_index(index, true);
                 }
             }
@@ -238,12 +235,11 @@ impl GuiApp {
                 let path_str = path.to_string_lossy().into_owned();
                 let index = match self.pending_next.take() {
                     Some((index, next)) if next == path_str => Some(index),
-                    _ => self.queue.tracks.iter().position(|t| Path::new(t) == path),
+                    _ => self.queue.iter().position(|t| Path::new(t) == path),
                 };
                 self.on_track_changed(index, path_str);
                 self.play_position_ms = 0;
                 self.play_duration_ms = duration_ms;
-                self.play_status = None;
                 self.update_gapless_next();
             }
             EngineEvent::TrackFinished { path } => {
@@ -252,7 +248,7 @@ impl GuiApp {
                 }
                 // Nothing was queued for gapless playback; follow the rules once more in case
                 // the queue changed right at the boundary, otherwise stop at the end.
-                let len = self.queue.tracks.len();
+                let len = self.queue.len();
                 let next = self.navigator.next_auto(self.current_queue_index, len);
                 match next {
                     Some(index) if self.current_queue_index.is_some() => {
@@ -261,19 +257,20 @@ impl GuiApp {
                     _ => {
                         self.playback_state = PlaybackState::Stopped;
                         self.play_position_ms = 0;
-                        self.play_status = Some("Playback finished".to_string());
                         self.save_state();
                     }
                 }
             }
             EngineEvent::Error { path, message } => {
                 tracing::warn!("audio engine error ({:?}): {}", path, message);
-                self.play_status = Some(message);
+                let seek_failure = message.starts_with("seek failed");
+                let tr = self.tr();
+                self.toast_error(tr.f("toast.playback_error", &[&message]));
                 let Some(path) = path else {
                     return;
                 };
                 let path_str = path.to_string_lossy().into_owned();
-                let len = self.queue.tracks.len();
+                let len = self.queue.len();
                 if self.consecutive_errors >= len.max(1) {
                     return;
                 }
@@ -284,14 +281,14 @@ impl GuiApp {
                     if let Some(index) = self.navigator.next_auto(Some(failed_index), len) {
                         if Some(index) != self.current_queue_index {
                             if let (Some(engine), Some(next)) =
-                                (&self.engine, self.queue.tracks.get(index).cloned())
+                                (&self.engine, self.queue.get(index).cloned())
                             {
                                 engine.set_next(Some(PathBuf::from(&next)));
                                 self.pending_next = Some((index, next));
                             }
                         }
                     }
-                } else if path_str == self.play_path && !message_is_seek_failure(&self.play_status) {
+                } else if path_str == self.play_path && !seek_failure {
                     // Possibly a load failure of the current track: once the engine reports
                     // Stopped (see `poll_engine`), skip to the next queued track.
                     self.pending_error_skip = true;
@@ -316,11 +313,11 @@ impl GuiApp {
             .engine_snapshot
             .as_ref()
             .is_none_or(|s| s.state != EngineState::Stopped);
-        let len = self.queue.tracks.len();
+        let len = self.queue.len();
         let next = if active && self.current_queue_index.is_some() {
             self.navigator
                 .next_auto(self.current_queue_index, len)
-                .and_then(|i| self.queue.tracks.get(i).map(|p| (i, p.clone())))
+                .and_then(|i| self.queue.get(i).map(|p| (i, p.clone())))
         } else {
             None
         };
@@ -338,20 +335,28 @@ impl GuiApp {
     /// touching the engine.
     pub(crate) fn on_track_changed(&mut self, index: Option<usize>, path: String) {
         let changed = self.play_path != path;
-        if let Some(i) = index {
-            self.select_queue_item_single(i);
-            self.queue_scroll_to_playing = true;
-        }
         self.current_queue_index = index;
         self.play_path = path;
         if changed {
             self.play_duration_ms = None;
             self.lyrics_offset_ms = self.lyrics_offsets.get(&self.play_path).copied().unwrap_or(0);
-            let (title, artist, album) = self.track_meta.lookup_tags(&self.play_path);
-            self.play_title = title;
-            self.play_artist = artist;
-            self.play_album = album;
+            match self.library.row_index(std::path::Path::new(&self.play_path)) {
+                Some(i) => {
+                    let row = &self.library.rows[i];
+                    self.play_title = Some(row.title.clone());
+                    self.play_artist = Some(row.artist.clone()).filter(|a| !a.is_empty());
+                    self.play_album = Some(row.album.clone()).filter(|a| !a.is_empty());
+                    self.play_duration_ms = row.duration_ms;
+                }
+                None => {
+                    self.play_title = None;
+                    self.play_artist = None;
+                    self.play_album = None;
+                }
+            }
             self.play_artwork_requested_for = None;
+            self.play_cover_path = None;
+            self.spectrum.reset();
         }
         // Probe (duration/tags) + lyrics discovery run off the UI thread.
         self.request_track_info();
@@ -360,7 +365,7 @@ impl GuiApp {
 
     /// Loads queue item `index` into the engine (playing when `autoplay`).
     pub(crate) fn start_queue_index(&mut self, index: usize, autoplay: bool) {
-        let Some(path) = self.queue.tracks.get(index).cloned() else {
+        let Some(path) = self.queue.get(index).cloned() else {
             return;
         };
         self.start_track(Some(index), path, 0, autoplay);
@@ -380,7 +385,8 @@ impl GuiApp {
 
     fn load_current_into_engine(&mut self, autoplay: bool) {
         let Some(engine) = &self.engine else {
-            self.play_status = Some("Audio engine is not available".to_string());
+            let tr = self.tr();
+            self.toast_error(tr.t("toast.no_engine").to_string());
             return;
         };
         engine.load(PathBuf::from(&self.play_path), self.play_position_ms, autoplay);
@@ -391,7 +397,6 @@ impl GuiApp {
         } else {
             PlaybackState::Paused
         };
-        self.play_status = None;
     }
 
     // ------------------------------------------------------------------------------------
@@ -410,15 +415,15 @@ impl GuiApp {
     /// restart), or the current/selected/first queue item when there is no current track.
     pub fn play(&mut self) {
         if self.play_path.trim().is_empty() {
-            let len = self.queue.tracks.len();
+            let len = self.queue.len();
             if len == 0 {
-                self.play_status = Some("No track loaded".to_string());
+                let tr = self.tr();
+                self.toast_info(tr.t("toast.nothing_to_play").to_string());
                 return;
             }
             let index = self
                 .current_queue_index
                 .filter(|&i| i < len)
-                .or(self.selected_queue_index.filter(|&i| i < len))
                 .or_else(|| self.navigator.next_manual(None, len))
                 .unwrap_or(0);
             self.start_queue_index(index, true);
@@ -470,7 +475,7 @@ impl GuiApp {
 
     /// Next queue item (wraps when repeat is on; repeat-one does not pin the Next button).
     pub fn next(&mut self) {
-        let len = self.queue.tracks.len();
+        let len = self.queue.len();
         if let Some(index) = self.navigator.next_manual(self.current_queue_index, len) {
             let autoplay = self.playback_state != PlaybackState::Paused;
             self.start_queue_index(index, autoplay);
@@ -479,7 +484,7 @@ impl GuiApp {
 
     /// Restarts the current track when more than 3 s in, otherwise goes to the previous item.
     pub fn previous(&mut self) {
-        let len = self.queue.tracks.len();
+        let len = self.queue.len();
         match self
             .navigator
             .previous(self.current_queue_index, len, self.play_position_ms)
@@ -503,27 +508,13 @@ impl GuiApp {
         if paths.is_empty() {
             return;
         }
-        self.queue.tracks.extend(paths);
-        self.navigator.invalidate();
-        self.update_app_vm();
+        self.queue.extend(paths);
+        self.on_queue_changed();
     }
 
     /// Replaces the queue with `paths` and plays the first one.
     pub fn play_now(&mut self, paths: Vec<String>) {
-        let paths: Vec<String> = paths.into_iter().filter(|p| !p.trim().is_empty()).collect();
-        if paths.is_empty() {
-            return;
-        }
-        self.queue.tracks = paths;
-        self.current_queue_index = None;
-        self.clear_queue_selection();
-        self.navigator.invalidate();
-        if self.navigator.shuffle() {
-            let len = self.queue.tracks.len();
-            self.navigator.set_shuffle(true, Some(0), len);
-        }
-        self.update_app_vm();
-        self.start_queue_index(0, true);
+        self.play_tracks(paths, 0);
     }
 
     /// 0..=1 perceptual volume (cubic taper to linear gain).
@@ -575,7 +566,7 @@ impl GuiApp {
     }
 
     pub fn set_shuffle(&mut self, on: bool) {
-        let len = self.queue.tracks.len();
+        let len = self.queue.len();
         self.navigator.set_shuffle(on, self.current_queue_index, len);
         self.update_gapless_next();
         self.save_state();
@@ -610,17 +601,15 @@ impl GuiApp {
         if let Some(engine) = &self.engine {
             engine.set_output_device(name.clone());
         }
-        let mut cfg = Config::load();
-        cfg.preferred_output_device = name;
-        self.taps = cfg.taps_for_device(cfg.preferred_output_device.as_ref());
-        if let Err(err) = cfg.save() {
-            tracing::warn!("saving config failed: {err:#}");
-        }
+        self.config.preferred_output_device = name;
+        self.save_config();
     }
 
     /// Re-enumerates output devices (cheap enough for a combo-box open, not per frame).
     pub fn refresh_output_devices(&mut self) {
-        self.device_names = AudioEngine::output_device_names();
+        if self.engine.is_some() {
+            self.device_names = AudioEngine::output_device_names();
+        }
     }
 
     /// Live post-gain mono samples of what is being played (for visualizers).
@@ -643,7 +632,7 @@ impl GuiApp {
             shuffle: self.navigator.shuffle(),
             repeat: self.navigator.repeat(),
             queue_index: self.current_queue_index,
-            queue_len: self.queue.tracks.len(),
+            queue_len: self.queue.len(),
             output_device: self.active_output_device.clone(),
             underruns: self.engine_snapshot.as_ref().map(|s| s.underruns).unwrap_or(0),
         }
@@ -659,15 +648,14 @@ impl GuiApp {
         self.play_artist = None;
         self.play_album = None;
         self.play_artwork_handle = None;
-        self.play_artwork_blur_handle = None;
+        self.play_backdrop_handle = None;
         self.play_artwork_requested_for = None;
-        self.lyrics_files.clear();
+        self.play_cover_path = None;
         self.lyrics_candidates.clear();
-        self.loaded_lyrics = None;
         self.loaded_timeline = None;
+        self.lyrics_revision += 1;
         self.selected_lyrics_index = None;
         self.lyrics_offset_ms = 0;
-        self.play_status = Some("Playback stopped".to_string());
         self.save_state();
     }
 

@@ -64,6 +64,8 @@ pub enum Icon {
     TextLarger,
     Undo,
     ArrowDownToLine,
+    /// Pencil (rename / edit).
+    Edit,
 }
 
 impl Icon {
@@ -394,6 +396,11 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             polyline(painter, g.pts(&[(6.0, 6.5), (7.0, 20.0), (17.0, 20.0), (18.0, 6.5)]), st);
             seg(painter, g.p(10.0, 10.0), g.p(10.3, 16.5), Stroke::new(w * 0.8, color));
             seg(painter, g.p(14.0, 10.0), g.p(13.7, 16.5), Stroke::new(w * 0.8, color));
+        }
+        Icon::Edit => {
+            polyline(painter, g.pts(&[(5.0, 19.0), (5.6, 15.4), (15.8, 5.2), (18.8, 8.2), (8.6, 18.4), (5.0, 19.0)]), st);
+            seg(painter, g.p(13.6, 7.4), g.p(16.6, 10.4), st);
+            seg(painter, g.p(12.0, 20.0), g.p(19.5, 20.0), st);
         }
         Icon::Refresh => {
             polyline(painter, arc(g.p(12.0, 12.0), g.s(7.5), (-40.0f32).to_radians(), 255.0f32.to_radians(), 28), st);
