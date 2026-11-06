@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
 use super::convert::Converter;
+use super::device_watch::{DeviceWatch, PresentPolicy};
 use super::dsp::{EqCoeffs, EqSettings};
 use super::output;
 use super::priority;
@@ -111,7 +112,8 @@ pub(crate) struct EngineThread {
     end_index: Option<u64>,
     last: Option<Entry>,
     scratch: Vec<f32>,
-    last_poll: Instant,
+    /// Schedule of device probes (retry backoff while no device, periodic checks).
+    watch: DeviceWatch,
     last_callbacks: (u64, Instant),
     /// A segment was started and Loading -> Playing/Paused waits for the renderer to prime it.
     awaiting_prime: bool,
@@ -141,6 +143,7 @@ impl EngineThread {
     ) -> Self {
         let (err_tx, err_rx) = crossbeam_channel::bounded(16);
         let device_pref = cfg.device.clone();
+        let watch = DeviceWatch::new(cfg.device_poll_ms);
         Self {
             cfg,
             cmd_rx,
@@ -165,7 +168,7 @@ impl EngineThread {
             end_index: None,
             last: None,
             scratch: Vec::with_capacity(32 * 1024),
-            last_poll: Instant::now(),
+            watch,
             last_callbacks: (0, Instant::now()),
             awaiting_prime: false,
             needs_rebuild: false,
@@ -244,7 +247,13 @@ impl EngineThread {
 
     fn wait_timeout_inner(&self) -> Duration {
         let Some(out) = self.output.as_ref() else {
-            return Duration::from_millis(self.cfg.device_poll_ms.clamp(50, 1000) as u64);
+            // Nothing to pump: sleep until the next device probe (or a command), but wake at
+            // least once a second.
+            return self
+                .watch
+                .until_due(Instant::now())
+                .unwrap_or(Duration::from_secs(1))
+                .clamp(Duration::from_millis(1), Duration::from_secs(1));
         };
         let rate = out.feeder.rate().max(1) as u64;
         let ch = out.feeder.channels().max(1) as u64;
@@ -300,9 +309,15 @@ impl EngineThread {
                 path,
                 start_ms,
                 autoplay,
-            } => self.load(path, start_ms.min(MAX_POSITION_MS), autoplay),
+            } => {
+                self.expedite_device_retry();
+                self.load(path, start_ms.min(MAX_POSITION_MS), autoplay)
+            }
             Command::SetNext(p) => self.set_next(p),
-            Command::Play => self.play(),
+            Command::Play => {
+                self.expedite_device_retry();
+                self.play()
+            }
             Command::Pause => self.pause(),
             Command::Stop => self.stop(),
             Command::Seek(ms) => self.seek(ms.min(MAX_POSITION_MS)),
@@ -314,6 +329,8 @@ impl EngineThread {
             }
             Command::SetDevice(name) => {
                 self.device_pref = name;
+                // An explicit user choice: try right away and restart the retry backoff.
+                self.watch.expedite(Instant::now());
                 self.reopen_output(true);
             }
             Command::Shutdown => return false,
@@ -772,28 +789,30 @@ impl EngineThread {
             self.last_callbacks = (self.rt.callbacks.load(Ordering::Relaxed), now);
         }
 
-        if self.cfg.output == OutputMode::Cpal
-            && now.duration_since(self.last_poll)
-                >= Duration::from_millis(self.cfg.device_poll_ms as u64)
-        {
-            self.last_poll = now;
+        if self.cfg.output == OutputMode::Cpal && self.watch.is_due(now) {
             match self.output.as_ref() {
                 None => {
+                    // Backed-off retry; open_output() reschedules the next one on failure.
                     if self.open_output() && !self.entries.is_empty() {
                         self.restart_front(None);
                     }
                 }
                 Some(out) => {
                     let name = out.info.name.clone();
+                    let policy = self.present_policy(&out.info);
+                    // Reopening below reschedules again through open_output().
+                    self.watch.rearm(now, policy);
                     // Fell back to the default because the preferred device was missing:
                     // switch back once it reappears.
-                    let pref_back = self.device_pref.as_ref().is_some_and(|p| {
-                        *p != name && output::output_device_names().iter().any(|n| n == p)
-                    });
+                    let pref_back = policy.preferred_missing
+                        && self
+                            .device_pref
+                            .as_deref()
+                            .is_some_and(output::output_device_exists);
                     if pref_back {
                         tracing::info!("preferred output device {:?} is back", self.device_pref);
                         self.reopen_output(true);
-                    } else if out.info.follows_default {
+                    } else if policy.follow_default && policy.cheap_probes {
                         let current = output::default_output_device_name();
                         if current.is_some() && current.as_deref() != Some(name.as_str()) {
                             tracing::info!("default output device changed to {:?}", current);
@@ -855,6 +874,23 @@ impl EngineThread {
     }
 
     // ----- output management -------------------------------------------------------------
+
+    /// What an open cpal output must be checked for periodically (see `device_watch`).
+    fn present_policy(&self, info: &DeviceInfo) -> PresentPolicy {
+        PresentPolicy {
+            follow_default: info.follows_default,
+            preferred_missing: self.device_pref.as_ref().is_some_and(|p| *p != info.name),
+            cheap_probes: !output::ALSA_HOST,
+        }
+    }
+
+    /// The user wants audio while no device is open: retry soon instead of waiting out the
+    /// backoff.
+    fn expedite_device_retry(&mut self) {
+        if self.output.is_none() && self.cfg.output == OutputMode::Cpal {
+            self.watch.expedite(Instant::now());
+        }
+    }
 
     fn render_config(&self, rate: u32, channels: u16) -> RenderConfig {
         let r = rate as usize;
@@ -920,12 +956,22 @@ impl EngineThread {
                     )
                 };
                 match result {
-                    Ok((stream, info)) => Some(Output {
-                        feeder: feeder_slot.expect("feeder"),
-                        info,
-                        backend: Backend::Cpal(stream),
-                    }),
+                    Ok((stream, info)) => {
+                        let policy = self.present_policy(&info);
+                        self.watch.opened(Instant::now(), policy);
+                        Some(Output {
+                            feeder: feeder_slot.expect("feeder"),
+                            info,
+                            backend: Backend::Cpal(stream),
+                        })
+                    }
                     Err(e) => {
+                        self.watch.open_failed(Instant::now());
+                        tracing::debug!(
+                            "opening audio output failed ({} in a row); next attempt in {:?}",
+                            self.watch.failures(),
+                            self.watch.until_due(Instant::now()).unwrap_or_default()
+                        );
                         if !self.device_error_reported {
                             self.device_error_reported = true;
                             self.emit(EngineEvent::Error {
