@@ -11,7 +11,7 @@ use crate::presentation::ui::{
     format::{format_count, format_duration_opt, format_total},
     i18n::Tr,
     icons::{icon_button_ex, paint_icon, Icon, IconButtonStyle},
-    theme,
+    text, theme,
     widgets::{button, empty_state, paint_artwork, ButtonKind, Tex},
 };
 
@@ -161,13 +161,13 @@ pub fn queue_rows(ui: &mut Ui, id: Id, props: &QueueProps<'_>, first: usize) -> 
                 let tw = slots.text.width();
                 let alpha = if played { 0.55 } else { 1.0 };
                 let title_c = theme::with_alpha(if is_cur { pal.accent_fg } else { pal.text }, alpha);
-                let font = if is_cur { theme::bold_font(ui.ctx(), 13.0) } else { FontId::proportional(13.0) };
+                let font = text::font_id(item.title, 13.0, is_cur);
                 let mut j = LayoutJob::simple_singleline(item.title.to_owned(), font, title_c);
                 j.wrap = egui::text::TextWrapping::truncate_at_width(tw);
                 let g = painter.layout_job(j);
                 painter.galley(pos2(text_left, bg.center().y - g.size().y - 1.0), g, title_c);
                 let sub_c = theme::with_alpha(pal.text_muted, alpha);
-                let mut j = LayoutJob::simple_singleline(item.artist.to_owned(), FontId::proportional(12.0), sub_c);
+                let mut j = LayoutJob::simple_singleline(item.artist.to_owned(), text::font_id(item.artist, 12.0, false), sub_c);
                 j.wrap = egui::text::TextWrapping::truncate_at_width(tw);
                 let g = painter.layout_job(j);
                 painter.galley(pos2(text_left, bg.center().y + 2.0), g, sub_c);
@@ -242,7 +242,7 @@ pub fn queue_rows(ui: &mut Ui, id: Id, props: &QueueProps<'_>, first: usize) -> 
     if let Some(p) = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()) {
         if let (Some(pos), Some(item)) = (ui.ctx().pointer_interact_pos(), props.items.get(p.from)) {
             let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, id.with("ghost")));
-            let mut j = LayoutJob::simple_singleline(item.title.to_owned(), FontId::proportional(13.0), pal.text);
+            let mut j = LayoutJob::simple_singleline(item.title.to_owned(), text::font_id(item.title, 13.0, false), pal.text);
             j.wrap = egui::text::TextWrapping::truncate_at_width(220.0);
             let g = painter.layout_job(j);
             let r = Rect::from_min_size(pos + vec2(12.0, 8.0), vec2(g.size().x + 20.0, 28.0));

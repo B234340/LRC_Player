@@ -1,7 +1,7 @@
 //! Toast notifications: queue, auto-dismiss, hover-to-pause, four severities.
 
 use eframe::egui::{
-    self, vec2, Align2, Context, CursorIcon, Frame, Id, Margin, Order, RichText, Sense, Stroke, Vec2,
+    self, vec2, Align2, Context, CursorIcon, Frame, Id, Margin, Order, Sense, Stroke, Vec2,
 };
 
 use crate::presentation::ui::{
@@ -176,7 +176,8 @@ impl Toasts {
                                 });
                                 let w = ui.available_width() - 34.0 - action_w;
                                 ui.allocate_ui(vec2(w, 20.0), |ui| {
-                                    ui.add(egui::Label::new(RichText::new(&toast.text).color(pal.text)).wrap());
+                                    // Toasts often embed a track / playlist name: font by the text's language.
+                                    ui.add(egui::Label::new(crate::presentation::ui::text::rich(&toast.text, theme::size::BODY, false).color(pal.text)).wrap());
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let close = icon_button_ex(

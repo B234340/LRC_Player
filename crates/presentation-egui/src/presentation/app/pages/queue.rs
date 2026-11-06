@@ -71,14 +71,17 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     ui.add_space(4.0);
                     ui.label(theme::caption(ui, tr.t("queue.now_playing")).color(pal.accent_fg));
-                    ui.add(egui::Label::new(theme::title(ui, &title).color(pal.text)).truncate());
-                    let line = match (artist.is_empty(), album.is_empty()) {
-                        (false, false) => format!("{artist} · {album}"),
-                        (false, true) => artist.clone(),
-                        (true, false) => album.clone(),
-                        (true, true) => String::new(),
-                    };
-                    ui.add(egui::Label::new(theme::muted(ui, line)).truncate());
+                    ui.add(egui::Label::new(crate::presentation::ui::text::rich(&title, theme::size::TITLE, true).color(pal.text)).truncate());
+                    // "artist · album": two elements, each in its own language's font.
+                    let mut line = egui::text::LayoutJob::default();
+                    let parts: Vec<&str> = [artist.as_str(), album.as_str()].into_iter().filter(|s| !s.is_empty()).collect();
+                    for (i, part) in parts.iter().enumerate() {
+                        if i > 0 {
+                            crate::presentation::ui::text::append(&mut line, " · ", theme::size::BODY, false, pal.text_muted);
+                        }
+                        crate::presentation::ui::text::append(&mut line, part, theme::size::BODY, false, pal.text_muted);
+                    }
+                    ui.add(egui::Label::new(line).truncate());
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;

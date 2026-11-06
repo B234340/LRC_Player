@@ -71,7 +71,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
             let tile = Rect::from_min_size(pos2(rect.left() + 10.0, rect.center().y - 22.0), Vec2::splat(44.0));
             let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(tile));
             playlist_tile(&mut tui, 44.0, favorite, &p.id);
-            let g = ui.painter().layout_no_wrap(name.clone(), theme::bold_font(ui.ctx(), theme::size::BODY), pal.text);
+            let g = ui.painter().layout_no_wrap(name.clone(), crate::presentation::ui::text::font_id(&name, theme::size::BODY, true), pal.text);
             ui.painter().galley(pos2(tile.right() + 14.0, rect.center().y - g.size().y - 1.0), g, pal.text);
             let g = ui.painter().layout_no_wrap(
                 format!("{} {}", format_count(p.tracks.len()), tr.t("table.tracks_count")),

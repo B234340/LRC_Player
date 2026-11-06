@@ -7,6 +7,7 @@ use eframe::egui::{
 use crate::presentation::ui::{
     actions::UiAction,
     i18n::Tr,
+    text,
     icons::{paint_icon, Icon},
     theme,
     widgets::{artwork::paint_shadow, empty_state, paint_artwork, Tex},
@@ -135,7 +136,7 @@ pub fn album_grid(
 
                     // text
                     let title_job = {
-                        let mut j = LayoutJob::simple_singleline(album.title.clone(), theme::bold_font(ui.ctx(), theme::size::BODY), pal.text);
+                        let mut j = LayoutJob::simple_singleline(album.title.clone(), text::font_id(&album.title, theme::size::BODY, true), pal.text);
                         j.wrap = egui::text::TextWrapping::truncate_at_width(card);
                         j
                     };
@@ -148,7 +149,7 @@ pub fn album_grid(
                     let sub_y = ty + 19.0;
                     let mut artist_rect = None;
                     if !album.artist.is_empty() {
-                        let mut j = LayoutJob::simple_singleline(album.artist.clone(), FontId::proportional(12.5), egui::Color32::PLACEHOLDER);
+                        let mut j = LayoutJob::simple_singleline(album.artist.clone(), text::font_id(&album.artist, 12.5, false), egui::Color32::PLACEHOLDER);
                         j.wrap = egui::text::TextWrapping::truncate_at_width((card - year_g.size().x).max(24.0));
                         let g = ui.painter().layout_job(j);
                         let r = Rect::from_min_size(pos2(rect.left(), sub_y), g.size());

@@ -42,14 +42,14 @@ pub(super) fn detail_header(
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.add_space(8.0);
             ui.label(theme::caption(ui, kicker));
-            ui.add(egui::Label::new(theme::display(ui, title).color(pal.text)).truncate());
+            ui.add(egui::Label::new(crate::presentation::ui::text::rich(title, theme::size::DISPLAY, true).color(pal.text)).truncate());
             if let Some((link, link_tip)) = subtitle_link.filter(|l| !l.0.is_empty()) {
                 // Link styled like the track-table links: accent + underline on hover.
                 let id = ui.id().with("detail_subtitle_link");
                 let hovered = ui.ctx().read_response(id).is_some_and(|r| r.contains_pointer());
                 let color = if hovered { pal.accent_fg } else { pal.text };
                 let resp = ui
-                    .add(egui::Label::new(egui::RichText::new(link).size(15.0).color(color)).truncate());
+                    .add(egui::Label::new(crate::presentation::ui::text::rich(link, 15.0, false).color(color)).truncate());
                 let resp = ui.interact(resp.rect, id, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text_at_pointer(link_tip);
                 if resp.contains_pointer() {
                     ui.painter().hline(resp.rect.x_range(), resp.rect.bottom(), egui::Stroke::new(1.0, color));

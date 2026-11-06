@@ -700,14 +700,96 @@ fn real_app_min_size() {
                 shoot(&mut h, &format!("minsize_{tag}_{side}_library_{suffix}"));
             }
         }
-        // Other pages at the minimum size (expanded sidebar = narrowest central area).
+        // Every page at the minimum size, sidebar expanded and collapsed.
         h.set_size(Vec2::new(min_w, min_h));
-        with_app(&mut h, |a| a.ui.sidebar.collapsed = false);
-        for (page, name) in [(Page::Queue, "queue"), (Page::Albums, "albums"), (Page::Artists, "artists"), (Page::Playlists, "playlists"), (Page::NowPlaying, "now_playing")] {
-            with_app(&mut h, |a| a.navigate(page));
-            shoot(&mut h, &format!("minsize_min_expanded_{name}_{suffix}"));
+        for collapsed in [false, true] {
+            let side = if collapsed { "collapsed" } else { "expanded" };
+            with_app(&mut h, |a| a.ui.sidebar.collapsed = collapsed);
+            for (page, name) in [
+                (Page::Queue, "queue"),
+                (Page::Albums, "albums"),
+                (Page::Artists, "artists"),
+                (Page::Playlists, "playlists"),
+                (Page::NowPlaying, "now_playing"),
+                (Page::Folders, "folders"),
+                (Page::Settings, "settings"),
+            ] {
+                with_app(&mut h, |a| a.navigate(page));
+                shoot(&mut h, &format!("minsize_min_{side}_{name}_{suffix}"));
+            }
+            with_app(&mut h, |a| a.open_playlist("p2".into()));
+            shoot(&mut h, &format!("minsize_min_{side}_playlist_detail_{suffix}"));
+            with_app(&mut h, |a| {
+                let key = a.library.album_key_of(Path::new(&fx.paths[3])).unwrap();
+                a.open_album(key);
+            });
+            shoot(&mut h, &format!("minsize_min_{side}_album_detail_{suffix}"));
+            with_app(&mut h, |a| a.open_artist("米津玄師".into()));
+            shoot(&mut h, &format!("minsize_min_{side}_artist_detail_{suffix}"));
         }
-        with_app(&mut h, |a| a.open_playlist("p2".into()));
-        shoot(&mut h, &format!("minsize_min_expanded_playlist_detail_{suffix}"));
+    }
+}
+
+/// Mixed JA / ZH-Hans / ZH-Hant / KO content: library rows, queue and Now Playing with a
+/// Chinese title (per-element CJK fonts, item 13).
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn real_app_mixed_cjk() {
+    const EXTRA: &[(&str, &str, &str, u64)] = &[
+        ("周杰伦 - 晴天", "周杰伦", "叶惠美", 269_000),
+        ("我們的愛", "飛兒樂團", "無限", 281_000),
+        ("사랑", "아이유", "Palette", 214_000),
+        ("优里", "周深", "深深", 230_000),
+        ("说爱你", "蔡依林", "看我72变", 223_000),
+    ];
+    for dark in [true, false] {
+        let fx = fixture();
+        let suffix = if dark { "dark" } else { "light" };
+        let mut extra_paths = Vec::new();
+        {
+            let cache = MetaCache::new(&fx.db).unwrap();
+            for (i, (title, artist, album, _)) in EXTRA.iter().enumerate() {
+                let path = fx.db.parent().unwrap().join("music").join(format!("cjk{i}.flac")).to_string_lossy().into_owned();
+                let cid = format!("cjk{i}");
+                cache.upsert_track(&cid, Some(title), Some(artist), Some(artist), None, Some(album), None, 0).unwrap();
+                cache.upsert_location(&cid, &path, None, None, 1, 0, 100 + i as i64, true, true).unwrap();
+                extra_paths.push(path);
+            }
+        }
+        let mut h = start(&fx, dark, Language::Ja);
+        with_app(&mut h, |a| {
+            let rows = Arc::make_mut(&mut a.library.rows);
+            for row in rows.iter_mut() {
+                if let Some(e) = EXTRA.iter().find(|e| e.0 == row.title) {
+                    row.duration_ms = Some(e.3);
+                }
+            }
+            a.library.rebuild();
+            a.library.revision += 1;
+            a.ui.right_panel = None;
+            a.navigate(Page::Library);
+            // Mixed rows first: search for nothing, sort by title descending puts CJK on top.
+            a.ui.library_table.sort = crate::presentation::ui::SortSpec { column: crate::presentation::ui::SortColumn::Title, descending: true };
+        });
+        shoot(&mut h, &format!("cjk_library_{suffix}"));
+
+        with_app(&mut h, |a| {
+            let mut q = extra_paths.clone();
+            q.extend(fx.paths[..6].iter().cloned());
+            a.queue = q;
+            a.current_queue_index = Some(0);
+            a.on_track_changed(Some(0), extra_paths[0].clone());
+            a.play_duration_ms = Some(EXTRA[0].3);
+            a.play_position_ms = 30_000;
+            a.navigate(Page::Queue);
+        });
+        shoot(&mut h, &format!("cjk_queue_{suffix}"));
+        with_app(&mut h, |a| a.navigate(Page::NowPlaying));
+        shoot(&mut h, &format!("cjk_now_playing_{suffix}"));
+        with_app(&mut h, |a| {
+            a.navigate(Page::Library);
+            a.ui.right_panel = Some(RightPanel::Queue);
+        });
+        shoot(&mut h, &format!("cjk_library_queue_panel_{suffix}"));
     }
 }
