@@ -1,5 +1,3 @@
-use lrc_player_domain::model::PlaybackMode;
-use lrc_player_application::infrastructure::persistence::MetaCache;
 use crate::presentation::actions::queue::{
     perform_add_track_next_in_queue,
     perform_enqueue_track_path,
@@ -9,15 +7,13 @@ use crate::presentation::actions::track::{
     perform_open_track_details,
 };
 use crate::presentation::actions::click;
-use crate::presentation::components::track_display::render_track_artwork;
 use crate::presentation::components::track_list::{
     render_handle_button,
     render_track_list_with_artwork,
     TrackActivation,
 };
-use crate::presentation::app::GuiApp;
+use crate::presentation::app::{ArtworkMode, GuiApp};
 use eframe::egui;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// 再生キュー画面のUIを描画する関数
@@ -55,28 +51,17 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         }
     });
 
-    // --- 再生モード選択 ---
-    let mut mode_changed = false;
+    // --- 再生モード（シャッフル + リピート） ---
     ui.horizontal(|ui| {
         ui.label("Playback mode:");
-        mode_changed |= ui
-            .selectable_value(&mut app.playback_mode, PlaybackMode::Sequential, "Sequential")
-            .changed();
-        mode_changed |= ui
-            .selectable_value(&mut app.playback_mode, PlaybackMode::RepeatOne, "Repeat One")
-            .changed();
-        mode_changed |= ui
-            .selectable_value(&mut app.playback_mode, PlaybackMode::RepeatAll, "Repeat All")
-            .changed();
-        mode_changed |= ui
-            .selectable_value(&mut app.playback_mode, PlaybackMode::Shuffle, "Shuffle")
-            .changed();
+        let shuffle = app.shuffle();
+        if ui.selectable_label(shuffle, "Shuffle").clicked() {
+            app.set_shuffle(!shuffle);
+        }
+        if ui.button(app.repeat().label()).clicked() {
+            app.cycle_repeat();
+        }
     });
-    
-    // モード変更時は状態を保存
-    if mode_changed {
-        app.save_state();
-    }
 
     ui.add_space(8.0);
 
@@ -113,8 +98,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         .map(|(idx, p)| (idx, p.name.clone()))
         .collect();
     
-    let _meta_cache = MetaCache::open_default().ok();
-    let mut _metadata_cache: HashMap<String, (String, String, String)> = HashMap::new();
+    // Scroll the (virtualized) list to the playing row once when requested.
+    if app.queue_scroll_to_playing {
+        app.queue_scroll_to_playing = false;
+        if let Some(index) = app.current_queue_index {
+            app.track_list_scroll_request = Some(("queue_tracks_scroll".to_string(), index));
+        }
+    }
 
     let current_play_path = app.play_path.clone();
     let selected_queue_indices = app.selected_queue_indices.clone();
@@ -152,7 +142,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             }
         },
         move |_, index, _, _| selected_queue_indices_for_row.contains(&index),
-        render_track_artwork,
+        ArtworkMode::FileOnly,
         |ui, app, index, _, _| {
             let handle_label = if app.queue_drag_source_index == Some(index) {
                 "⇅"
@@ -222,7 +212,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 }
 
                 if click::process_single_click_selection(
-                    &response,
+                    response,
                     app,
                     index,
                     shift_pressed,
@@ -232,10 +222,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 }
             }
 
-            if app.current_queue_index == Some(index) && app.queue_scroll_to_playing {
-                response.scroll_to_me(Some(egui::Align::Center));
-                app.queue_scroll_to_playing = false;
-            }
 
             false
         },
@@ -291,13 +277,10 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         app.move_queue_item_down(index);
     }
     if let Some(indices) = pending_remove_indices {
-        let mut indices = indices;
-        // 降順ソートして後ろから削除（インデックスずれ防止）
-        indices.sort_unstable_by(|a, b| b.cmp(a));
-        indices.dedup();  // 重複除去
-        for index in indices {
-            app.remove_queue_item(index);
-        }
+        // One batch removal (one view-model refresh) instead of one per item.
+        app.selected_queue_indices = indices;
+        app.selected_queue_index = app.selected_queue_indices.last().copied();
+        app.remove_selected_queue_items();
         app.clear_queue_selection();
     }
     if let Some(index) = pending_play {

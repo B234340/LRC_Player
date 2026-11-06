@@ -4,7 +4,6 @@
 //! - プレイリスト内トラックの追加・削除
 //! - お気に入りトラック判定とお気に入りプレイリストの操作
 
-use lrc_player_application::infrastructure::persistence::MetaCache;
 use crate::presentation::components::track_list::TrackListOutcome;
 use crate::presentation::app::{GuiApp, TrackDetailsDialog};
 use std::path::Path;
@@ -98,11 +97,8 @@ pub fn perform_toggle_favorite_action(app: &mut GuiApp, track_path: &str) {
 /// * `true` - お気に入りに登録されている
 /// * `false` - お気に入りに登録されていない、またはお気に入りプレイリストが存在しない
 pub fn perform_is_track_favorite(app: &GuiApp, track_path: &str) -> bool {
-    // 先頭プレイリスト（お気に入り）を取得し、トラックの存在を確認
-    app.playlists
-        .first()
-        .map(|playlist| playlist.tracks.contains(&track_path.to_string()))
-        .unwrap_or(false)
+    // O(1): set rebuilt whenever playlists are saved / reloaded.
+    app.favorite_set.contains(track_path)
 }
 
 /// 現在選択中のプレイリストに、入力フィールドのトラックを追加する。
@@ -186,9 +182,10 @@ pub fn perform_open_track_details(app: &mut GuiApp, path: &str) {
         .to_string();
 
     // メタキャッシュからトラック情報を取得
-    let (title, artist, album) = MetaCache::open_default()
-        .ok()
-        .and_then(|cache| cache.track_metadata_by_location(item).ok().flatten())
+    let (title, artist, album) = app
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.with(|cache| cache.track_metadata_by_location(item).ok().flatten()))
         .map(|(title, artist, album)| {
             // タイトルが空の場合はフォールバックを使用
             let title = if title.trim().is_empty() {

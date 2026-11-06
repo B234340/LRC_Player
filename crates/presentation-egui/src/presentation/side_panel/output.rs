@@ -1,9 +1,7 @@
-use lrc_player_application::config::Config;
-use lrc_player_domain::model::PlaybackState;
-use lrc_player_application::localization::{language_name, supported_languages, translate};
 use crate::presentation::app::GuiApp;
 use eframe::egui;
-use std::path::Path;
+use lrc_player_application::config::{Config, ResamplerSetting};
+use lrc_player_application::localization::{language_name, supported_languages, translate};
 
 pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     ui.horizontal(|ui| {
@@ -26,9 +24,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
     if app.play_path.trim().is_empty() {
         ui.label("No track selected.");
     } else {
-        let path = Path::new(&app.play_path);
         ui.label(format!("Path: {}", app.play_path));
-        ui.label(format!("Exists: {}", path.exists()));
         ui.label(format!("State: {}", app.playback_state));
         if let Some(status) = &app.play_status {
             ui.label(format!("Status: {}", status));
@@ -42,9 +38,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         if let Some(album) = &app.play_album {
             ui.label(format!("Album: {}", album));
         }
-        if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
-            ui.label(format!("Filename: {}", filename));
-        }
         if let Some(index) = app.selected_queue_index {
             if let Some(track) = app.app_vm.queue.tracks.get(index) {
                 ui.label(format!("Selected queue item: {}", track));
@@ -53,8 +46,17 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             ui.label("No queue item selected.");
         }
     }
+    if let Some(device) = &app.active_output_device {
+        ui.label(format!("Playing on: {}", device));
+    }
+    if let Some(snap) = &app.engine_snapshot {
+        if snap.underruns > 0 {
+            ui.label(format!("Buffer underruns: {}", snap.underruns));
+        }
+    }
     ui.add_space(8.0);
 
+    // ---- Output device ----
     ui.horizontal(|ui| {
         ui.label(translate("filter", app.language));
         ui.text_edit_singleline(&mut app.device_filter);
@@ -62,91 +64,79 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
     let filter = app.device_filter.to_lowercase();
     let default_label = translate("default_output_device_label", app.language);
-    let mut filtered: Vec<(Option<usize>, &str)> = Vec::new();
-
-    if filter.is_empty() || default_label.to_lowercase().contains(&filter) {
-        filtered.push((None, default_label));
-    }
-    for (idx, name) in app.device_names.iter().enumerate() {
-        if filter.is_empty() || name.to_lowercase().contains(&filter) {
-            filtered.push((Some(idx), name.as_str()));
-        }
-    }
-
-    if filtered.is_empty() {
-        ui.label(translate("no_matching_devices", app.language));
-    } else {
-        let mut sel_in_filtered = 0usize;
-        for (i, (orig_idx, _)) in filtered.iter().enumerate() {
-            if *orig_idx == app.selected {
-                sel_in_filtered = i;
-                break;
+    let current_label = app
+        .preferred_output_device
+        .clone()
+        .unwrap_or_else(|| default_label.to_string());
+    let mut choice: Option<Option<String>> = None;
+    let combo = egui::ComboBox::from_id_salt("device_combo")
+        .selected_text(current_label)
+        .show_ui(ui, |ui| {
+            if (filter.is_empty() || default_label.to_lowercase().contains(&filter))
+                && ui
+                    .selectable_label(app.preferred_output_device.is_none(), default_label)
+                    .clicked()
+            {
+                choice = Some(None);
             }
-        }
-
-        egui::ComboBox::from_id_salt("device_combo")
-            .selected_text(filtered.get(sel_in_filtered).map(|(_, s)| *s).unwrap_or(default_label))
-            .show_ui(ui, |ui| {
-                for (i, (_orig_idx, name)) in filtered.iter().enumerate() {
-                    ui.selectable_value(&mut sel_in_filtered, i, *name);
+            let mut any = false;
+            for name in &app.device_names {
+                if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
+                    continue;
                 }
-            });
-
-        if let Some((orig_idx, _)) = filtered.get(sel_in_filtered) {
-            let new_selected = *orig_idx;
-            if app.selected != new_selected {
-                app.selected = new_selected;
-                if let Some(idx) = new_selected {
-                    if let Some(name) = app.device_names.get(idx) {
-                        let cfg = Config::load();
-                        app.taps = cfg.taps_for_device(Some(name));
-                    }
-                }
-
-                if !app.play_path.trim().is_empty()
-                    && matches!(
-                        app.playback_state,
-                        PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking
-                    )
-                {
-                    app.playback_state = PlaybackState::Buffering;
-                    app.play_status = Some("Switching output device...".to_string());
-                    app.request_play();
+                any = true;
+                let selected = app.preferred_output_device.as_deref() == Some(name.as_str());
+                if ui.selectable_label(selected, name).clicked() {
+                    choice = Some(Some(name.clone()));
                 }
             }
-        }
-    }
-
-    if ui.button(translate("save_device", app.language)).clicked() {
-        let mut cfg = Config::load();
-        if let Some(idx) = app.selected {
-            let name = app.device_names[idx].clone();
-            cfg.preferred_output_device = Some(name.clone());
-            if let Some(settings) = cfg.device_settings.get(&name) {
-                app.taps = settings.resampler_taps;
+            if !any && !app.device_names.is_empty() && !filter.is_empty() {
+                ui.label(translate("no_matching_devices", app.language));
             }
-        } else {
-            cfg.preferred_output_device = None;
-        }
-        let _ = cfg.save();
+        });
+    // Enumerate devices only when the list is opened (not every frame).
+    if combo.response.clicked() {
+        app.refresh_output_devices();
+    }
+    if let Some(device) = choice {
+        // Applied and saved immediately; the engine switches without restarting the track.
+        app.set_output_device(device);
         app.update_app_vm();
     }
 
+    // ---- Resampler (applies when the engine starts) ----
     ui.add_space(8.0);
-    ui.label(translate("resampler_taps", app.language));
-    ui.add(egui::DragValue::new(&mut app.taps).range(4..=256));
-    if ui.button(translate("save_taps", app.language)).clicked() {
+    ui.label("Resampler (applies after restart)");
+    let mut resampler = app.resampler;
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut resampler, ResamplerSetting::Fft, "FFT");
+        ui.selectable_value(&mut resampler, ResamplerSetting::Sinc, "Sinc");
+    });
+    if resampler != app.resampler {
+        app.resampler = resampler;
         let mut cfg = Config::load();
-        if let Some(idx) = app.selected {
-            let name = app.device_names[idx].clone();
-            cfg.set_taps_for_device(name, app.taps);
-        } else {
-            cfg.resampler_taps = app.taps;
+        cfg.resampler = resampler;
+        if let Err(err) = cfg.save() {
+            tracing::warn!("saving config failed: {err:#}");
         }
-        let _ = cfg.save();
-        app.update_app_vm();
+    }
+    if app.resampler == ResamplerSetting::Sinc {
+        ui.label(translate("resampler_taps", app.language));
+        ui.add(egui::DragValue::new(&mut app.taps).range(16..=512));
+        if ui.button(translate("save_taps", app.language)).clicked() {
+            let mut cfg = Config::load();
+            match app.preferred_output_device.clone() {
+                Some(name) => cfg.set_taps_for_device(name, app.taps),
+                None => cfg.resampler_taps = app.taps,
+            }
+            if let Err(err) = cfg.save() {
+                tracing::warn!("saving config failed: {err:#}");
+            }
+            app.update_app_vm();
+        }
     }
 
+    // ---- Language (applied and saved immediately) ----
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.label(translate("language", app.language));
@@ -158,16 +148,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     ui.selectable_value(&mut selected_lang, *lang, language_name(*lang));
                 }
             });
-
         if selected_lang != app.language {
             app.language = selected_lang;
+            let mut cfg = Config::load();
+            cfg.language = selected_lang;
+            if let Err(err) = cfg.save() {
+                tracing::warn!("saving config failed: {err:#}");
+            }
         }
     });
-
-    if ui.button("Save language").clicked() {
-        let mut cfg = Config::load();
-        cfg.language = app.language;
-        let _ = cfg.save();
-        app.update_app_vm();
-    }
 }

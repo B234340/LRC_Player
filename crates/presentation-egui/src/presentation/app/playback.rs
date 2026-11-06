@@ -1,468 +1,690 @@
-//! 再生バックエンドの制御を担当
-//! - 再生スレッドの起動/停止
-//! - ステータスポーリング
-//! - デバイスホットプラグ監視
+//! Playback control on top of the persistent [`AudioEngine`].
+//!
+//! The GUI is a thin client: commands go to the engine, the engine reports progress through
+//! [`EngineEvent`]s (which wake the UI via the waker) and a cheap per-frame
+//! [`AudioEngine::snapshot`] (sample-accurate, latency-compensated position).
+//!
+//! # Control API for the UI
+//!
+//! All of these are cheap (they only send engine commands / update in-memory state):
+//!
+//! | method | effect |
+//! |---|---|
+//! | [`GuiApp::toggle_play_pause`] | play / pause; starts the queue if nothing is loaded |
+//! | [`GuiApp::play`], [`GuiApp::pause`], [`GuiApp::stop`] | transport |
+//! | [`GuiApp::next`], [`GuiApp::previous`] | queue navigation (Previous restarts after 3 s) |
+//! | [`GuiApp::seek_to`], [`GuiApp::seek_relative`] | debounced (~30 ms) seek |
+//! | [`GuiApp::set_volume`], [`GuiApp::toggle_mute`], [`GuiApp::set_muted`] | 0..=1 perceptual volume |
+//! | [`GuiApp::set_eq`] | 10-band EQ |
+//! | [`GuiApp::set_shuffle`], [`GuiApp::cycle_repeat`], [`GuiApp::set_repeat`] | play order |
+//! | [`GuiApp::play_queue_index`], [`GuiApp::enqueue`], [`GuiApp::play_now`] | queue |
+//! | [`GuiApp::set_output_device`] | `None` = follow the system default |
+//! | [`GuiApp::playback_view`] | read-only state for drawing a transport bar |
+//! | [`GuiApp::spectrum_tap`] | live post-gain samples for visualizers |
 
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
-use lrc_player_application::infrastructure::audio;
-use lrc_player_application::infrastructure::decode::SymphoniaDecoder;
+use eframe::egui;
+use lrc_player_application::config::{Config, ResamplerSetting};
+use lrc_player_application::dto::{EqDto, RepeatMode, volume_to_linear};
+use lrc_player_application::infrastructure::audio::engine::{
+    AudioEngine, EngineConfig, EngineEvent, EngineState, EqSettings, ResamplerKind, SpectrumTap,
+    EQ_BANDS,
+};
+use lrc_player_application::usecases::queue_navigation::PreviousAction;
 use lrc_player_domain::model::PlaybackState;
-use lrc_player_ports::audio_output::{AudioFormat, AudioOutput, SampleFormat};
 
 use crate::presentation::app::GuiApp;
 
+/// How long the target of a seek is displayed while the engine catches up.
+const SEEK_DISPLAY_HOLD: Duration = Duration::from_millis(600);
+
+/// Read-only playback state for drawing transport controls.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlaybackView {
+    pub state: PlaybackState,
+    pub path: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub position_ms: u64,
+    pub duration_ms: Option<u64>,
+    /// 0..=1 perceptual volume.
+    pub volume: f32,
+    pub muted: bool,
+    pub shuffle: bool,
+    pub repeat: RepeatMode,
+    pub queue_index: Option<usize>,
+    pub queue_len: usize,
+    pub output_device: Option<String>,
+    pub underruns: u64,
+}
+
+pub(crate) fn eq_from_dto(dto: &EqDto) -> EqSettings {
+    let mut bands_db = [0.0; EQ_BANDS];
+    for (dst, src) in bands_db.iter_mut().zip(dto.bands_db.iter()) {
+        *dst = *src;
+    }
+    EqSettings {
+        enabled: dto.enabled,
+        preamp_db: dto.preamp_db,
+        bands_db,
+    }
+}
+
+pub(crate) fn eq_to_dto(eq: &EqSettings) -> EqDto {
+    let mut dto = EqDto {
+        enabled: eq.enabled,
+        preamp_db: eq.preamp_db,
+        ..Default::default()
+    };
+    for (dst, src) in dto.bands_db.iter_mut().zip(eq.bands_db.iter()) {
+        *dst = *src;
+    }
+    dto
+}
+
+fn message_is_seek_failure(status: &Option<String>) -> bool {
+    status.as_deref().is_some_and(|m| m.starts_with("seek failed"))
+}
+
+pub(crate) fn map_engine_state(state: EngineState) -> PlaybackState {
+    match state {
+        EngineState::Stopped => PlaybackState::Stopped,
+        EngineState::Loading => PlaybackState::Buffering,
+        EngineState::Playing => PlaybackState::Playing,
+        EngineState::Paused => PlaybackState::Paused,
+    }
+}
+
+/// Starts the engine (device by name, `None` = system default). Repaints are requested from
+/// the engine thread whenever an event is queued.
+pub(crate) fn create_engine(
+    ctx: &egui::Context,
+    cfg: &Config,
+    volume: f32,
+    muted: bool,
+    eq: EqSettings,
+) -> Option<AudioEngine> {
+    let resampler = match cfg.resampler {
+        ResamplerSetting::Fft => ResamplerKind::Fft,
+        ResamplerSetting::Sinc => ResamplerKind::Sinc {
+            sinc_len: cfg.taps_for_device(cfg.preferred_output_device.as_ref()),
+        },
+    };
+    let engine = match AudioEngine::new(EngineConfig {
+        device: cfg.preferred_output_device.clone(),
+        resampler,
+        volume: volume_to_linear(volume),
+        ..Default::default()
+    }) {
+        Ok(engine) => engine,
+        Err(err) => {
+            tracing::error!("failed to start the audio engine: {err:#}");
+            return None;
+        }
+    };
+    engine.set_muted(muted);
+    engine.set_eq(eq);
+    let waker_ctx = ctx.clone();
+    engine.set_waker(Arc::new(move || waker_ctx.request_repaint()));
+    Some(engine)
+}
+
 impl GuiApp {
-    /// 再生を要求します。
-    /// 
-    /// この関数は以下の処理を行います：
-    /// 1. 再生パスの有効性チェック（空でない、存在する）
-    /// 2. 既存の再生スレッドがある場合は停止要求を送信し、保留フラグを設定
-    /// 3. 新しい再生スレッドを起動
-    ///    - オーディオ出力デバイスの初期化
-    ///    - デコードスレッドの起動
-    ///    - ステータス監視ループの実行
-    /// 
-    /// 再生スレッドは独立して動作し、ステータスは`poll_playback_status()`で
-    /// 定期的にポーリングされます。
-    /// 
-    /// # 注意
-    /// - シーク中の場合は`playback_state`が`Seeking`のまま維持されます
-    /// - シーク中でない場合は`Buffering`状態に遷移します
-    pub(crate) fn request_play(&mut self) {
-        let path = PathBuf::from(self.play_path.clone());
-
-        // 再生パスの有効性チェック
-        if path.as_os_str().is_empty() {
-            self.play_status = Some("Play path is empty.".to_string());
-            return;
-        }
-        if !path.exists() {
-            self.play_status = Some(format!("Play path does not exist: {}", path.display()));
-            return;
-        }
-
-        // シーク操作中かどうかを記録
-        let is_seeking = self.playback_state == PlaybackState::Seeking;
-
-        // 既存の再生スレッドがある場合
-        if self.playback_thread_handle.is_some() {
-            // 停止信号を送信
-            self.signal_playback_stop();
-            // 保留フラグを設定（スレッド終了後に再要求される）
-            self.pending_play_request = true;
-            if !is_seeking {
-                self.playback_state = PlaybackState::Buffering;
-            }
-            self.play_status = Some("Stopping previous playback...".to_string());
-            return;
-        }
-
-        // 新しい再生を開始
-        self.pending_play_request = false;
-        if !is_seeking {
-            self.playback_state = PlaybackState::Buffering;
-        }
-        self.play_status = Some(format!("Starting playback: {}", path.display()));
-        
-        // 再生開始時刻と開始位置を記録（経過時間計算用）
-        self.playback_start_instant = Some(Instant::now());
-        self.playback_start_ms = self.play_position_ms;
-        self.save_state();
-
-        let start_ms = Some(self.play_position_ms);
-
-        // ステータス通信用チャネルを作成
-        // - status_tx/rx: 再生スレッドからUIスレッドへのステータス通知
-        // - stop_tx/rx: UIスレッドから再生スレッドへの停止要求
-        let (status_tx, status_rx) = crossbeam_channel::unbounded();
-        let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
-        self.playback_status_receiver = Some(status_rx);
-        self.playback_cancel_sender = Some(stop_tx);
-
-        // ユーザーが選択した出力デバイス（未選択の場合はデフォルト）
-        let preferred_device = self
-            .selected
-            .and_then(|idx| self.device_names.get(idx).cloned());
-        
-        // リサンプリング品質（タップ数）
-        let taps = self.taps;
-
-        // 再生スレッドを起動
-        let handle = std::thread::spawn(move || {
-            let mut output = audio::CpalOutput::new();
-
-            // 要求するオーディオフォーマット
-            let requested = AudioFormat {
-                sample_rate: 44_100,
-                channels: 2,
-                sample_format: SampleFormat::F32,
-            };
-
-            // オーディオ出力を開始
-            let actual = match output.start_with_device(requested, preferred_device) {
-                Ok(fmt) => fmt,
-                Err(e) => {
-                    let _ = status_tx.send(format!("Playback failed to start output: {}", e));
-                    return;
-                }
-            };
-
-            // 実際に使用されたデバイス名を通知
-            let selected_device_name = output.selected_device_name();
-            if let Some(device_name) = selected_device_name {
-                let _ = status_tx.send(format!("Playback device: {}", device_name));
-            } else {
-                let _ = status_tx.send("Playback device: <default>".to_string());
-            }
-
-            // オーディオデータを送信するためのプロデューサーを取得
-            let producer_tx = match output.producer_sender() {
-                Some(tx) => tx,
-                None => {
-                    let _ = status_tx.send("Playback failed: producer channel unavailable".to_string());
-                    let _ = output.stop();
-                    return;
-                }
-            };
-
-            let pool = output.pool_handle();
-            let chunk_frames = 2048; // 一度に処理するフレーム数
-
-            let _ = status_tx.send(format!(
-                "Playback running: {} Hz / {} ch",
-                actual.sample_rate, actual.channels
-            ));
-
-            // デコードスレッドを起動
-            let decode_handle = audio::decoder::spawn_decode_to_producer(
-                path,
-                chunk_frames,
-                actual.sample_rate,
-                actual.channels,
-                producer_tx,
-                pool,
-                taps,
-                start_ms,
-                stop_rx.clone(),
-            );
-
-            // 再生監視ループ
-            loop {
-                // 停止要求をチェック
-                if stop_rx.try_recv().is_ok() {
-                    let _ = status_tx.send("Playback stopped".to_string());
-                    let _ = output.stop();
-                    return;
-                }
-
-                // デコード完了をチェック
-                if decode_handle.is_finished() {
-                    match decode_handle.join() {
-                        Ok(Ok(())) => {
-                            // 正常完了
-                            break;
-                        }
-                        Ok(Err(e)) => {
-                            // デコードエラー
-                            let _ = status_tx.send(format!("Playback failed: {}", e));
-                            let _ = output.stop();
-                            return;
-                        }
-                        Err(_) => {
-                            // スレッドパニック
-                            let _ =
-                                status_tx.send("Playback failed: decode thread panicked".to_string());
-                            let _ = output.stop();
-                            return;
-                        }
-                    }
-                }
-
-                // 短いスリープでCPU使用率を抑える
-                std::thread::sleep(Duration::from_millis(5));
-            }
-
-            // バッファに残ったサンプルを排出するため少し待機
-            // 最大150回（1.5秒）待機するが、停止要求があれば即座に終了
-            for _ in 0..150 {
-                if stop_rx.try_recv().is_ok() {
-                    let _ = status_tx.send("Playback stopped".to_string());
-                    let _ = output.stop();
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-
-            // 出力を停止
-            if let Err(e) = output.stop() {
-                let _ = status_tx.send(format!("Playback stop warning: {}", e));
-            }
-
-            let _ = status_tx.send("Playback finished".to_string());
-        });
-
-        self.playback_thread_handle = Some(handle);
-        self.playback_state = PlaybackState::Playing;
-        self.play_status = Some("Playback starting...".to_string());
+    fn same_path(a: &Path, b: &str) -> bool {
+        !b.is_empty() && a == Path::new(b)
     }
 
-    /// 再生バックエンドに停止信号を送信します。
-    /// 
-    /// チャネルを通じて停止要求を送信し、再生スレッドを停止させます。
-    /// 送信後は`playback_cancel_sender`が`None`になります。
-    /// 
-    /// # 注意
-    /// この関数は停止信号を送信するだけで、スレッドの終了を待機しません。
-    /// 実際の終了処理は`poll_playback_status()`で検出されます。
-    pub(crate) fn signal_playback_stop(&mut self) {
-        if let Some(tx) = self.playback_cancel_sender.take() {
-            let _ = tx.send(());
-        }
+    /// True when the engine has `play_path` loaded (playing, paused or loading).
+    pub(crate) fn engine_has_current_track(&self) -> bool {
+        self.engine_snapshot.as_ref().is_some_and(|snap| {
+            snap.state != EngineState::Stopped
+                && snap
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| Self::same_path(p, &self.play_path))
+        })
     }
 
-    /// 再生ステータスをポーリングします。
-    /// 
-    /// この関数は毎フレーム呼び出され、再生スレッドからのステータスメッセージを
-    /// 受信して状態を更新します。
-    /// 
-    /// 処理内容：
-    /// - ステータスメッセージの受信と解釈
-    /// - 再生状態の更新
-    /// - 再生完了時の後続処理（次のトラックへの自動遷移）
-    /// - 保留中の再生要求の処理
-    /// - 再生位置の更新（クロックベース）
-    /// - 保留中のシーク要求の実行
-    pub(crate) fn poll_playback_status(&mut self) {
-        if let Some(rx) = &self.playback_status_receiver {
-            let mut playback_ended = false;
-            let mut playback_failed = false;
-            let mut playback_finished = false;
+    // ------------------------------------------------------------------------------------
+    // Per-frame polling
+    // ------------------------------------------------------------------------------------
 
-            // キューに溜まったすべてのステータスメッセージを処理
-            while let Ok(status) = rx.try_recv() {
-                if status.starts_with("Playback running") {
-                    // 再生が正常に開始された
-                    self.playback_state = PlaybackState::Playing;
-                } else if let Some(device_name) = status.strip_prefix("Playback device: ") {
-                    // 使用中のデバイス名を記録
-                    if device_name == "<default>" {
-                        self.active_output_device_name = audio::cpal_output::default_device_name();
-                    } else {
-                        self.active_output_device_name = Some(device_name.to_string());
-                    }
-                } else if status == "Playback finished" {
-                    // 正常に最後まで再生完了
-                    self.playback_state = PlaybackState::Stopped;
-                    self.playback_start_instant = None;
-                    playback_ended = true;
-                    playback_finished = true;
-                } else if status == "Playback stopped" {
-                    // ユーザー操作による停止
-                    if self.playback_state != PlaybackState::Paused {
-                        self.playback_state = PlaybackState::Stopped;
-                    }
-                    self.playback_start_instant = None;
-                    playback_ended = true;
-                } else if status.starts_with("Playback failed") {
-                    // 再生エラー
-                    self.playback_state = PlaybackState::Stopped;
-                    self.playback_start_instant = None;
-                    playback_ended = true;
-                    playback_failed = true;
-                }
-                self.play_status = Some(status);
+    /// Drains engine events and refreshes state / position from the engine snapshot.
+    pub(crate) fn poll_engine(&mut self) {
+        let mut events = Vec::new();
+        if let Some(engine) = &self.engine {
+            while let Some(ev) = engine.try_recv_event() {
+                events.push(ev);
             }
+        }
+        for ev in events {
+            self.handle_engine_event(ev);
+        }
 
-            // 再生が終了した場合の後処理
-            if playback_ended {
-                self.detach_playback_thread();
-                self.playback_cancel_sender = None;
-                self.playback_status_receiver = None;
-                self.active_output_device_name = None;
-
-                // 保留中の再生要求があれば処理
-                if self.pending_play_request {
-                    self.pending_play_request = false;
-                    self.request_play();
-                    return;
+        let Some(engine) = &self.engine else {
+            self.engine_snapshot = None;
+            self.flush_pending_seek();
+            return;
+        };
+        let snap = engine.snapshot();
+        let is_current = snap
+            .path
+            .as_deref()
+            .is_some_and(|p| Self::same_path(p, &self.play_path));
+        if snap.state != EngineState::Stopped || is_current {
+            self.playback_state = map_engine_state(snap.state);
+        } else {
+            self.playback_state = PlaybackState::Stopped;
+        }
+        if snap.state == EngineState::Playing {
+            self.consecutive_errors = 0;
+            self.pending_error_skip = false;
+        }
+        let skip_after_error = self.pending_error_skip && snap.state == EngineState::Stopped;
+        if is_current && snap.state != EngineState::Stopped {
+            if let Some(d) = snap.duration_ms {
+                self.play_duration_ms = Some(d);
+            }
+            let showing_seek_target = self.pending_seek_ms.is_some() || self.is_seek_interacting();
+            if !showing_seek_target {
+                match self.seek_display_hold {
+                    Some((target, at))
+                        if at.elapsed() < SEEK_DISPLAY_HOLD
+                            && snap.position_ms.abs_diff(target) > 750 =>
+                    {
+                        self.play_position_ms = target;
+                    }
+                    _ => {
+                        self.seek_display_hold = None;
+                        self.play_position_ms = snap.position_ms;
+                    }
                 }
-
-                // 再生失敗時は次のトラックへスキップ
-                if playback_failed
-                    && (self.current_queue_index.is_some() || self.selected_queue_index.is_some())
-                {
+            }
+        }
+        if let Some(device) = &snap.device {
+            self.active_output_device = Some(device.name.clone());
+        }
+        self.engine_snapshot = Some(snap);
+        if skip_after_error {
+            self.pending_error_skip = false;
+            self.consecutive_errors += 1;
+            let len = self.queue.tracks.len();
+            if let Some(index) = self.navigator.next_manual(self.current_queue_index, len) {
+                if Some(index) != self.current_queue_index {
                     self.play_status = Some("Playback failed, skipping to next queued track".to_string());
-                    self.play_next();
-                    return;
-                }
-
-                // 正常完了時は次のトラックへ
-                if playback_finished
-                    && (self.current_queue_index.is_some() || self.selected_queue_index.is_some())
-                {
-                    self.play_status = Some("Track finished, advancing to next queued track".to_string());
-                    self.play_next();
-                    return;
+                    self.start_queue_index(index, true);
                 }
             }
         }
-
-        // 再生中かつシーク操作中でない場合、再生位置を更新
-        if self.playback_state == PlaybackState::Playing
-            && !self.seek_interacting
-            && self.pending_seek_ms.is_none()
-        {
-            self.update_playback_position_from_clock();
-        }
-
-        // 保留中のシーク要求を実行
         self.flush_pending_seek();
     }
 
-    /// デフォルト出力デバイスのホットプラグを監視します。
-    /// 
-    /// システムのデフォルト出力デバイスが変更された場合（例：Bluetoothヘッドフォンの接続）、
-    /// 再生を自動的に再接続します。
-    /// 
-    /// 監視がスキップされる条件：
-    /// - ユーザーが明示的にデバイスを選択している場合
-    /// - 再生要求が保留中の場合
-    /// - 再生中でない場合
-    /// 
-    /// ポーリング間隔は500msに制限されています。
-    pub(crate) fn monitor_default_output_device_hotplug(&mut self) {
-        // ユーザーが明示的にデバイスを選択している場合はスキップ
-        if self.selected.is_some() {
-            return;
-        }
-        // 再生要求が保留中の場合はスキップ
-        if self.pending_play_request {
-            return;
-        }
-        // 再生中でない場合はスキップ
-        if !matches!(
-            self.playback_state,
-            PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking
-        ) {
-            return;
-        }
-
-        // ポーリング間隔を500msに制限
-        let now = Instant::now();
-        if let Some(last) = self.last_default_device_poll_at {
-            if now.duration_since(last) < Duration::from_millis(500) {
-                return;
-            }
-        }
-        self.last_default_device_poll_at = Some(now);
-
-        // 現在のデフォルトデバイスを取得
-        let current_default = audio::cpal_output::default_device_name();
-        if self.last_seen_default_output_device_name.is_none() {
-            self.last_seen_default_output_device_name = current_default;
-            return;
-        }
-
-        // デバイスが変更された場合
-        if self.last_seen_default_output_device_name != current_default {
-            self.last_seen_default_output_device_name = current_default.clone();
-
-            // 再生中のデバイスが新しいデフォルトと異なる場合、再接続
-            if self.active_output_device_name != current_default {
-                self.playback_state = PlaybackState::Buffering;
-                self.play_status = Some("Default output device changed, reconnecting...".to_string());
-                self.request_play();
-            }
-        }
-    }
-
-    /// 再生スレッドをデタッチします。
-    /// 
-    /// `JoinHandle`をドロップすることでスレッドをデタッチし、
-    /// UIスレッドが再生スレッドの終了を待機してブロックされるのを防ぎます。
-    /// 
-    /// デタッチ後もスレッドはバックグラウンドで実行を継続しますが、
-    /// 終了時のクリーンアップは行われなくなります。
-    /// そのため、この関数は再生スレッドがすでに終了していることが
-    /// 確認された後にのみ呼び出す必要があります。
-    pub(crate) fn detach_playback_thread(&mut self) {
-        let _ = self.playback_thread_handle.take();
-    }
-
-    /// 内部クロックから現在の再生位置を更新します。
-    /// 
-    /// `playback_start_instant`からの経過時間を計算し、
-    /// 開始時のシーク位置（`playback_start_ms`）に加算して現在位置を求めます。
-    /// 
-    /// 総再生時間が既知の場合は、その値を超えないようにクランプされます。
-    /// 
-    /// # 注意
-    /// この関数は再生位置の近似値を提供します。実際の再生位置とは
-    /// わずかにずれる可能性があります。
-    pub(crate) fn update_playback_position_from_clock(&mut self) {
-        if let Some(start_instant) = self.playback_start_instant {
-            // 開始からの経過時間をミリ秒で計算
-            let elapsed = start_instant.elapsed();
-            let elapsed_ms = elapsed.as_millis() as u64;
-            
-            // 開始位置 + 経過時間 = 現在位置
-            let position = self.playback_start_ms.saturating_add(elapsed_ms);
-            
-            // 総再生時間が既知の場合はクランプ
-            if let Some(duration) = self.play_duration_ms {
-                self.play_position_ms = position.min(duration);
-            } else {
-                self.play_position_ms = position;
-            }
-        }
-    }
-
-    /// 現在の再生パスのメタデータを更新します。
-    /// 
-    /// Symphoniaデコーダを使用して、以下の情報をファイルから取得します：
-    /// - 総再生時間（フレーム数 / サンプルレート）
-    /// - タイトル
-    /// - アーティスト名
-    /// - アルバム名
-    /// 
-    /// ファイルが存在しない場合や読み込みに失敗した場合は、
-    /// メタデータがクリアされます。
-    pub(crate) fn refresh_play_metadata(&mut self) {
-        let path = PathBuf::from(self.play_path.clone());
-        
-        // パスが無効な場合は全メタデータをクリア
-        if path.as_os_str().is_empty() || !path.exists() {
-            self.play_duration_ms = None;
-            self.play_title = None;
-            self.play_artist = None;
-            self.play_album = None;
-            self.play_artwork_handle = None;
-            self.play_artwork_source = None;
-            return;
-        }
-
-        // デコーダでファイルを解析
-        let decoder = SymphoniaDecoder::new();
-        if let Ok(decoded) = decoder.decode_file(&path) {
-            let frames = decoded.frames() as u64;
-            let sample_rate = decoded.sample_rate as u64;
-            
-            // 総再生時間を計算（フレーム数 / サンプルレート）
-            if sample_rate > 0 {
-                self.play_duration_ms = Some(frames.saturating_mul(1000) / sample_rate);
-                
-                // 現在の再生位置が総時間を超えないように調整
-                if let Some(duration_ms) = self.play_duration_ms {
-                    self.play_position_ms = self.play_position_ms.min(duration_ms);
+    fn handle_engine_event(&mut self, ev: EngineEvent) {
+        match ev {
+            EngineEvent::TrackStarted { path, duration_ms } => {
+                if Self::same_path(&path, &self.play_path) {
+                    if duration_ms.is_some() {
+                        self.play_duration_ms = duration_ms;
+                    }
+                    self.pending_next = None;
+                    self.update_gapless_next();
                 }
             }
-            
-            // メタデータを設定
-            self.play_title = decoded.title;
-            self.play_artist = decoded.artist;
-            self.play_album = decoded.album;
+            EngineEvent::AdvancedToNext { path, duration_ms } => {
+                let path_str = path.to_string_lossy().into_owned();
+                let index = match self.pending_next.take() {
+                    Some((index, next)) if next == path_str => Some(index),
+                    _ => self.queue.tracks.iter().position(|t| Path::new(t) == path),
+                };
+                self.on_track_changed(index, path_str);
+                self.play_position_ms = 0;
+                self.play_duration_ms = duration_ms;
+                self.play_status = None;
+                self.update_gapless_next();
+            }
+            EngineEvent::TrackFinished { path } => {
+                if !Self::same_path(&path, &self.play_path) {
+                    return;
+                }
+                // Nothing was queued for gapless playback; follow the rules once more in case
+                // the queue changed right at the boundary, otherwise stop at the end.
+                let len = self.queue.tracks.len();
+                let next = self.navigator.next_auto(self.current_queue_index, len);
+                match next {
+                    Some(index) if self.current_queue_index.is_some() => {
+                        self.start_queue_index(index, true);
+                    }
+                    _ => {
+                        self.playback_state = PlaybackState::Stopped;
+                        self.play_position_ms = 0;
+                        self.play_status = Some("Playback finished".to_string());
+                        self.save_state();
+                    }
+                }
+            }
+            EngineEvent::Error { path, message } => {
+                tracing::warn!("audio engine error ({:?}): {}", path, message);
+                self.play_status = Some(message);
+                let Some(path) = path else {
+                    return;
+                };
+                let path_str = path.to_string_lossy().into_owned();
+                let len = self.queue.tracks.len();
+                if self.consecutive_errors >= len.max(1) {
+                    return;
+                }
+                if self.pending_next.as_ref().is_some_and(|(_, p)| *p == path_str) {
+                    // The gapless successor cannot be opened: preload the one after it.
+                    let (failed_index, _) = self.pending_next.take().expect("checked above");
+                    self.consecutive_errors += 1;
+                    if let Some(index) = self.navigator.next_auto(Some(failed_index), len) {
+                        if Some(index) != self.current_queue_index {
+                            if let (Some(engine), Some(next)) =
+                                (&self.engine, self.queue.tracks.get(index).cloned())
+                            {
+                                engine.set_next(Some(PathBuf::from(&next)));
+                                self.pending_next = Some((index, next));
+                            }
+                        }
+                    }
+                } else if path_str == self.play_path && !message_is_seek_failure(&self.play_status) {
+                    // Possibly a load failure of the current track: once the engine reports
+                    // Stopped (see `poll_engine`), skip to the next queued track.
+                    self.pending_error_skip = true;
+                }
+            }
+            EngineEvent::DeviceChanged { device } => {
+                self.active_output_device = device.map(|d| d.name);
+            }
+            EngineEvent::StateChanged { state } => {
+                self.playback_state = map_engine_state(state);
+            }
         }
+    }
+
+    /// Tells the engine which track follows the current one (gapless), honouring
+    /// shuffle/repeat. Cheap; only sends a command when the answer changed.
+    pub(crate) fn update_gapless_next(&mut self) {
+        let Some(engine) = &self.engine else {
+            return;
+        };
+        let active = self
+            .engine_snapshot
+            .as_ref()
+            .is_none_or(|s| s.state != EngineState::Stopped);
+        let len = self.queue.tracks.len();
+        let next = if active && self.current_queue_index.is_some() {
+            self.navigator
+                .next_auto(self.current_queue_index, len)
+                .and_then(|i| self.queue.tracks.get(i).map(|p| (i, p.clone())))
+        } else {
+            None
+        };
+        if next != self.pending_next {
+            engine.set_next(next.as_ref().map(|(_, p)| PathBuf::from(p)));
+            self.pending_next = next;
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Track changes
+    // ------------------------------------------------------------------------------------
+
+    /// Makes `path` the current track in the UI (lyrics, metadata, artwork, offset) without
+    /// touching the engine.
+    pub(crate) fn on_track_changed(&mut self, index: Option<usize>, path: String) {
+        let changed = self.play_path != path;
+        if let Some(i) = index {
+            self.select_queue_item_single(i);
+            self.queue_scroll_to_playing = true;
+        }
+        self.current_queue_index = index;
+        self.play_path = path;
+        if changed {
+            self.play_duration_ms = None;
+            self.lyrics_offset_ms = self.lyrics_offsets.get(&self.play_path).copied().unwrap_or(0);
+            let (title, artist, album) = self.track_meta.lookup_tags(&self.play_path);
+            self.play_title = title;
+            self.play_artist = artist;
+            self.play_album = album;
+            self.play_artwork_requested_for = None;
+        }
+        // Probe (duration/tags) + lyrics discovery run off the UI thread.
+        self.request_track_info();
+        self.save_state();
+    }
+
+    /// Loads queue item `index` into the engine (playing when `autoplay`).
+    pub(crate) fn start_queue_index(&mut self, index: usize, autoplay: bool) {
+        let Some(path) = self.queue.tracks.get(index).cloned() else {
+            return;
+        };
+        self.start_track(Some(index), path, 0, autoplay);
+    }
+
+    /// Loads `path` into the engine at `start_ms`.
+    pub(crate) fn start_track(&mut self, index: Option<usize>, path: String, start_ms: u64, autoplay: bool) {
+        if path.trim().is_empty() {
+            return;
+        }
+        self.on_track_changed(index, path);
+        self.play_position_ms = start_ms;
+        self.pending_seek_ms = None;
+        self.seek_display_hold = None;
+        self.load_current_into_engine(autoplay);
+    }
+
+    fn load_current_into_engine(&mut self, autoplay: bool) {
+        let Some(engine) = &self.engine else {
+            self.play_status = Some("Audio engine is not available".to_string());
+            return;
+        };
+        engine.load(PathBuf::from(&self.play_path), self.play_position_ms, autoplay);
+        // `load` clears the engine's queued next track.
+        self.pending_next = None;
+        self.playback_state = if autoplay {
+            PlaybackState::Buffering
+        } else {
+            PlaybackState::Paused
+        };
+        self.play_status = None;
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Public control API
+    // ------------------------------------------------------------------------------------
+
+    /// Play / pause. With nothing loaded, starts the current (or first) queue item.
+    pub fn toggle_play_pause(&mut self) {
+        match self.playback_state {
+            PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => self.pause(),
+            PlaybackState::Paused | PlaybackState::Stopped => self.play(),
+        }
+    }
+
+    /// Starts or resumes playback of the current track (from the stored position after a
+    /// restart), or the current/selected/first queue item when there is no current track.
+    pub fn play(&mut self) {
+        if self.play_path.trim().is_empty() {
+            let len = self.queue.tracks.len();
+            if len == 0 {
+                self.play_status = Some("No track loaded".to_string());
+                return;
+            }
+            let index = self
+                .current_queue_index
+                .filter(|&i| i < len)
+                .or(self.selected_queue_index.filter(|&i| i < len))
+                .or_else(|| self.navigator.next_manual(None, len))
+                .unwrap_or(0);
+            self.start_queue_index(index, true);
+            return;
+        }
+        if self.engine_has_current_track() {
+            self.flush_seek_now();
+            if let Some(engine) = &self.engine {
+                engine.play();
+            }
+            self.playback_state = PlaybackState::Playing;
+            return;
+        }
+        if let Some(target) = self.pending_seek_ms.take() {
+            self.play_position_ms = target;
+        }
+        if let Some(d) = self.play_duration_ms {
+            if self.play_position_ms >= d {
+                self.play_position_ms = 0;
+            }
+        }
+        self.load_current_into_engine(true);
+    }
+
+    /// Pauses (the engine fades out and keeps its buffer; resume is instant).
+    pub fn pause(&mut self) {
+        self.flush_seek_now();
+        if let Some(engine) = &self.engine {
+            engine.pause();
+        }
+        if self.playback_state != PlaybackState::Stopped {
+            self.playback_state = PlaybackState::Paused;
+        }
+        self.save_state();
+    }
+
+    /// Stops playback and rewinds to 0 (the track stays selected).
+    pub fn stop(&mut self) {
+        if let Some(engine) = &self.engine {
+            engine.stop();
+        }
+        self.pending_seek_ms = None;
+        self.seek_display_hold = None;
+        self.pending_next = None;
+        self.playback_state = PlaybackState::Stopped;
+        self.play_position_ms = 0;
+        self.save_state();
+    }
+
+    /// Next queue item (wraps when repeat is on; repeat-one does not pin the Next button).
+    pub fn next(&mut self) {
+        let len = self.queue.tracks.len();
+        if let Some(index) = self.navigator.next_manual(self.current_queue_index, len) {
+            let autoplay = self.playback_state != PlaybackState::Paused;
+            self.start_queue_index(index, autoplay);
+        }
+    }
+
+    /// Restarts the current track when more than 3 s in, otherwise goes to the previous item.
+    pub fn previous(&mut self) {
+        let len = self.queue.tracks.len();
+        match self
+            .navigator
+            .previous(self.current_queue_index, len, self.play_position_ms)
+        {
+            PreviousAction::RestartCurrent => self.seek_to(0),
+            PreviousAction::PlayIndex(index) => {
+                let autoplay = self.playback_state != PlaybackState::Paused;
+                self.start_queue_index(index, autoplay);
+            }
+        }
+    }
+
+    /// Plays queue item `index`.
+    pub fn play_queue_index(&mut self, index: usize) {
+        self.start_queue_index(index, true);
+    }
+
+    /// Appends tracks to the end of the queue.
+    pub fn enqueue(&mut self, paths: Vec<String>) {
+        let paths: Vec<String> = paths.into_iter().filter(|p| !p.trim().is_empty()).collect();
+        if paths.is_empty() {
+            return;
+        }
+        self.queue.tracks.extend(paths);
+        self.navigator.invalidate();
+        self.update_app_vm();
+    }
+
+    /// Replaces the queue with `paths` and plays the first one.
+    pub fn play_now(&mut self, paths: Vec<String>) {
+        let paths: Vec<String> = paths.into_iter().filter(|p| !p.trim().is_empty()).collect();
+        if paths.is_empty() {
+            return;
+        }
+        self.queue.tracks = paths;
+        self.current_queue_index = None;
+        self.clear_queue_selection();
+        self.navigator.invalidate();
+        if self.navigator.shuffle() {
+            let len = self.queue.tracks.len();
+            self.navigator.set_shuffle(true, Some(0), len);
+        }
+        self.update_app_vm();
+        self.start_queue_index(0, true);
+    }
+
+    /// 0..=1 perceptual volume (cubic taper to linear gain).
+    pub fn set_volume(&mut self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        if (volume - self.volume).abs() < f32::EPSILON {
+            return;
+        }
+        self.volume = volume;
+        if let Some(engine) = &self.engine {
+            engine.set_volume(volume_to_linear(volume));
+        }
+        self.save_state();
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+        if let Some(engine) = &self.engine {
+            engine.set_muted(muted);
+        }
+        self.save_state();
+    }
+
+    pub fn toggle_mute(&mut self) {
+        self.set_muted(!self.muted);
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted
+    }
+
+    pub fn set_eq(&mut self, eq: EqSettings) {
+        if eq == self.eq {
+            return;
+        }
+        self.eq = eq;
+        if let Some(engine) = &self.engine {
+            engine.set_eq(eq);
+        }
+        self.save_state();
+    }
+
+    pub fn eq(&self) -> EqSettings {
+        self.eq
+    }
+
+    pub fn set_shuffle(&mut self, on: bool) {
+        let len = self.queue.tracks.len();
+        self.navigator.set_shuffle(on, self.current_queue_index, len);
+        self.update_gapless_next();
+        self.save_state();
+    }
+
+    pub fn shuffle(&self) -> bool {
+        self.navigator.shuffle()
+    }
+
+    pub fn set_repeat(&mut self, repeat: RepeatMode) {
+        self.navigator.set_repeat(repeat);
+        self.update_gapless_next();
+        self.save_state();
+    }
+
+    /// Off -> All -> One -> Off.
+    pub fn cycle_repeat(&mut self) {
+        let next = self.navigator.repeat().cycle();
+        self.set_repeat(next);
+    }
+
+    pub fn repeat(&self) -> RepeatMode {
+        self.navigator.repeat()
+    }
+
+    /// Switches the output device (`None` follows the system default) and remembers it.
+    pub fn set_output_device(&mut self, name: Option<String>) {
+        if name == self.preferred_output_device {
+            return;
+        }
+        self.preferred_output_device = name.clone();
+        if let Some(engine) = &self.engine {
+            engine.set_output_device(name.clone());
+        }
+        let mut cfg = Config::load();
+        cfg.preferred_output_device = name;
+        self.taps = cfg.taps_for_device(cfg.preferred_output_device.as_ref());
+        if let Err(err) = cfg.save() {
+            tracing::warn!("saving config failed: {err:#}");
+        }
+    }
+
+    /// Re-enumerates output devices (cheap enough for a combo-box open, not per frame).
+    pub fn refresh_output_devices(&mut self) {
+        self.device_names = AudioEngine::output_device_names();
+    }
+
+    /// Live post-gain mono samples of what is being played (for visualizers).
+    pub fn spectrum_tap(&self) -> Option<SpectrumTap> {
+        self.engine.as_ref().map(|e| e.spectrum_tap())
+    }
+
+    /// Snapshot of transport state for drawing.
+    pub fn playback_view(&self) -> PlaybackView {
+        PlaybackView {
+            state: self.playback_state,
+            path: self.play_path.clone(),
+            title: self.play_title.clone(),
+            artist: self.play_artist.clone(),
+            album: self.play_album.clone(),
+            position_ms: self.play_position_ms,
+            duration_ms: self.play_duration_ms,
+            volume: self.volume,
+            muted: self.muted,
+            shuffle: self.navigator.shuffle(),
+            repeat: self.navigator.repeat(),
+            queue_index: self.current_queue_index,
+            queue_len: self.queue.tracks.len(),
+            output_device: self.active_output_device.clone(),
+            underruns: self.engine_snapshot.as_ref().map(|s| s.underruns).unwrap_or(0),
+        }
+    }
+
+    /// Clears the current track and stops the engine.
+    pub(crate) fn clear_current_track(&mut self) {
+        self.stop();
+        self.play_path.clear();
+        self.current_queue_index = None;
+        self.play_duration_ms = None;
+        self.play_title = None;
+        self.play_artist = None;
+        self.play_album = None;
+        self.play_artwork_handle = None;
+        self.play_artwork_blur_handle = None;
+        self.play_artwork_requested_for = None;
+        self.lyrics_files.clear();
+        self.lyrics_candidates.clear();
+        self.loaded_lyrics = None;
+        self.loaded_timeline = None;
+        self.selected_lyrics_index = None;
+        self.lyrics_offset_ms = 0;
+        self.play_status = Some("Playback stopped".to_string());
+        self.save_state();
+    }
+
+    /// Final state save + engine shutdown (idempotent).
+    pub(crate) fn shutdown(&mut self) {
+        if let Some(snap) = self.engine.as_ref().map(|e| e.snapshot()) {
+            if snap.state != EngineState::Stopped
+                && snap
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| Self::same_path(p, &self.play_path))
+            {
+                self.play_position_ms = snap.position_ms;
+            }
+        }
+        self.flush_state();
+        // Dropping the engine fades out and joins its thread.
+        self.engine = None;
     }
 }

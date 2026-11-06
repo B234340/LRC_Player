@@ -1,89 +1,55 @@
 //! アプリケーション状態の永続化と基本操作を担当
-//! 
-//! このモジュールは以下の責務を持ちます：
-//! - アプリケーション状態の保存と読み込み
-//! - プレイリスト操作の委譲
-//! - キュー操作の委譲
-//! - ライブラリ操作の委譲
-//! - 再生制御操作の委譲
-//! - スキャン操作の委譲
-//! - アプリケーションの初期化（`new`）
+//!
+//! - State persistence goes through a debounced background [`StateSaver`]: hot paths only set
+//!   a dirty flag ([`GuiApp::save_state`]); the frame loop hands a snapshot to the saver at
+//!   most once per second, and `on_exit` flushes synchronously.
+//! - Delegation to the action modules.
+//! - Construction of the app (`new`): fonts, theme, audio engine, shared DB handle.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
+use std::time::Instant;
 
-use cpal::traits::{DeviceTrait, HostTrait};
-use eframe::CreationContext;
-use lrc_player_application::config::Config;
-use lrc_player_application::dto::{LibraryDto, PlaylistDto, StateDto};
-use lrc_player_application::infrastructure::audio;
-use lrc_player_application::infrastructure::persistence::{MetaCache, PlaylistsFile, StateFile};
+use eframe::{egui, CreationContext};
+use lrc_player_application::config::{Config, Theme};
+use lrc_player_application::dto::{legacy_playback_mode, LibraryDto, PlaylistDto, StateDto};
+use lrc_player_application::infrastructure::audio::engine::AudioEngine;
+use lrc_player_application::infrastructure::library_snapshot::LibrarySnapshotCache;
+use lrc_player_application::infrastructure::persistence::{MetaCache, PlaylistsFile, StateFile, StateSaver};
+use lrc_player_application::usecases::queue_navigation::QueueNavigator;
 use lrc_player_application::view_model::QueueVm;
-use lrc_player_domain::model::{PlaybackMode, PlaybackState};
+use lrc_player_domain::model::PlaybackState;
 
 use crate::presentation::actions::{library, play, playlist, queue, scan};
-use crate::presentation::app::{ArtistViewMode, GuiApp, Tab};
+use crate::presentation::app::playback::{create_engine, eq_from_dto, eq_to_dto};
+use crate::presentation::app::{
+    scan_status, track_info, ArtistViewMode, ArtworkLoader, GuiApp, Tab, TrackMetaCache,
+};
+use crate::presentation::components::fft_overlay::FftAnalyzer;
+use crate::presentation::components::lrc_overlay::LrcLayoutCache;
+
+/// Applies the theme setting (System follows the OS).
+pub(crate) fn apply_theme(ctx: &egui::Context, theme: Theme) {
+    let pref = match theme {
+        Theme::System => egui::ThemePreference::System,
+        Theme::Light => egui::ThemePreference::Light,
+        Theme::Dark => egui::ThemePreference::Dark,
+    };
+    ctx.set_theme(pref);
+}
 
 impl GuiApp {
-    /// 保存されたアプリケーション状態をファイルから読み込みます。
-    /// 
-    /// 状態ファイル（`StateFile`）から前回終了時の状態を復元します。
-    /// ファイルが存在しないか読み込みに失敗した場合は、デフォルト値で
-    /// 初期化された`StateDto`を返します。
-    /// 
-    /// 復元される情報：
-    /// - 最後に開いていたタブ
-    /// - 最後に再生していたファイルパスと再生位置
-    /// - スキャン設定（対象パス、除外パターン）
-    /// - キュー状態（トラックリスト、選択インデックス）
-    /// - 再生モード
-    /// - アーティスト表示モード
-    /// - UI設定（LRCオーバーレイ、サイドパネル展開状態）
-    /// - お気に入りディレクトリ
-    /// 
-    /// # 戻り値
-    /// 読み込まれた状態、またはデフォルト状態
+    /// 保存されたアプリケーション状態をファイルから読み込みます（無ければ既定値）。
     pub(crate) fn load_state() -> StateDto {
         StateFile::open()
             .and_then(|store| store.load())
-            .unwrap_or(StateDto {
-                last_tab: None,
-                last_play_path: None,
-                last_scan_status: None,
-                scan_scanned: None,
-                scan_parsed: None,
-                scan_registered: None,
-                scan_targets: Vec::new(),
-                scan_lrc_targets: Vec::new(),
-                scan_excludes: Vec::new(),
-                queue_tracks: Vec::new(),
-                selected_queue_index: None,
-                queue_playback_mode: PlaybackMode::Sequential,
-                artist_view_mode: ArtistViewMode::Artist,
-                lrc_overlay_enabled: false,
-                fft_overlay_enabled: false,
-                side_panel_expanded: true,
-                last_play_position_ms: None,
-                favorite_directories: Vec::new(),
-            })
+            .unwrap_or_default()
     }
 
-    /// 現在のアプリケーション状態をファイルに保存します。
-    /// 
-    /// この関数は、状態が変更されるたびに呼び出され、以下の情報を永続化します：
-    /// - 現在アクティブなタブ
-    /// - 現在再生中のファイルパスと再生位置
-    /// - 最後のスキャンステータス
-    /// - スキャン設定（対象パス、LRC対象パス、除外パターン）
-    /// - キュー内のトラックリストと選択状態
-    /// - 再生モード
-    /// - アーティスト表示モード
-    /// - UI設定
-    /// - お気に入りディレクトリ
-    /// 
-    /// 保存に失敗した場合は、エラーは無視されます（サイレント失敗）。
-    pub(crate) fn save_state(&self) {
-        // 現在の状態をStateDtoに変換
-        let state = StateDto {
+    /// Builds the persisted state from the in-memory app state.
+    pub(crate) fn build_state_dto(&self) -> StateDto {
+        let shuffle = self.navigator.shuffle();
+        let repeat = self.navigator.repeat();
+        StateDto {
             last_tab: Some(self.active_tab.label().to_string()),
             last_play_path: if self.play_path.is_empty() {
                 None
@@ -99,42 +65,84 @@ impl GuiApp {
             scan_lrc_targets: self.scan_lrc_targets.clone(),
             scan_excludes: self.scan_excludes.clone(),
             queue_tracks: self.queue.tracks.clone(),
-            selected_queue_index: self.selected_queue_index,
-            queue_playback_mode: self.playback_mode,
+            selected_queue_index: self.current_queue_index.or(self.selected_queue_index),
+            queue_playback_mode: legacy_playback_mode(shuffle, repeat),
             artist_view_mode: self.artist_view_mode,
             lrc_overlay_enabled: self.lrc_overlay_enabled,
             fft_overlay_enabled: self.fft_overlay_enabled,
             side_panel_expanded: self.side_panel_expanded,
             favorite_directories: self.favorite_directories.clone(),
-        };
-
-        // 状態ファイルに保存
-        if let Ok(store) = StateFile::open() {
-            let _ = store.save(&state);
+            volume: self.volume,
+            muted: self.muted,
+            eq: eq_to_dto(&self.eq),
+            shuffle: Some(shuffle),
+            repeat: Some(repeat),
+            lyrics_offsets: self.lyrics_offsets.clone(),
         }
     }
 
-    /// スキャンステータスをファイルから再読み込みして更新します。
-    /// 
-    /// バックエンドのスキャンプロセスは、進行状況を状態ファイルに書き込みます。
-    /// この関数はそのファイルを読み込み、UIに表示されるスキャンステータスを
-    /// 最新の状態に更新します。
-    /// 
-    /// 主にスキャンタブ表示中に定期的に呼び出されます。
-    pub(crate) fn refresh_scan_status(&mut self) {
-        if let Ok(store) = StateFile::open() {
-            if let Ok(state) = store.load() {
-                let next_status = state.last_scan_status.clone();
-                let status_changed = self.last_scan_status != next_status;
+    /// Marks the state as changed. Cheap: the frame loop hands it to the background saver
+    /// (at most once per second); nothing is serialized or written here.
+    pub(crate) fn save_state(&mut self) {
+        self.state_dirty = true;
+    }
 
-                self.last_scan_status = next_status.clone();
-                self.app_vm.scan.last_scan_status = next_status.clone();
-
-                if status_changed && next_status.as_deref() == Some("Scan completed") {
-                    self.discover_lyrics_for_current_play_path();
+    /// Serializes the state now and queues it on the background saver (no disk I/O here).
+    pub(crate) fn submit_state_now(&mut self) {
+        self.state_dirty = false;
+        self.state_last_submit = Some(Instant::now());
+        let state = self.build_state_dto();
+        match &self.state_saver {
+            Some(saver) => {
+                if let Err(err) = saver.save(&state) {
+                    tracing::warn!("state save failed: {err:#}");
+                }
+            }
+            None => {
+                if let Ok(store) = StateFile::open() {
+                    let _ = store.save(&state);
                 }
             }
         }
+    }
+
+    /// Submits the current state and blocks until it is on disk (exit path).
+    pub(crate) fn flush_state(&mut self) {
+        self.submit_state_now();
+        if let Some(saver) = &self.state_saver {
+            if let Err(err) = saver.flush() {
+                tracing::warn!("state flush failed: {err:#}");
+            }
+        }
+    }
+
+    /// Applies scan status updates published in-process by the scan server (no file polling).
+    pub(crate) fn poll_scan_status(&mut self) {
+        let mut completed = false;
+        while let Some(update) = scan_status::try_recv() {
+            if update.status == "Scan completed" {
+                completed = true;
+            }
+            self.last_scan_status = Some(update.status.clone());
+            self.app_vm.scan.last_scan_status = Some(update.status);
+            self.scan_counts = (update.scanned, update.parsed, update.registered);
+            self.app_vm.scan.scan_scanned = update.scanned;
+            self.app_vm.scan.scan_parsed = update.parsed;
+            self.app_vm.scan.scan_registered = update.registered;
+            self.save_state();
+        }
+        if completed {
+            self.on_library_changed();
+            self.request_track_info();
+        }
+    }
+
+    /// Drops library-derived caches after a scan or a library clear.
+    pub(crate) fn on_library_changed(&mut self) {
+        self.library_snapshot.invalidate();
+        self.track_meta.clear();
+        self.artwork.clear();
+        self.update_app_vm();
     }
 
     /// 保存されたプレイリストをファイルから読み込み、正規化します。
@@ -166,8 +174,18 @@ impl GuiApp {
     /// プレイリストをファイルに保存します。
     /// 
     /// `playlist`モジュールの同名関数に処理を委譲します。
-    pub(crate) fn save_playlists(&self) {
+    pub(crate) fn save_playlists(&mut self) {
         playlist::save_playlists(self);
+        self.rebuild_favorite_set();
+    }
+
+    /// Rebuilds the O(1) favorite lookup set from the favorite playlist (playlists[0]).
+    pub(crate) fn rebuild_favorite_set(&mut self) {
+        self.favorite_set = self
+            .playlists
+            .first()
+            .map(|p| p.tracks.iter().cloned().collect())
+            .unwrap_or_default();
     }
 
     /// 新しいプレイリストを追加します。
@@ -240,10 +258,6 @@ impl GuiApp {
         queue::move_queue_item_to(self, from, to);
     }
 
-    /// キューアイテムを1件削除します。
-    pub(crate) fn remove_queue_item(&mut self, index: usize) {
-        queue::remove_queue_item(self, index);
-    }
 
     /// キューアイテムを一つ上に移動します。
     pub(crate) fn move_queue_item_up(&mut self, index: usize) {
@@ -305,25 +319,9 @@ impl GuiApp {
         play::play_selected_queue_item(self);
     }
 
-    /// 現在の再生位置へシークします。
-    pub(crate) fn seek_to_position(&mut self) {
-        play::seek_to_position(self);
-    }
 
-    /// 次のトラックを再生します。
-    pub(crate) fn play_next(&mut self) {
-        play::play_next(self);
-    }
 
-    /// 前のトラックを再生します。
-    pub(crate) fn play_previous(&mut self) {
-        play::play_previous(self);
-    }
 
-    /// 再生/一時停止をトグルします。
-    pub(crate) fn toggle_play_pause(&mut self) {
-        play::toggle_play_pause(self);
-    }
 
     /// スキャン要求を送信します。
     pub(crate) fn request_scan(&mut self) {
@@ -366,69 +364,56 @@ impl GuiApp {
     }
 
     /// `GuiApp`の新しいインスタンスを構築します。
-    /// 
-    /// この関数はeframeによってアプリケーション起動時に呼び出されます。
-    /// 以下の初期化処理を行います：
-    /// 
-    /// 1. フォントのセットアップ（CJKフォールバックフォントの検出と設定）
-    /// 2. 利用可能なオーディオ出力デバイスの列挙
-    /// 3. 設定ファイルの読み込み
-    /// 4. 保存された状態の復元
-    /// 5. プレイリストの読み込みと正規化
-    /// 6. キュー状態の復元
-    /// 7. 各フィールドの初期化
-    /// 8. 歌詞ファイルの検索
-    /// 9. 再生メタデータの更新
-    /// 10. ViewModelの構築
-    /// 
-    /// # 引数
-    /// * `cc` - eframeの作成コンテキスト（フォント設定用）
-    /// 
-    /// # 戻り値
-    /// 初期化された`GuiApp`インスタンス
+    ///
+    /// フォント・テーマ、オーディオエンジン（1 つだけ・常駐）、共有 DB ハンドル、
+    /// 状態の復元を行います。重いファイル処理（メタデータ・歌詞・アートワーク）は
+    /// ワーカースレッドで行うため、最初のフレームを遅らせません。
     pub fn new(cc: &CreationContext<'_>) -> Self {
-        // 1. フォントのセットアップ
+        let ctx = cc.egui_ctx.clone();
         Self::setup_fonts(cc);
 
-        // 2. 利用可能なオーディオ出力デバイスを列挙
-        let mut device_names = Vec::new();
-        if let Ok(devs) = cpal::default_host().output_devices() {
-            for d in devs {
-                if let Ok(name) = d.name() {
-                    device_names.push(name);
-                }
-            }
-        }
-
-        // 3. 設定ファイルの読み込み
         let cfg = Config::load();
-        
-        // 4. 優先デバイスの選択インデックスを特定
-        let selected = cfg
-            .preferred_output_device
-            .as_ref()
-            .and_then(|n| device_names.iter().position(|s| s == n));
-
-        // 5. 保存された状態の復元
+        apply_theme(&ctx, cfg.theme);
         let state = Self::load_state();
-        
-        // 6. 最後に開いていたタブを復元（デフォルトはライブラリ）
+
         let active_tab = state
             .last_tab
             .as_deref()
             .and_then(Tab::from_label)
             .unwrap_or(Tab::Library);
 
-        // 7. プレイリストの読み込みと正規化
         let playlists = Self::load_playlists();
-        
-        // 8. キュー状態の復元
         let queue = QueueVm::new(state.queue_tracks.clone());
         let selected_queue_index = state.selected_queue_index.filter(|&i| i < queue.tracks.len());
+        let (shuffle, repeat) = state.shuffle_repeat();
+        let mut navigator = QueueNavigator::new(false, repeat);
+        navigator.set_shuffle(shuffle, selected_queue_index, queue.tracks.len());
 
-        // 9. GuiAppインスタンスの構築
+        let volume = state.volume.clamp(0.0, 1.0);
+        let eq = eq_from_dto(&state.eq);
+        let engine = create_engine(&ctx, &cfg, volume, state.muted, eq);
+        let device_names = AudioEngine::output_device_names();
+
+        let meta = match MetaCache::shared() {
+            Ok(meta) => Some(meta),
+            Err(err) => {
+                tracing::warn!("opening the library database failed: {err:#}");
+                None
+            }
+        };
+        let state_saver = match StateSaver::open_default() {
+            Ok(saver) => Some(saver),
+            Err(err) => {
+                tracing::warn!("state saver unavailable, saving synchronously: {err:#}");
+                None
+            }
+        };
+        scan_status::set_repaint_context(ctx.clone());
+
+        let play_path = state.last_play_path.clone().unwrap_or_default();
+        let lyrics_offset_ms = state.lyrics_offsets.get(&play_path).copied().unwrap_or(0);
+
         let mut gui = GuiApp {
-            // ViewModel（表示用データモデル）
             app_vm: Self::default_app_vm(
                 active_tab,
                 &cfg,
@@ -455,86 +440,86 @@ impl GuiApp {
                 &playlists,
                 queue.clone(),
             ),
-            
-            // タブ状態
             active_tab,
-            
-            // オーディオ出力デバイス
+
+            engine,
+            engine_snapshot: None,
             device_names,
-            selected,
+            preferred_output_device: cfg.preferred_output_device.clone(),
             device_filter: String::new(),
-            
-            // 再生状態
-            play_path: state.last_play_path.clone().unwrap_or_default(),
-            lyrics_files: Vec::new(),
-            selected_lyrics_index: None,
-            loaded_lyrics: None,
+            active_output_device: None,
+            resampler: cfg.resampler,
+            taps: cfg.taps_for_device(cfg.preferred_output_device.as_ref()),
+
+            play_path,
+            playback_state: PlaybackState::Stopped,
+            navigator,
+            current_queue_index: selected_queue_index,
+            pending_next: None,
+            consecutive_errors: 0,
+            pending_error_skip: false,
+            volume,
+            muted: state.muted,
+            eq,
+
+            pending_seek_ms: None,
+            seek_last_change_at: None,
+            seek_display_hold: None,
+            seek_interacting: false,
+            seek_key_hold_direction: 0,
+            seek_key_hold_started_at: None,
+            seek_key_last_step_at: None,
+            seek_key_hold_steps: 0,
+
+            queue_scroll_to_playing: active_tab == Tab::Queue,
+            track_list_scroll_request: None,
+            artist_view_mode: state.artist_view_mode,
+
             play_position_ms: state.last_play_position_ms.unwrap_or(0),
             play_duration_ms: None,
             play_title: None,
             play_artist: None,
             play_album: None,
+            track_info: track_info::TrackInfoLoader::new(ctx.clone()),
+
             play_artwork_handle: None,
-            play_artwork_source: None,
-            lyrics_offset_ms: 0,
+            play_artwork_blur_handle: None,
+            play_artwork_requested_for: None,
+
+            lrc_overlay_enabled: state.lrc_overlay_enabled,
+            fft_overlay_enabled: state.fft_overlay_enabled,
+            lyrics_files: Vec::new(),
+            lyrics_candidates: Vec::new(),
+            selected_lyrics_index: None,
+            loaded_lyrics: None,
+            loaded_timeline: None,
+            lyrics_offset_ms,
+            lyrics_offsets: state.lyrics_offsets.clone(),
+            lrc_layout: LrcLayoutCache::default(),
+            fft: FftAnalyzer::default(),
+
             play_status: None,
-            playback_state: PlaybackState::Stopped,
-            playback_mode: state.queue_playback_mode,
-            current_queue_index: selected_queue_index,
-            
-            // 再生バックエンドスレッド管理
-            playback_status_receiver: None,
-            playback_cancel_sender: None,
-            playback_thread_handle: None,
-            playback_start_instant: None,
-            playback_start_ms: state.last_play_position_ms.unwrap_or(0),
-            pending_play_request: false,
-            active_output_device_name: None,
-            last_seen_default_output_device_name: audio::cpal_output::default_device_name(),
-            last_default_device_poll_at: None,
-            playback_state_before_seek: None,
-            
-            // シーク操作
-            pending_seek_ms: None,
-            seek_last_change_at: None,
-            seek_interacting: false,
-            seek_long_press_start: None,
-            seek_key_hold_direction: 0,
-            seek_key_hold_started_at: None,
-            seek_key_last_step_at: None,
-            
-            // キューUI
-            queue_scroll_to_playing: active_tab == Tab::Queue,
-            
-            // アーティスト表示
-            artist_view_mode: state.artist_view_mode,
-            
-            // UI設定
-            side_panel_expanded: state.side_panel_expanded,
-            
-            // スキャン設定
+
             scan_target_input: String::new(),
             scan_lrc_target_input: String::new(),
             scan_exclude_input: String::new(),
             scan_targets: state.scan_targets,
             scan_lrc_targets: state.scan_lrc_targets,
             scan_excludes: state.scan_excludes,
-            
-            // ライブラリ選択状態
+
             selected_album: None,
             selected_artist: None,
             selected_directory: None,
             favorite_directories: state.favorite_directories,
             favorite_directory_input: String::new(),
             library_expanded_directories: HashSet::new(),
-            
-            // プレイリスト
+
             playlists,
+            favorite_set: HashSet::new(),
             new_playlist_name: String::new(),
             selected_playlist: None,
             playlist_track_input: String::new(),
-            
-            // キュー
+
             queue,
             queue_item_input: String::new(),
             selected_queue_index,
@@ -543,39 +528,33 @@ impl GuiApp {
             queue_handle_hold_index: None,
             queue_handle_hold_started_at: None,
             queue_drag_source_index: None,
-            
-            // オーディオ処理
-            taps: cfg.taps_for_device(cfg.preferred_output_device.as_ref()),
-            
-            // アプリケーション設定
+
+            side_panel_expanded: state.side_panel_expanded,
             theme: cfg.theme,
             log_level: cfg.log_level,
             language: cfg.language,
+
             last_scan_status: state.last_scan_status,
-            
-            // アートワーク
-            play_artwork_blur_handle: None,
-            play_artwork_blur_source: None,
-            lrc_overlay_enabled: state.lrc_overlay_enabled,
-            fft_overlay_enabled: state.fft_overlay_enabled,
-            
-            // アルバムアートワークキャッシュ
-            album_meta_cache: MetaCache::open_default().ok(),
-            album_artwork_path_cache: HashMap::new(),
-            album_artwork_texture_cache: HashMap::new(),
-            album_artwork_pending: VecDeque::new(),
-            album_artwork_queued: HashSet::new(),
-            album_artwork_album_titles: Vec::new(),
-            
-            // トラック詳細ダイアログ
+            scan_counts: (None, None, None),
+
+            artwork: ArtworkLoader::new(ctx.clone()),
+            meta,
+            library_snapshot: LibrarySnapshotCache::new(),
+            track_meta: TrackMetaCache::default(),
+
+            state_saver,
+            state_dirty: false,
+            state_last_submit: None,
+
             track_details_dialog: None,
         };
 
-        // 10. 追加の初期化処理
-        gui.discover_lyrics_for_current_play_path();  // 歌詞ファイルを検索
-        gui.refresh_play_metadata();                   // 再生メタデータを更新
-        gui.update_app_vm();                           // ViewModelを構築
-        
+        gui.rebuild_favorite_set();
+        if !gui.play_path.is_empty() {
+            // Duration / tags / lyrics for the restored track, off the UI thread.
+            gui.request_track_info();
+        }
+        gui.update_app_vm();
         gui
     }
 }

@@ -133,10 +133,16 @@ pub fn perform_play_from_displayed_list(
     clear_queue_selection(app);
     // クリックされたトラックを単一選択
     select_queue_item_single(app, clicked_index);
+    // シャッフル順を作り直す（クリックした曲から開始）
+    app.navigator.invalidate();
+    if app.navigator.shuffle() {
+        let len = app.queue.tracks.len();
+        app.navigator.set_shuffle(true, Some(clicked_index), len);
+    }
     // UIを更新
     app.update_app_vm();
     // 選択されたトラックを再生
-    play::play_selected_queue_item(app);
+    app.play_queue_index(clicked_index);
 }
 
 /// 指定されたインデックスのキューアイテムの選択状態をトグル（切り替え）します。
@@ -531,34 +537,8 @@ pub fn clear_queue(app: &mut GuiApp) {
 /// 
 /// # 引数
 /// * `app` - アプリケーション状態への可変参照
-fn stop_playback_and_clear_play_tab(app: &mut GuiApp) {
-    // バックエンドに停止を通知
-    app.signal_playback_stop();
-    // 再生状態を停止に設定
-    app.playback_state = PlaybackState::Stopped;
-    app.play_status = Some("Playback stopped".to_string());
-    
-    // 再生パスと位置をクリア
-    app.play_path.clear();
-    app.play_position_ms = 0;
-    app.play_duration_ms = None;
-    
-    // メタデータ表示をクリア
-    app.play_title = None;
-    app.play_artist = None;
-    app.play_album = None;
-    app.play_artwork_handle = None;
-    app.play_artwork_source = None;
-    
-    // 歌詞情報をクリア
-    app.lyrics_files.clear();
-    app.loaded_lyrics = None;
-    app.selected_lyrics_index = None;
-    app.lyrics_offset_ms = 0;
-    
-    // 再生タイマー関連をクリア
-    app.playback_start_instant = None;
-    app.pending_play_request = false;
+pub(crate) fn stop_playback_and_clear_play_tab(app: &mut GuiApp) {
+    app.clear_current_track();
 }
 
 /// 選択されたキューアイテムを一時停止状態でロードします。
@@ -570,61 +550,17 @@ fn stop_playback_and_clear_play_tab(app: &mut GuiApp) {
 /// * `app` - アプリケーション状態への可変参照
 /// * `index` - ロードするアイテムのインデックス
 fn load_selected_queue_item_paused(app: &mut GuiApp, index: usize) {
-    if let Some(path) = app.queue.tracks.get(index).cloned() {
-        // 選択状態を設定
-        select_queue_item_single(app, index);
-        app.current_queue_index = Some(index);
-        
-        // トラック変更時に歌詞オフセットをリセット
-        app.reset_lyrics_offset_if_track_changed(&path);
-        // 再生パスを設定
-        app.play_path = path;
-        app.play_position_ms = 0;
-        
-        // 状態を一時停止に設定
-        app.playback_state = PlaybackState::Paused;
-        app.play_status = Some("Paused at start of selected track".to_string());
-        
-        // メタデータと歌詞を読み込み
-        app.discover_lyrics_for_current_play_path();
-        app.refresh_play_metadata();
-        
-        // タイマーは停止状態
-        app.playback_start_instant = None;
-        app.pending_play_request = false;
-    }
+    // エンジンに一時停止状態でロード（先頭から）
+    app.start_queue_index(index, false);
+    app.play_status = Some("Paused at start of selected track".to_string());
 }
 
-/// 選択されたキューアイテムを停止状態でロードします。
-/// 
-/// キューアイテム削除後、再生状態が停止だった場合に呼び出される内部関数です。
-/// トラック情報をロードしますが、再生は開始しません。
-/// 
-/// # 引数
-/// * `app` - アプリケーション状態への可変参照
-/// * `index` - ロードするアイテムのインデックス
+/// 選択されたキューアイテムを停止状態でロードします（エンジンは停止したまま）。
 fn load_selected_queue_item_stopped(app: &mut GuiApp, index: usize) {
     if let Some(path) = app.queue.tracks.get(index).cloned() {
-        // 選択状態を設定
-        select_queue_item_single(app, index);
-        app.current_queue_index = Some(index);
-        
-        // トラック変更時に歌詞オフセットをリセット
-        app.reset_lyrics_offset_if_track_changed(&path);
-        // 再生パスを設定
-        app.play_path = path;
+        app.stop();
+        app.on_track_changed(Some(index), path);
         app.play_position_ms = 0;
-        
-        // 状態を停止に設定
-        app.playback_state = PlaybackState::Stopped;
         app.play_status = Some("Stopped at start of selected track".to_string());
-        
-        // メタデータと歌詞を読み込み
-        app.discover_lyrics_for_current_play_path();
-        app.refresh_play_metadata();
-        
-        // タイマーは停止状態
-        app.playback_start_instant = None;
-        app.pending_play_request = false;
     }
 }

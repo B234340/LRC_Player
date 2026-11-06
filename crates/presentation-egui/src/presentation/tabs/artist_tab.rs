@@ -1,3 +1,4 @@
+use crate::presentation::app::ArtworkMode;
 use crate::presentation::actions::play::perform_play_track_now;
 use crate::presentation::actions::click;
 use crate::presentation::actions::queue::{
@@ -12,7 +13,6 @@ use crate::presentation::actions::track::{
     perform_add_track_to_playlist,
     perform_open_track_details,
 };
-use crate::presentation::components::track_display::render_track_artwork_with_file_first;
 use crate::presentation::components::track_list::{render_track_list_with_artwork, TrackActivation};
 use crate::presentation::app::{ArtistViewMode, GuiApp};
 use eframe::egui;
@@ -233,7 +233,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                                         }
                                     },
                                     |_, _, _, _| false,
-                                    render_track_artwork_with_file_first,
+                                    ArtworkMode::FileFirst,
                                     |_, _, _, _, _| {},
                                     |_, _, _, _, _| {},
                                     |_, _, _, _, _, _| false,

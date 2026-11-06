@@ -17,6 +17,7 @@ mod tests {
             language: Language::En,
             theme: Theme::System,
             log_level: LogLevel::Info,
+            ..Default::default()
         };
         file.save(&original).unwrap();
 
@@ -26,5 +27,14 @@ mod tests {
             loaded.preferred_output_device,
             original.preferred_output_device
         );
+    }
+
+    #[test]
+    fn old_config_without_resampler_loads_with_fft_default() {
+        let json = r#"{"resampler_taps":32,"preferred_output_device":null,"language":"ja","theme":"dark","log_level":"debug"}"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.resampler, lrc_player::config::ResamplerSetting::Fft);
+        assert_eq!(cfg.theme, Theme::Dark);
+        assert_eq!(cfg.log_level.as_filter_str(), "debug");
     }
 }

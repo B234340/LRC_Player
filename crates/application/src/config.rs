@@ -65,6 +65,30 @@ pub enum LogLevel {
     Trace,
 }
 
+impl LogLevel {
+    /// Filter directive understood by `tracing_subscriber::EnvFilter` / `LevelFilter`.
+    pub fn as_filter_str(self) -> &'static str {
+        match self {
+            LogLevel::Error => "error",
+            LogLevel::Warn => "warn",
+            LogLevel::Info => "info",
+            LogLevel::Debug => "debug",
+            LogLevel::Trace => "trace",
+        }
+    }
+}
+
+/// Resampler used by the audio engine when the file rate differs from the device rate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResamplerSetting {
+    /// Synchronous FFT resampler (best quality / CPU for fixed rate pairs).
+    #[default]
+    Fft,
+    /// Windowed-sinc resampler whose filter length is the "resampler taps" setting.
+    Sinc,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceSettings {
     pub resampler_taps: usize,
@@ -88,6 +112,9 @@ pub struct Config {
     pub theme: Theme,
     #[serde(default)]
     pub log_level: LogLevel,
+    /// Engine resampler (applied when the engine starts).
+    #[serde(default)]
+    pub resampler: ResamplerSetting,
 }
 
 impl Default for Config {
@@ -99,6 +126,7 @@ impl Default for Config {
             language: Language::default(),
             theme: Theme::default(),
             log_level: LogLevel::default(),
+            resampler: ResamplerSetting::default(),
         }
     }
 }

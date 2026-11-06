@@ -16,19 +16,19 @@ use crate::presentation::app::{ArtistViewMode, GuiApp};
 /// # 引数
 /// * `app` - アプリケーション状態への可変参照
 pub fn clear_library(app: &mut GuiApp) {
-    // メタデータキャッシュを開き、ライブラリをクリア
-    if let Ok(cache) = MetaCache::open_default() {
-        if let Err(err) = cache.clear_library() {
-            app.last_scan_status = Some(format!("Failed to clear library: {}", err));
-            app.update_app_vm();
-            return;
-        }
-    } else {
-        app.last_scan_status = Some("Failed to open meta cache for clear library".to_string());
+    // 共有接続でライブラリをクリア（同一接続の書き込みは data_version を変えないため明示的に無効化）
+    let result = match app.meta.as_ref() {
+        Some(meta) => meta.with(|cache| cache.clear_library()),
+        None => MetaCache::open_default().and_then(|cache| cache.clear_library()),
+    };
+    if let Err(err) = result {
+        app.last_scan_status = Some(format!("Failed to clear library: {}", err));
         app.update_app_vm();
         return;
     }
-    // メモリ上のアルバムアートワークキャッシュをクリア
+    // ライブラリ由来のキャッシュ（スナップショット・行メタデータ・アートワーク）を破棄
+    app.library_snapshot.invalidate();
+    app.track_meta.clear();
     app.clear_album_artwork_cache();
     // 選択状態をすべてリセット
     app.selected_album = None;

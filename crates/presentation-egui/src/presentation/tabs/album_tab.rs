@@ -197,7 +197,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
         // 総行数を計算
         let row_count = albums.len().div_ceil(cols);
-        let mut visible_album_titles: Vec<String> = Vec::new();  // 表示中のアルバムタイトル一覧
 
         // ========== スクロール可能なアルバムカードグリッドの表示 ==========
         egui::ScrollArea::vertical()
@@ -217,7 +216,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                             }
 
                             let album = &albums[index];
-                            visible_album_titles.push(album.title.clone());
                             let is_selected = selected_album.as_deref() == Some(album.id.as_str());
 
                             // 選択状態に応じてフレームのスタイルを変更
@@ -298,11 +296,6 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 }
             });
 
-        // ========== 表示中のアルバムのアートワークを非同期で読み込み ==========
-        if row_count > 0 {
-            app.queue_album_artwork_for_visible(&visible_album_titles);
-            app.process_album_artwork_queue(ui.ctx(), 1);  // 一度に最大1枚まで処理
-        }
 
         // ========== 選択中アルバムの表示状態確認 ==========
         let selected_is_visible = match (selected_card_rect, grid_visible_rect) {

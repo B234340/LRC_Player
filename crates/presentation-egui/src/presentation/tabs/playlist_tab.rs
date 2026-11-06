@@ -1,4 +1,4 @@
-use crate::presentation::components::track_display::render_track_artwork;
+use crate::presentation::app::ArtworkMode;
 use crate::presentation::actions::play::perform_play_track_now;
 use crate::presentation::actions::queue::{
     perform_add_track_next_in_queue,
@@ -225,7 +225,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                         }
                     },
                     |_, _, _, _| false,
-                    render_track_artwork,
+                    ArtworkMode::FileOnly,
                     |_, _, _, _, _| {},
                     |_, _, _, _, _| {},
                     |_, _, _, _, _, _| false,
