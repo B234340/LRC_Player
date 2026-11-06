@@ -10,6 +10,7 @@ use crate::presentation::ui::{
     actions::{Page, RepeatMode, RightPanel, UiAction},
     format::format_time,
     i18n::Tr,
+    text,
     icons::{icon_button, icon_button_ex, play_button, Icon, IconButtonStyle},
     theme::{self, metrics},
     widgets::{artwork::paint_artwork, seek_bar, volume_control, Tex},
@@ -52,6 +53,69 @@ fn count_badge(ui: &Ui, button: Rect, count: usize, pal: &theme::Palette) {
     ui.painter().galley(r.center() - g.size() / 2.0, g, pal.accent_text);
 }
 
+// ---------------------------------------------------------------------------------------
+// Width budget
+// ---------------------------------------------------------------------------------------
+
+/// Horizontal padding of the bar and gap between its three regions.
+const PAD: f32 = 14.0;
+const REGION_GAP: f32 = 16.0;
+/// Left: 52 px artwork + 12 px gap + at least 96 px of title / artist.
+const LEFT_MIN: f32 = 52.0 + 12.0 + 96.0;
+const LEFT_MAX: f32 = 340.0;
+/// Center: shuffle, previous, play (36), next, repeat (34 each + gaps) = 204 …
+const CONTROLS_ROW_W: f32 = 36.0 + 2.0 * 34.0 + 2.0 * 6.0 + 2.0 * (34.0 + 10.0);
+/// … and the seek bar (≥ 160 px) with both times (40 px + 8 px gap each side) = 256.
+const TIME_W: f32 = 40.0;
+const SEEK_MIN: f32 = 160.0;
+const CENTER_MIN: f32 = if CONTROLS_ROW_W > SEEK_MIN + 2.0 * (TIME_W + 8.0) { CONTROLS_ROW_W } else { SEEK_MIN + 2.0 * (TIME_W + 8.0) };
+/// Right: lyrics, queue, EQ (≈ 31 px each, 2 px gaps), 6 px gap, mute (36) + volume
+/// slider (≥ 64) + small slack = 216.
+const SLIDER_MIN: f32 = 64.0;
+const SLIDER_MAX: f32 = 96.0;
+const RIGHT_FIXED: f32 = 3.0 * 31.0 + 3.0 * 2.0 + 6.0 + 36.0 + 2.0 + 9.0;
+const RIGHT_MIN: f32 = RIGHT_FIXED + SLIDER_MIN;
+const RIGHT_MAX: f32 = 330.0;
+
+/// Narrowest bar that shows every control: `2 × 14 + 160 + 16 + 256 + 16 + 216 = 692`.
+/// The bar spans the whole window (the sidebar sits above it), so this is also the
+/// window's minimum width apart from the root margin (see `shell::MIN_WINDOW_WIDTH`).
+pub const MIN_WIDTH_ALL_CONTROLS: f32 = 2.0 * PAD + LEFT_MIN + REGION_GAP + CENTER_MIN + REGION_GAP + RIGHT_MIN;
+
+/// Region widths for a bar width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TransportLayout {
+    pub left_w: f32,
+    pub right_w: f32,
+    pub slider_w: f32,
+    /// Every control is shown (at or above [`MIN_WIDTH_ALL_CONTROLS`]).
+    pub all_controls: bool,
+    /// Below the minimum: queue / lyrics and a slim slider still fit (safety net).
+    pub medium: bool,
+}
+
+pub(crate) fn transport_layout(w: f32) -> TransportLayout {
+    if w >= MIN_WIDTH_ALL_CONTROLS {
+        // Generous side regions on wide bars; on narrower ones the title area and the
+        // volume slider shrink before the center (controls + seek bar) gets below its minimum.
+        let mut left = (w * 0.27).clamp(LEFT_MIN, LEFT_MAX);
+        let mut right = (w * 0.27).clamp(RIGHT_MIN, RIGHT_MAX);
+        let center = |l: f32, r: f32| w - 2.0 * PAD - l - r - 2.0 * REGION_GAP;
+        let deficit = CENTER_MIN - center(left, right);
+        if deficit > 0.0 {
+            let from_left = deficit.min(left - LEFT_MIN);
+            left -= from_left;
+            right -= (deficit - from_left).min(right - RIGHT_MIN);
+        }
+        let slider = (right - RIGHT_FIXED).clamp(SLIDER_MIN, SLIDER_MAX);
+        TransportLayout { left_w: left, right_w: right, slider_w: slider, all_controls: true, medium: true }
+    } else if w >= 560.0 {
+        TransportLayout { left_w: 180.0, right_w: 150.0, slider_w: 64.0, all_controls: false, medium: true }
+    } else {
+        TransportLayout { left_w: 56.0, right_w: 40.0, slider_w: 0.0, all_controls: false, medium: false }
+    }
+}
+
 /// Preferred height of the panel hosting the transport bar.
 pub const HEIGHT: f32 = metrics::TRANSPORT_HEIGHT;
 
@@ -64,14 +128,12 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
     ui.painter().hline(full.x_range(), full.top() + 0.5, Stroke::new(1.0, pal.border));
 
     let w = full.width();
-    let wide = w >= 920.0;
-    // Medium layout (queue / lyrics buttons, slim volume) down to the minimum window width.
-    let medium = w >= 600.0;
-    let pad = 14.0;
+    let lay = transport_layout(w);
+    let (wide, medium) = (lay.all_controls, lay.medium);
+    let pad = PAD;
     let inner = full.shrink2(vec2(pad, 0.0));
 
-    let left_w = if wide { (w * 0.27).clamp(220.0, 340.0) } else if medium { 200.0 } else { 56.0 };
-    let right_w = if wide { (w * 0.27).clamp(230.0, 330.0) } else if medium { 150.0 } else { 40.0 };
+    let (left_w, right_w) = (lay.left_w, lay.right_w);
     let left = Rect::from_min_size(inner.min, vec2(left_w, inner.height()));
     let right = Rect::from_min_max(pos2(inner.right() - right_w, inner.top()), inner.max);
     let center = Rect::from_min_max(pos2(left.right() + 16.0, inner.top()), pos2(right.left() - 16.0, inner.bottom()));
@@ -101,8 +163,9 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
             tui.spacing_mut().item_spacing.y = 1.0;
             tui.add_space((text_rect.height() - 38.0) / 2.0);
             if props.has_track {
-                tui.add(egui::Label::new(theme::strong(&tui, props.title).color(pal.text)).truncate());
-                tui.add(egui::Label::new(RichText::new(props.artist).size(12.5).color(pal.text_muted)).truncate());
+                // Title and artist are separate elements, each in the font of its language.
+                tui.add(egui::Label::new(text::rich(props.title, theme::size::BODY, true).color(pal.text)).truncate());
+                tui.add(egui::Label::new(text::rich(props.artist, 12.5, false).color(pal.text_muted)).truncate());
             } else {
                 tui.add_space(9.0);
                 tui.add(egui::Label::new(RichText::new(tr.t("transport.nothing_playing")).color(pal.text_faint)).truncate());
@@ -113,7 +176,7 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
     // ---------------- center: controls + seek ----------------
     {
         let cw = center.width();
-        let show_modes = cw >= 300.0;
+        let show_modes = cw >= CONTROLS_ROW_W;
         let mut row_w = 36.0 + 2.0 * 34.0 + 2.0 * 6.0;
         if show_modes {
             row_w += 2.0 * (34.0 + 10.0);
@@ -153,7 +216,7 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
         }
 
         // seek row
-        let time_w = if props.duration_ms >= 3_600_000 { 52.0 } else { 40.0 };
+        let time_w = if props.duration_ms >= 3_600_000 { 52.0 } else { TIME_W };
         let seek_y = center.bottom() - 20.0;
         let bar_w = (cw - 2.0 * (time_w + 8.0)).clamp(40.0, 620.0);
         let total = bar_w + 2.0 * (time_w + 8.0);
@@ -182,7 +245,7 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
     {
         let mut rui = ui.new_child(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)));
         rui.spacing_mut().item_spacing.x = 2.0;
-        let slider_w = if wide { 96.0 } else if medium { 64.0 } else { 0.0 };
+        let slider_w = lay.slider_w;
         // volume (right-most)
         // icon (34) + spacing + slider
         let vol_w = 36.0 + if slider_w > 0.0 { slider_w + 2.0 } else { 0.0 };
@@ -233,4 +296,25 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
         }
     }
     actions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_controls_fit_at_and_above_the_minimum() {
+        assert_eq!(CENTER_MIN, 256.0);
+        assert_eq!(MIN_WIDTH_ALL_CONTROLS, 692.0);
+        for w in [MIN_WIDTH_ALL_CONTROLS, 700.0, 760.0, 900.0, 1264.0, 2000.0] {
+            let l = transport_layout(w);
+            assert!(l.all_controls, "w={w}");
+            let center = w - 2.0 * PAD - l.left_w - l.right_w - 2.0 * REGION_GAP;
+            assert!(center >= CENTER_MIN - 0.01, "w={w} center={center}");
+            assert!(center >= CONTROLS_ROW_W, "shuffle / repeat shown at w={w}");
+            assert!(l.left_w >= LEFT_MIN - 0.01 && l.right_w >= RIGHT_MIN - 0.01);
+            assert!(l.slider_w >= SLIDER_MIN && l.right_w >= RIGHT_FIXED + l.slider_w - 0.01, "w={w}");
+        }
+        assert!(!transport_layout(MIN_WIDTH_ALL_CONTROLS - 1.0).all_controls);
+    }
 }

@@ -73,11 +73,14 @@ pub fn search_box_with_hint(
         rect.min + vec2(34.0, 0.0),
         rect.max - vec2(6.0 + clear_w, 0.0),
     );
+    // The query is user content (often a title / artist): font by its language.
+    let font = crate::presentation::ui::text::font_id(query, crate::presentation::ui::theme::size::BODY, false);
     let response = ui
         .scope_builder(egui::UiBuilder::new().max_rect(edit_rect).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
             ui.add(
                 TextEdit::singleline(query)
                     .id(edit_id)
+                    .font(font)
                     .frame(egui::Frame::NONE)
                     .margin(Margin::ZERO)
                     .hint_text(egui::RichText::new(hint).color(pal.text_faint))

@@ -125,10 +125,11 @@ pub fn dialog(ctx: &Context, spec: &DialogSpec<'_>, body: impl FnOnce(&mut Ui, b
     result
 }
 
-/// Body text (muted, wrapping).
+/// Body text (muted, wrapping). It may embed a playlist / track name, so the font follows
+/// the text's language.
 pub fn dialog_text(ui: &mut Ui, text: &str) {
     let pal = theme::palette(ui);
-    ui.add(egui::Label::new(RichText::new(text).color(pal.text_muted)).wrap());
+    ui.add(egui::Label::new(crate::presentation::ui::text::rich(text, theme::size::BODY, false).color(pal.text_muted)).wrap());
 }
 
 /// Validation message under a field (danger color).
@@ -142,9 +143,12 @@ pub fn dialog_error(ui: &mut Ui, text: &str) {
 pub fn dialog_text_field(ui: &mut Ui, text: &mut String, opened: bool, hint: &str) -> Response {
     let pal = theme::palette(ui);
     let id = ui.id().with("dialog_text_field");
+    // Playlist names: the font of the name's language.
+    let font = crate::presentation::ui::text::font_id(text, theme::size::BODY, false);
     let resp = ui.add(
         egui::TextEdit::singleline(text)
             .id(id)
+            .font(font)
             .hint_text(RichText::new(hint).color(pal.text_faint))
             .desired_width(f32::INFINITY)
             .min_size(vec2(0.0, 36.0))

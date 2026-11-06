@@ -92,7 +92,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
             let mut aui = ui.new_child(egui::UiBuilder::new().max_rect(av));
             avatar(&mut aui, 40.0, &a.name, None);
             let name = ui.painter().layout_job({
-                let mut j = egui::text::LayoutJob::simple_singleline(a.name.clone(), theme::bold_font(ui.ctx(), theme::size::BODY), pal.text);
+                let mut j = egui::text::LayoutJob::simple_singleline(a.name.clone(), crate::presentation::ui::text::font_id(&a.name, theme::size::BODY, true), pal.text);
                 j.wrap = egui::text::TextWrapping::truncate_at_width(width - 120.0);
                 j
             });
@@ -193,7 +193,7 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, name: &str) -> Vec<UiAction> {
                         if resp.hovered() {
                             ui.painter().rect_filled(art, 8.0, egui::Color32::from_black_alpha(40));
                         }
-                        let mut j = egui::text::LayoutJob::simple_singleline(album.title.clone(), FontId::proportional(12.5), pal.text);
+                        let mut j = egui::text::LayoutJob::simple_singleline(album.title.clone(), crate::presentation::ui::text::font_id(&album.title, 12.5, false), pal.text);
                         j.wrap = egui::text::TextWrapping::truncate_at_width(card);
                         let g = ui.painter().layout_job(j);
                         ui.painter().galley(pos2(art.left(), art.bottom() + 6.0), g, pal.text);

@@ -19,6 +19,7 @@ use crate::presentation::ui::{
     i18n::Tr,
     icons::{paint_icon, Icon},
     shell::PlaylistEntry,
+    text,
     theme::{self, Palette},
     widgets::empty_state,
 };
@@ -728,12 +729,13 @@ fn paint_row(
             Column::Title => (
                 row.title.clone(),
                 if is_now { pal.accent_fg } else { pal.text },
-                if is_now { theme::bold_font(ui.ctx(), theme::size::BODY) } else { body.clone() },
+                // User content: each cell in the font of its own language.
+                text::font_id(&row.title, theme::size::BODY, is_now),
             ),
-            Column::Artist => (row.artist.clone(), pal.text_muted, body.clone()),
-            Column::Album => (row.album.clone(), pal.text_muted, body.clone()),
+            Column::Artist => (row.artist.clone(), pal.text_muted, text::font_id(&row.artist, theme::size::BODY, false)),
+            Column::Album => (row.album.clone(), pal.text_muted, text::font_id(&row.album, theme::size::BODY, false)),
             Column::Year => (row.year.map(|y| y.to_string()).unwrap_or_default(), pal.text_muted, body.clone()),
-            Column::Genre => (row.genre.clone(), pal.text_muted, body.clone()),
+            Column::Genre => (row.genre.clone(), pal.text_muted, text::font_id(&row.genre, theme::size::BODY, false)),
             Column::Duration => (format_duration_opt(row.duration_ms), pal.text_muted, FontId::proportional(12.5)),
         };
         if text.is_empty() {
@@ -880,7 +882,7 @@ fn context_menu(
             ui.label(theme::muted(ui, tr.t("menu.no_playlists")));
         }
         for pl in props.playlists {
-            if item(ui, Icon::Playlist, pl.name) {
+            if menu_item_ex(ui, Icon::Playlist, pl.name, true).clicked() {
                 actions.push(UiAction::AddToPlaylist { playlist_id: pl.id.to_owned(), paths: paths.clone() });
                 ui.close();
             }
@@ -955,6 +957,13 @@ pub fn check_item(ui: &mut Ui, checked: bool, text: &str) -> Response {
 
 /// Menu entry with a leading icon.
 pub fn menu_item(ui: &mut Ui, icon: Icon, text: &str) -> Response {
+    menu_item_ex(ui, icon, text, false)
+}
+
+/// [`menu_item`]; `user_content` draws the label in the font of its language (playlist
+/// names, titles) instead of the UI font.
+pub fn menu_item_ex(ui: &mut Ui, icon: Icon, label: &str, user_content: bool) -> Response {
+    let text = label;
     let pal = theme::palette(ui);
     let width = ui.available_width().max(180.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
@@ -964,7 +973,8 @@ pub fn menu_item(ui: &mut Ui, icon: Icon, text: &str) -> Response {
     }
     let color = if resp.hovered() { pal.text } else { theme::blend(pal.text, pal.text_muted, 0.25) };
     paint_icon(ui.painter(), Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), Vec2::splat(15.0)), icon, pal.text_muted);
-    let g = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(theme::size::BODY), color);
+    let font = if user_content { text::font_id(text, theme::size::BODY, false) } else { FontId::proportional(theme::size::BODY) };
+    let g = ui.painter().layout_no_wrap(text.to_owned(), font, color);
     ui.painter().galley(pos2(rect.left() + 34.0, rect.center().y - g.size().y / 2.0), g, color);
     resp
 }
@@ -972,7 +982,7 @@ pub fn menu_item(ui: &mut Ui, icon: Icon, text: &str) -> Response {
 fn drag_ghost(ui: &Ui, pal: &Palette, pos: egui::Pos2, label: &str, count: usize) {
     let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::new("track_drag_ghost")));
     let text = if count > 1 { format!("{label}  +{}", count - 1) } else { label.to_owned() };
-    let g = painter.layout_job(cell_job(&text, FontId::proportional(13.0), pal.text, 260.0, false));
+    let g = painter.layout_job(cell_job(&text, text::font_id(label, 13.0, false), pal.text, 260.0, false));
     let rect = Rect::from_min_size(pos + vec2(14.0, 10.0), vec2(g.size().x + 40.0, 30.0));
     painter.add(egui::epaint::Shadow { offset: [0, 4], blur: 12, spread: 0, color: pal.shadow }.as_shape(rect, 8));
     painter.rect(rect, 8.0, pal.elevated, Stroke::new(1.0, pal.accent), egui::StrokeKind::Inside);

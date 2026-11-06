@@ -8,6 +8,7 @@ use eframe::egui::{
 use crate::presentation::ui::{
     actions::{Page, UiAction},
     i18n::Tr,
+    text,
     icons::{icon_button, paint_icon, Icon},
     theme::{self, metrics, Palette},
     views::track_table::TrackDragPayload,
@@ -207,7 +208,7 @@ pub fn sidebar(ui: &mut Ui, props: &SidebarProps<'_>, state: &mut SidebarState) 
     nav_ui.spacing_mut().item_spacing.y = NAV_ROW_GAP;
     for page in Page::MAIN {
         let active = props.active == page && props.active_playlist.is_none();
-        if nav_item(&mut nav_ui, nav_id(page), &pal, page_icon(page), tr.t(page_label_key(page)), active, collapsed).clicked() {
+        if nav_item(&mut nav_ui, nav_id(page), &pal, page_icon(page), tr.t(page_label_key(page)), active, collapsed, false).clicked() {
             action = Some(UiAction::Navigate(page));
         }
     }
@@ -233,7 +234,7 @@ pub fn sidebar(ui: &mut Ui, props: &SidebarProps<'_>, state: &mut SidebarState) 
                 ui.spacing_mut().item_spacing.y = NAV_ROW_GAP;
                 for pl in props.playlists {
                     let active = props.active_playlist == Some(pl.id);
-                    let resp = nav_item(ui, playlist_id(pl.id), &pal, Icon::Playlist, pl.name, active, collapsed);
+                    let resp = nav_item(ui, playlist_id(pl.id), &pal, Icon::Playlist, pl.name, active, collapsed, true);
                     if resp.clicked() {
                         action = Some(UiAction::OpenPlaylist(pl.id.to_owned()));
                     }
@@ -271,7 +272,7 @@ pub fn sidebar(ui: &mut Ui, props: &SidebarProps<'_>, state: &mut SidebarState) 
         bottom_ui.add_space(4.0 - NAV_ROW_GAP);
     }
     let settings_active = props.active == Page::Settings && props.active_playlist.is_none();
-    if nav_item(&mut bottom_ui, nav_id(Page::Settings), &pal, Icon::Settings, tr.t("nav.settings"), settings_active, collapsed).clicked() {
+    if nav_item(&mut bottom_ui, nav_id(Page::Settings), &pal, Icon::Settings, tr.t("nav.settings"), settings_active, collapsed, false).clicked() {
         action = Some(UiAction::Navigate(Page::Settings));
     }
     let tip = if collapsed { tr.t("nav.expand") } else { tr.t("nav.collapse") };
@@ -289,7 +290,9 @@ pub fn sidebar(ui: &mut Ui, props: &SidebarProps<'_>, state: &mut SidebarState) 
 }
 
 /// A 36px navigation row.
-fn nav_item(ui: &mut Ui, id: egui::Id, pal: &Palette, icon: Icon, label: &str, active: bool, collapsed: bool) -> Response {
+/// `user_content`: the label is a playlist name (drawn in the font of its language).
+#[allow(clippy::too_many_arguments)]
+fn nav_item(ui: &mut Ui, id: egui::Id, pal: &Palette, icon: Icon, label: &str, active: bool, collapsed: bool, user_content: bool) -> Response {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), NAV_ROW_H), Sense::hover());
     // Stable ids (layout tests read them back).
     let resp = ui.interact(rect, id, Sense::click());
@@ -311,7 +314,13 @@ fn nav_item(ui: &mut Ui, id: egui::Id, pal: &Palette, icon: Icon, label: &str, a
         let icon_x = if collapsed { rect.center().x } else { rect.left() + 12.0 + 9.0 };
         paint_icon(painter, Rect::from_center_size(pos2(icon_x, rect.center().y), Vec2::splat(18.0)), icon, color);
         if !collapsed {
-            let font = if active { theme::bold_font(ui.ctx(), theme::size::BODY) } else { FontId::proportional(theme::size::BODY) };
+            let font = if user_content {
+                text::font_id(label, theme::size::BODY, active)
+            } else if active {
+                theme::bold_font(ui.ctx(), theme::size::BODY)
+            } else {
+                FontId::proportional(theme::size::BODY)
+            };
             let max_w = rect.width() - 52.0;
             let job = egui::text::LayoutJob {
                 wrap: egui::text::TextWrapping::truncate_at_width(max_w),
@@ -331,7 +340,7 @@ mod tests {
     #[test]
     fn min_height_matches_documented_value() {
         assert_eq!(SIDEBAR_MIN_HEIGHT, 524.0);
-        assert_eq!(crate::presentation::ui::shell::MIN_WINDOW_SIZE, [640.0, 616.0]);
+        assert_eq!(crate::presentation::ui::shell::MIN_WINDOW_SIZE, [708.0, 616.0]);
     }
 
     #[test]

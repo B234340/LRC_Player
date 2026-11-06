@@ -432,7 +432,8 @@ impl GuiApp {
                 egui::Grid::new("details_grid").num_columns(2).spacing(vec2(16.0, 8.0)).show(ui, |ui| {
                     for (k, v) in fields {
                         ui.label(egui::RichText::new(k).color(pal.text_muted));
-                        ui.add(egui::Label::new(egui::RichText::new(v).color(pal.text)).wrap());
+                        // Values are user content (title, artist, album, genre, path).
+                        ui.add(egui::Label::new(crate::presentation::ui::text::rich(v, theme::size::BODY, false).color(pal.text)).wrap());
                         ui.end_row();
                     }
                 });

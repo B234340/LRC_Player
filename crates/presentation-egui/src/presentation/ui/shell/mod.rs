@@ -12,12 +12,16 @@ use eframe::egui::{Frame, Margin, Stroke};
 
 use super::theme::{metrics, radius, Palette};
 
-/// Minimum window width: the collapsed sidebar (64) plus a 576 px central area; the
-/// transport bar keeps its queue / lyrics buttons down to this width.
-pub const MIN_WINDOW_WIDTH: f32 = 640.0;
-
-/// Allowance for a margin egui may put around the root UI (8 px top + bottom).
+/// Allowance for a margin egui may put around the root UI (8 px on each side).
+const ROOT_MARGIN_X: f32 = 16.0;
 const ROOT_MARGIN_Y: f32 = 16.0;
+
+/// Minimum window width: the transport bar spans the whole window (the sidebar and pages
+/// sit above it), so the window must fit the bar with every control shown —
+/// [`transport::MIN_WIDTH_ALL_CONTROLS`] (`2 × 14 pad + 160 artwork/title + 16 + 256
+/// controls/seek bar + 16 + 216 lyrics/queue/EQ/volume = 692`) + [`ROOT_MARGIN_X`] (16)
+/// = 708. That leaves 708 − 16 − 216 − 8 = 468 px for pages with the sidebar expanded.
+pub const MIN_WINDOW_WIDTH: f32 = transport::MIN_WIDTH_ALL_CONTROLS + ROOT_MARGIN_X;
 
 /// Minimum window height: the sidebar's minimum ([`sidebar::SIDEBAR_MIN_HEIGHT`] = brand,
 /// full nav, playlist heading + 2 rows and the settings / toggle block = 524) + the

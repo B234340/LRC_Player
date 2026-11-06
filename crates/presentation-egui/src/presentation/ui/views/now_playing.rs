@@ -4,7 +4,7 @@
 
 use eframe::egui::{
     self, pos2, vec2, Align, Color32, ColorImage, CursorIcon, FontId, Key, Layout, Modifiers, Order,
-    Rect, RichText, Sense, Ui, UiBuilder, Vec2,
+    Rect, Sense, Ui, UiBuilder, Vec2,
 };
 
 use super::lyrics_view::{lyrics_view, LyricsProps, LyricsViewState};
@@ -343,9 +343,8 @@ fn track_info(ui: &mut Ui, props: &NowPlayingProps<'_>, rect: Rect, actions: &mu
     tui.spacing_mut().item_spacing.y = INFO_SPACING;
     tui.add(
         egui::Label::new(
-            RichText::new(props.title)
-                .font(theme::bold_font(tui.ctx(), TITLE_SIZE))
-                .color(Color32::WHITE),
+            // Title, artist and album are separate elements, each in its language's font.
+            crate::presentation::ui::text::rich(props.title, TITLE_SIZE, true).color(Color32::WHITE),
         )
         .truncate(),
     );
@@ -354,7 +353,7 @@ fn track_info(ui: &mut Ui, props: &NowPlayingProps<'_>, rect: Rect, actions: &mu
             return false;
         }
         let resp = ui
-            .add(egui::Label::new(RichText::new(text).font(FontId::proportional(size)).color(Color32::from_white_alpha(alpha))).truncate().sense(Sense::click()))
+            .add(egui::Label::new(crate::presentation::ui::text::rich(text, size, false).color(Color32::from_white_alpha(alpha))).truncate().sense(Sense::click()))
             .on_hover_cursor(CursorIcon::PointingHand);
         if resp.hovered() {
             let r = resp.rect;
