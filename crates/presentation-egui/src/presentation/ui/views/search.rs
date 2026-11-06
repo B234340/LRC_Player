@@ -7,6 +7,7 @@
 use std::cmp::Ordering;
 
 use crate::presentation::ui::actions::{SortColumn, SortSpec};
+use crate::presentation::ui::collate::SortKey;
 
 use super::track_table::TrackRow;
 
@@ -80,13 +81,17 @@ fn halfwidth_kana_to_hiragana(c: char) -> Option<char> {
     TABLE.chars().nth(idx)
 }
 
-/// Pre-normalized keys of one row.
+/// Pre-normalized keys of one row: normalized text for matching, collation keys
+/// ([`crate::presentation::ui::collate`]) for sorting.
 #[derive(Clone, Debug, Default)]
 pub struct RowKeys {
     pub title: String,
     pub artist: String,
     pub album: String,
-    pub genre: String,
+    pub title_sort: SortKey,
+    pub artist_sort: SortKey,
+    pub album_sort: SortKey,
+    pub genre_sort: SortKey,
 }
 
 impl RowKeys {
@@ -95,7 +100,10 @@ impl RowKeys {
             title: normalize(&row.title),
             artist: normalize(&row.artist),
             album: normalize(&row.album),
-            genre: normalize(&row.genre),
+            title_sort: SortKey::new(&row.title),
+            artist_sort: SortKey::new(&row.artist),
+            album_sort: SortKey::new(&row.album),
+            genre_sort: SortKey::new(&row.genre),
         }
     }
 
@@ -140,32 +148,33 @@ fn cmp_opt<T: Ord>(a: &Option<T>, b: &Option<T>) -> Ordering {
     }
 }
 
-/// Empty strings sort last regardless of direction is not attempted; they sort first in
-/// ascending order like most players.
+/// Text columns use the shared collation (see [`crate::presentation::ui::collate`]); empty
+/// strings sort first in ascending order like most players. `Index` keeps the source order
+/// (the library index stores its rows in the default artist → album → disc → track order).
 fn sort_view(rows: &[TrackRow], keys: &[RowKeys], view: &mut [usize], sort: SortSpec) {
     let by_album_order = |a: usize, b: usize| {
         keys[a]
-            .album
-            .cmp(&keys[b].album)
+            .album_sort
+            .cmp(&keys[b].album_sort)
             .then_with(|| cmp_opt(&rows[a].disc_no, &rows[b].disc_no))
             .then_with(|| cmp_opt(&rows[a].track_no, &rows[b].track_no))
-            .then_with(|| keys[a].title.cmp(&keys[b].title))
+            .then_with(|| keys[a].title_sort.cmp(&keys[b].title_sort))
     };
     let cmp = |&a: &usize, &b: &usize| -> Ordering {
         let primary = match sort.column {
             SortColumn::Index => a.cmp(&b),
             SortColumn::Title => keys[a]
-                .title
-                .cmp(&keys[b].title)
-                .then_with(|| keys[a].artist.cmp(&keys[b].artist)),
+                .title_sort
+                .cmp(&keys[b].title_sort)
+                .then_with(|| keys[a].artist_sort.cmp(&keys[b].artist_sort)),
             SortColumn::Artist => keys[a]
-                .artist
-                .cmp(&keys[b].artist)
+                .artist_sort
+                .cmp(&keys[b].artist_sort)
                 .then_with(|| by_album_order(a, b)),
             SortColumn::Album => by_album_order(a, b),
             SortColumn::Duration => cmp_opt(&rows[a].duration_ms, &rows[b].duration_ms),
             SortColumn::Year => cmp_opt(&rows[a].year, &rows[b].year).then_with(|| by_album_order(a, b)),
-            SortColumn::Genre => keys[a].genre.cmp(&keys[b].genre).then_with(|| by_album_order(a, b)),
+            SortColumn::Genre => keys[a].genre_sort.cmp(&keys[b].genre_sort).then_with(|| by_album_order(a, b)),
         };
         let primary = primary.then_with(|| a.cmp(&b));
         if sort.descending {
@@ -248,6 +257,16 @@ mod tests {
             titles(filter_and_sort(&r, "", ASC(SortColumn::Title))),
             vec!["Blue Bird", "Lemon", "アイドル", "ｶﾞﾗｽ", "夜に駆ける"]
         );
+        // natural numbers and a leading "The" in text columns
+        let r2 = vec![
+            row("Track 10", "The Weeknd", "A", None, None),
+            row("Track 2", "Vaundy", "A", None, None),
+            row("track 1", "優里", "A", None, None),
+        ];
+        let t2 = filter_and_sort(&r2, "", ASC(SortColumn::Title));
+        assert_eq!(t2, vec![2, 1, 0]);
+        let a2 = filter_and_sort(&r2, "", ASC(SortColumn::Artist));
+        assert_eq!(a2, vec![1, 0, 2], "Vaundy < (The) Weeknd < 優里");
         let d = filter_and_sort(&r, "", SortSpec { column: SortColumn::Duration, descending: false });
         assert_eq!(d, vec![4, 0, 1, 2, 3]); // None last
         let d = filter_and_sort(&r, "", SortSpec { column: SortColumn::Duration, descending: true });

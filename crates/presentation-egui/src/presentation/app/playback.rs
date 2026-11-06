@@ -86,6 +86,12 @@ pub(crate) fn eq_to_dto(eq: &EqSettings) -> EqDto {
     dto
 }
 
+/// The engine's "could not open any output device" error (`EngineEvent::Error` without a
+/// path, emitted once per failure streak together with `DeviceChanged { device: None }`).
+pub(crate) fn is_output_open_error(message: &str) -> bool {
+    message.starts_with("cannot open audio output")
+}
+
 pub(crate) fn map_engine_state(state: EngineState) -> PlaybackState {
     match state {
         EngineState::Stopped => PlaybackState::Stopped,
@@ -202,6 +208,7 @@ impl GuiApp {
             }
         }
         if let Some(device) = &snap.device {
+            self.no_output_device = false;
             self.active_output_device = Some(device.name.clone());
         }
         self.engine_snapshot = Some(snap);
@@ -261,6 +268,18 @@ impl GuiApp {
                     }
                 }
             }
+            EngineEvent::Error { path: None, message } if is_output_open_error(&message) => {
+                // No device (e.g. a machine without audio hardware): a quiet indicator in the
+                // transport bar / Settings instead of an error toast at startup. A toast is
+                // shown only when the user is trying to play.
+                tracing::info!("no audio output: {message}");
+                let was_missing = self.no_output_device;
+                self.no_output_device = true;
+                let trying_to_play = matches!(self.playback_state, PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking);
+                if trying_to_play && !was_missing {
+                    self.warn_if_no_output_device();
+                }
+            }
             EngineEvent::Error { path, message } => {
                 tracing::warn!("audio engine error ({:?}): {}", path, message);
                 let seek_failure = message.starts_with("seek failed");
@@ -295,6 +314,7 @@ impl GuiApp {
                 }
             }
             EngineEvent::DeviceChanged { device } => {
+                self.no_output_device = device.is_none();
                 self.active_output_device = device.map(|d| d.name);
             }
             EngineEvent::StateChanged { state } => {
@@ -390,6 +410,9 @@ impl GuiApp {
             return;
         };
         engine.load(PathBuf::from(&self.play_path), self.play_position_ms, autoplay);
+        if autoplay {
+            self.warn_if_no_output_device();
+        }
         // `load` clears the engine's queued next track.
         self.pending_next = None;
         self.playback_state = if autoplay {
@@ -402,6 +425,15 @@ impl GuiApp {
     // ------------------------------------------------------------------------------------
     // Public control API
     // ------------------------------------------------------------------------------------
+
+    /// The user asked to play while no output device is open: say so once per attempt
+    /// (playback starts by itself when a device appears).
+    fn warn_if_no_output_device(&mut self) {
+        if self.no_output_device {
+            let tr = self.tr();
+            self.toast_warning(tr.t("toast.no_output_device").to_string());
+        }
+    }
 
     /// Play / pause. With nothing loaded, starts the current (or first) queue item.
     pub fn toggle_play_pause(&mut self) {
@@ -435,6 +467,7 @@ impl GuiApp {
                 engine.play();
             }
             self.playback_state = PlaybackState::Playing;
+            self.warn_if_no_output_device();
             return;
         }
         if let Some(target) = self.pending_seek_ms.take() {

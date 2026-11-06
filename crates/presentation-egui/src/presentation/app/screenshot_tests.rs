@@ -385,3 +385,329 @@ fn real_app_empty_library() {
     with_app(&mut h, |a| a.navigate(Page::Folders));
     shoot(&mut h, "folders_empty_dark");
 }
+
+fn click_at(h: &mut H<'_>, pos: egui::Pos2, button: egui::PointerButton) {
+    h.hover_at(pos);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos, button, pressed, modifiers: egui::Modifiers::NONE });
+        h.run_steps(1);
+    }
+}
+
+/// Dialogs, collation / default order, optional columns, links, the queue page, toasts with
+/// actions and the no-device indicator (`APP_SCREENS_DIR` as above).
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn real_app_polish() {
+    for dark in [true, false] {
+        let fx = fixture();
+        let suffix = if dark { "dark" } else { "light" };
+        let mut h = start(&fx, dark, Language::Ja);
+
+        with_app(&mut h, |a| {
+            a.navigate(Page::Library);
+            a.ui.right_panel = None;
+        });
+        shoot(&mut h, &format!("polish_library_default_order_{suffix}"));
+
+        // Hover on the first row's artist link (Dua Lipa).
+        h.hover_at(egui::pos2(775.0, 155.0));
+        shoot(&mut h, &format!("polish_library_artist_link_hover_{suffix}"));
+        h.remove_cursor();
+
+        // Header context menu: optional columns.
+        click_at(&mut h, egui::pos2(420.0, 115.0), egui::PointerButton::Secondary);
+        shoot(&mut h, &format!("polish_library_column_menu_{suffix}"));
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        with_app(&mut h, |a| a.ui.library_columns = vec![crate::presentation::ui::views::Column::Year, crate::presentation::ui::views::Column::Genre]);
+        shoot(&mut h, &format!("polish_library_year_genre_{suffix}"));
+        with_app(&mut h, |a| a.ui.library_columns.clear());
+
+        with_app(&mut h, |a| a.ui.modal = Some(super::Modal::RenamePlaylist { id: "p2".into(), name: "作業用 BGM".into() }));
+        shoot(&mut h, &format!("polish_dialog_rename_{suffix}"));
+        with_app(&mut h, |a| a.ui.modal = Some(super::Modal::DeletePlaylist { id: "p3".into(), name: "Night Drive".into() }));
+        shoot(&mut h, &format!("polish_dialog_delete_{suffix}"));
+        with_app(&mut h, |a| {
+            let name = a.suggest_playlist_name(a.tr().t("playlist.from_queue"));
+            a.ui.modal = Some(super::Modal::CreatePlaylist { name, tracks: a.queue.clone() });
+        });
+        shoot(&mut h, &format!("polish_dialog_save_queue_{suffix}"));
+        with_app(&mut h, |a| a.ui.modal = None);
+
+        with_app(&mut h, |a| a.navigate(Page::Artists));
+        shoot(&mut h, &format!("polish_artists_{suffix}"));
+
+        // Album card: hover the artist link of the first card.
+        with_app(&mut h, |a| a.navigate(Page::Albums));
+        h.run_steps(2);
+        h.hover_at(egui::pos2(270.0, 0.0));
+        h.run_steps(1);
+        h.hover_at(egui::pos2(262.0, 321.0));
+        shoot(&mut h, &format!("polish_album_card_artist_hover_{suffix}"));
+        h.remove_cursor();
+
+        with_app(&mut h, |a| a.navigate(Page::Queue));
+        shoot(&mut h, &format!("polish_queue_page_{suffix}"));
+        h.hover_at(egui::pos2(700.0, 352.0));
+        shoot(&mut h, &format!("polish_queue_page_row_hover_{suffix}"));
+        h.remove_cursor();
+
+        with_app(&mut h, |a| {
+            let tr = a.tr();
+            // Sticky: the harness advances time in large steps.
+            a.ui.toasts.push_with_action(
+                crate::presentation::ui::widgets::ToastKind::Success,
+                tr.f("toast.enqueued_one", &[&"群青"]),
+                f32::INFINITY,
+                tr.t("toast.show_queue"),
+                crate::presentation::ui::UiAction::Navigate(Page::Queue),
+            );
+            a.navigate(Page::Library);
+            a.no_output_device = true;
+        });
+        shoot(&mut h, &format!("polish_toast_action_no_device_{suffix}"));
+        with_app(&mut h, |a| {
+            a.ui.toasts = Default::default();
+            a.no_output_device = false;
+        });
+
+        // Narrower window with the queue panel open.
+        h.set_size(Vec2::new(1000.0, 700.0));
+        with_app(&mut h, |a| {
+            a.ui.right_panel = Some(RightPanel::Queue);
+            a.open_playlist("p2".into());
+        });
+        shoot(&mut h, &format!("polish_playlist_detail_1000_panel_{suffix}"));
+        with_app(&mut h, |a| a.navigate(Page::Artists));
+        shoot(&mut h, &format!("polish_artists_1000_panel_{suffix}"));
+        with_app(&mut h, |a| {
+            let key = a.library.album_key_of(Path::new(&fx.paths[3])).unwrap();
+            a.open_album(key);
+        });
+        shoot(&mut h, &format!("polish_album_detail_1000_panel_{suffix}"));
+        with_app(&mut h, |a| a.navigate(Page::Queue));
+        shoot(&mut h, &format!("polish_queue_page_1000_panel_{suffix}"));
+        with_app(&mut h, |a| {
+            a.ui.right_panel = None;
+            a.ui.album_card_size = 260.0;
+            a.navigate(Page::Albums);
+        });
+        shoot(&mut h, &format!("polish_albums_large_cards_1000_{suffix}"));
+    }
+}
+
+/// Now Playing layouts: wide / stacked by the space the page actually gets (right panel
+/// open or closed), the enlarged artwork overlay, and the sharper texture at 2x.
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn real_app_now_playing_layouts() {
+    let fx = fixture();
+    for dark in [true, false] {
+        let suffix = if dark { "dark" } else { "light" };
+        let mut h = start(&fx, dark, Language::Ja);
+        for (w, ht) in [(1280.0, 800.0), (1000.0, 700.0)] {
+            h.set_size(Vec2::new(w, ht));
+            for (panel, tag) in [(None, ""), (Some(RightPanel::Queue), "_queue"), (Some(RightPanel::Lyrics), "_lyrics")] {
+                if panel == Some(RightPanel::Lyrics) && !dark {
+                    continue;
+                }
+                with_app(&mut h, |a| {
+                    a.navigate(Page::NowPlaying);
+                    a.ui.right_panel = panel;
+                });
+                shoot(&mut h, &format!("np_{w}x{ht}{tag}_{suffix}"));
+                let layout = h.state().as_ref().unwrap().ui.now.layout.expect("layout");
+                // Nothing overlaps: lyrics start right of / below the cover and its labels.
+                if layout.wide {
+                    assert!(layout.lyrics.left() >= layout.art.right() + 40.0);
+                    assert!(layout.lyrics.width() >= 359.0, "{w}x{ht}{tag}: {layout:?}");
+                } else {
+                    assert!(layout.lyrics.top() >= layout.info.bottom() + 20.0, "{w}x{ht}{tag}: {layout:?}");
+                }
+                assert!(layout.lyrics.right() <= layout.inner.right() + 0.5);
+            }
+        }
+        h.set_size(SIZE);
+        with_app(&mut h, |a| {
+            a.ui.right_panel = None;
+            a.ui.now.overlay_open = true;
+        });
+        shoot(&mut h, &format!("np_overlay_{suffix}"));
+        with_app(&mut h, |a| a.ui.now.overlay_open = false);
+        if dark {
+            h.set_size(Vec2::new(1920.0, 1080.0));
+            shoot(&mut h, "np_1920x1080_dark");
+            h.set_size(Vec2::new(860.0, 640.0));
+            with_app(&mut h, |a| a.ui.sidebar.collapsed = true);
+            shoot(&mut h, "np_860x640_collapsed_dark");
+            h.set_size(Vec2::new(640.0, 720.0));
+            shoot(&mut h, "np_640x720_collapsed_dark");
+            with_app(&mut h, |a| a.ui.right_panel = Some(RightPanel::Queue));
+            h.set_size(Vec2::new(900.0, 600.0));
+            shoot(&mut h, "np_900x600_collapsed_queue_dark");
+        }
+    }
+}
+
+/// 2x with a large cover: the enlarged view asks for (and gets) a sharper texture, which is
+/// freed after leaving the page.
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn real_app_now_playing_hires_2x() {
+    let fx = fixture();
+    let folder = Path::new(&fx.paths[0]).parent().unwrap().to_path_buf();
+    save_png(&cover_image(0, 1800), &folder.join("cover.png"));
+    let mut h: H<'_> = Harness::builder()
+        .with_size(SIZE)
+        .with_pixels_per_point(2.0)
+        .with_theme(egui::Theme::Dark)
+        .build_ui_state(
+            |ui, app: &mut Option<GuiApp>| {
+                if let Some(app) = app.as_mut() {
+                    let mut frame = eframe::Frame::_new_kittest();
+                    eframe::App::ui(app, ui, &mut frame);
+                }
+            },
+            None,
+        );
+    let ctx = h.ctx.clone();
+    *h.state_mut() = Some(new_app(&ctx, &fx, true, Language::Ja));
+    pump(&mut h, 20.0, |a| a.ui.fonts_rx.is_none() && a.library.loaded);
+    with_app(&mut h, |a| {
+        stage(a, &fx);
+        a.ui.toasts = Default::default();
+        a.navigate(Page::NowPlaying);
+    });
+    pump(&mut h, 5.0, |a| a.play_artwork_handle.is_some());
+    h.run_steps(2);
+    with_app(&mut h, |a| a.ui.now.overlay_open = true);
+    pump(&mut h, 5.0, |a| a.artwork.hires_texture_size().is_some());
+    shoot(&mut h, "np_overlay_2x_dark");
+    let size = h.state().as_ref().unwrap().artwork.hires_texture_size();
+    assert_eq!(size, Some([1536, 1536]), "sharper cover at 2x");
+    with_app(&mut h, |a| a.navigate(Page::Library));
+    for _ in 0..40 {
+        h.run_steps(1);
+    }
+    assert_eq!(h.state().as_ref().unwrap().artwork.hires_texture_size(), None, "freed after leaving");
+}
+
+/// Responsive layout of Settings / Folders (right panel open and closed, two window sizes,
+/// plus a cramped one) and the EQ popover at normal and narrow widths, dark and light.
+/// Long device / folder names exercise the ellipses.
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn responsive_settings_folders_eq() {
+    let fx = fixture();
+    let long_device = "スピーカー (Realtek(R) High Definition Audio) - Front Left/Right Analog Output #2";
+    let long_dir = fx.db.parent().unwrap().join("music/Very Long Artist Name Collection/Disc 01 (Remastered Deluxe Edition 2024)");
+    for dark in [true, false] {
+        let suffix = if dark { "dark" } else { "light" };
+        let mut h = start(&fx, dark, Language::Ja);
+        with_app(&mut h, |a| {
+            a.preferred_output_device = Some(long_device.into());
+            a.active_output_device = Some(long_device.into());
+            a.device_names = vec![long_device.into(), "Headphones (USB Audio)".into()];
+            a.scan_targets.push(long_dir.to_string_lossy().into_owned());
+            a.scan_lrc_targets.push("/mnt/c/Users/someone/Music/Lyrics/Japanese/Anime Songs/2020-2024".into());
+            a.scan_excludes.push("node_modules".into());
+        });
+        for (w, ht) in [(1280.0, 800.0), (1000.0, 700.0), (860.0, 640.0)] {
+            h.set_size(Vec2::new(w, ht));
+            for (page, name) in [(Page::Settings, "settings"), (Page::Folders, "folders")] {
+                for (panel, pname) in [(None, "nopanel"), (Some(RightPanel::Queue), "panel")] {
+                    if w < 900.0 && panel.is_none() {
+                        continue;
+                    }
+                    with_app(&mut h, |a| {
+                        a.ui.right_panel = panel;
+                        a.navigate(page);
+                    });
+                    shoot(&mut h, &format!("{name}_{w}x{ht}_{pname}_{suffix}"));
+                }
+            }
+        }
+        // Whole pages (lower sections) with the panel open.
+        h.set_size(Vec2::new(1000.0, 2300.0));
+        with_app(&mut h, |a| {
+            a.ui.right_panel = Some(RightPanel::Lyrics);
+            a.navigate(Page::Settings);
+            a.no_output_device = true;
+        });
+        shoot(&mut h, &format!("settings_1000x2300_panel_{suffix}"));
+        h.set_size(Vec2::new(860.0, 1300.0));
+        with_app(&mut h, |a| {
+            a.no_output_device = false;
+            a.navigate(Page::Folders);
+        });
+        shoot(&mut h, &format!("folders_860x1300_panel_{suffix}"));
+
+        // EQ popover: normal, narrow (compressed columns) and very narrow (scrolls).
+        with_app(&mut h, |a| {
+            a.ui.right_panel = None;
+            a.navigate(Page::Library);
+            a.ui.eq_open = true;
+        });
+        for (w, ht, collapsed) in [(1280.0, 800.0, false), (560.0, 700.0, true), (400.0, 640.0, true), (360.0, 640.0, true)] {
+            h.set_size(Vec2::new(w, ht));
+            with_app(&mut h, |a| a.ui.sidebar.collapsed = collapsed);
+            shoot(&mut h, &format!("eq_popover_{w}x{ht}_{suffix}"));
+        }
+    }
+    // English labels are longer.
+    let mut h = start(&fx, true, Language::En);
+    h.set_size(Vec2::new(1000.0, 700.0));
+    with_app(&mut h, |a| {
+        a.ui.right_panel = Some(RightPanel::Queue);
+        a.navigate(Page::Settings);
+    });
+    shoot(&mut h, "settings_en_1000x700_panel_dark");
+    with_app(&mut h, |a| a.navigate(Page::Folders));
+    shoot(&mut h, "folders_en_1000x700_panel_dark");
+    with_app(&mut h, |a| {
+        a.ui.right_panel = None;
+        a.navigate(Page::Library);
+        a.ui.eq_open = true;
+    });
+    h.set_size(Vec2::new(560.0, 700.0));
+    shoot(&mut h, "eq_popover_en_560x700_dark");
+}
+
+/// Minimum window size (and slightly above) with 10 playlists, sidebar expanded and
+/// collapsed: nav, scrolling playlists and the bottom block must not collide.
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn real_app_min_size() {
+    let [min_w, min_h] = crate::presentation::ui::shell::MIN_WINDOW_SIZE;
+    for dark in [true, false] {
+        let fx = fixture();
+        let suffix = if dark { "dark" } else { "light" };
+        let mut h = start(&fx, dark, Language::Ja);
+        with_app(&mut h, |a| {
+            for i in 0..7 {
+                a.playlists.push(PlaylistDto { id: format!("extra{i}"), name: format!("プレイリスト {}", i + 4), tracks: fx.paths[..3].to_vec() });
+            }
+            a.ui.right_panel = None;
+            a.navigate(Page::Library);
+        });
+        for (w, hgt, tag) in [(min_w, min_h, "min"), (min_w + 60.0, min_h + 60.0, "above")] {
+            h.set_size(Vec2::new(w, hgt));
+            for collapsed in [false, true] {
+                with_app(&mut h, |a| a.ui.sidebar.collapsed = collapsed);
+                let side = if collapsed { "collapsed" } else { "expanded" };
+                shoot(&mut h, &format!("minsize_{tag}_{side}_library_{suffix}"));
+            }
+        }
+        // Other pages at the minimum size (expanded sidebar = narrowest central area).
+        h.set_size(Vec2::new(min_w, min_h));
+        with_app(&mut h, |a| a.ui.sidebar.collapsed = false);
+        for (page, name) in [(Page::Queue, "queue"), (Page::Albums, "albums"), (Page::Artists, "artists"), (Page::Playlists, "playlists"), (Page::NowPlaying, "now_playing")] {
+            with_app(&mut h, |a| a.navigate(page));
+            shoot(&mut h, &format!("minsize_min_expanded_{name}_{suffix}"));
+        }
+        with_app(&mut h, |a| a.open_playlist("p2".into()));
+        shoot(&mut h, &format!("minsize_min_expanded_playlist_detail_{suffix}"));
+    }
+}

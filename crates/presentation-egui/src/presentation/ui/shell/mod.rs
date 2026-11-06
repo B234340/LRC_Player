@@ -10,7 +10,23 @@ pub use transport::{transport_bar, TransportProps};
 
 use eframe::egui::{Frame, Margin, Stroke};
 
-use super::theme::{radius, Palette};
+use super::theme::{metrics, radius, Palette};
+
+/// Minimum window width: the collapsed sidebar (64) plus a 576 px central area; the
+/// transport bar keeps its queue / lyrics buttons down to this width.
+pub const MIN_WINDOW_WIDTH: f32 = 640.0;
+
+/// Allowance for a margin egui may put around the root UI (8 px top + bottom).
+const ROOT_MARGIN_Y: f32 = 16.0;
+
+/// Minimum window height: the sidebar's minimum ([`sidebar::SIDEBAR_MIN_HEIGHT`] = brand,
+/// full nav, playlist heading + 2 rows and the settings / toggle block = 524) + the
+/// transport bar (76) + [`ROOT_MARGIN_Y`] (16) = 616. The page header and several table
+/// rows fit in the same height.
+pub const MIN_WINDOW_HEIGHT: f32 = sidebar::SIDEBAR_MIN_HEIGHT + metrics::TRANSPORT_HEIGHT + ROOT_MARGIN_Y;
+
+/// `[width, height]` for `ViewportBuilder::with_min_inner_size`.
+pub const MIN_WINDOW_SIZE: [f32; 2] = [MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT];
 
 /// Frame for the sidebar / transport / right panels (window background, no margin).
 pub fn chrome_frame(p: &Palette) -> Frame {

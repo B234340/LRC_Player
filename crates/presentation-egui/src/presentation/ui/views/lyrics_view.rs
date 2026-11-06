@@ -17,7 +17,7 @@ use crate::presentation::ui::{
     format::format_offset,
     i18n::Tr,
     icons::{icon_button_ex, paint_icon, Icon, IconButtonStyle},
-    theme,
+    text, theme,
     widgets::slider::wheel_notches,
 };
 
@@ -69,7 +69,9 @@ pub struct LyricsViewState {
     manual: f32,
     last_time: Option<f64>,
     last_current: Option<usize>,
-    cache_key: Option<(u64, usize, u32, u32, u32, u8)>,
+    /// (revision, lines, wrap, size, ppp, align, `text::epoch()`): a line's font family is a
+    /// pure function of its text and the epoch.
+    cache_key: Option<(u64, usize, u32, u32, u32, u8, u64)>,
     cache: Vec<LineGalleys>,
     /// Re-requested every frame to detect font-atlas rebuilds (see `lyrics_view`).
     probe: Option<Arc<Galley>>,
@@ -107,8 +109,13 @@ fn line_text(t: &str) -> String {
     }
 }
 
-fn layout_line(ui: &Ui, text: &str, size: f32, wrap: f32, align: Align) -> Arc<Galley> {
-    let mut job = LayoutJob::simple(line_text(text), theme::bold_font(ui.ctx(), size), Color32::PLACEHOLDER, wrap);
+/// Each line is drawn entirely in the font of its own language, decided per line
+/// (`text::lang_in_context`; `context` is the song's dominant language, so an ambiguous
+/// all-kanji line in a Chinese song stays Chinese), so a line never mixes glyph forms.
+fn layout_line(ui: &Ui, text: &str, context: text::TextLang, size: f32, wrap: f32, align: Align) -> Arc<Galley> {
+    let shown = line_text(text);
+    let font = FontId::new(size, text::family_in_context(&shown, context, true));
+    let mut job = LayoutJob::simple(shown, font, Color32::PLACEHOLDER, wrap);
     job.halign = align;
     // A little extra line spacing for wrapped rows.
     if let Some(s) = job.sections.first_mut() {
@@ -156,22 +163,24 @@ pub fn lyrics_view(ui: &mut Ui, props: &LyricsProps<'_>, state: &mut LyricsViewS
         big_size.to_bits(),
         ui.ctx().pixels_per_point().to_bits(),
         align_code,
+        text::epoch(),
     );
     // Cached galleys hold UVs into the font atlas. egui rebuilds the atlas (and clears its own
     // galley cache) when fonts change or the atlas fills up; detect that with a tiny probe
     // galley requested every frame: egui hands back the same Arc while its cache is intact.
-    let probe = layout_line(ui, "♪", small_size, wrap, props.align);
+    let probe = layout_line(ui, "♪", text::TextLang::Latin, small_size, wrap, props.align);
     if state.probe.as_ref().is_none_or(|p| !Arc::ptr_eq(p, &probe)) {
         state.cache_key = None;
     }
     state.probe = Some(probe);
     if state.cache_key != Some(key) {
+        let context = text::dominant_lang(props.lines.iter().map(|l| l.text));
         state.cache = props
             .lines
             .iter()
             .map(|l| LineGalleys {
-                small: layout_line(ui, l.text, small_size, wrap, props.align),
-                big: layout_line(ui, l.text, big_size, wrap, props.align),
+                small: layout_line(ui, l.text, context, small_size, wrap, props.align),
+                big: layout_line(ui, l.text, context, big_size, wrap, props.align),
             })
             .collect();
         state.cache_key = Some(key);
@@ -226,8 +235,11 @@ pub fn lyrics_view(ui: &mut Ui, props: &LyricsProps<'_>, state: &mut LyricsViewS
     }
 
     // ---- paint lines ----
-    let painter = ui.painter_at(area);
-    let fade = 56.0f32.min(area.height() * 0.2);
+    // Lines live in `lines_rect` (a little above the controls' separator) and fade out by their
+    // far edge, so no line is ever cut hard at the top or by the controls bar.
+    let lines_rect = Rect::from_min_max(area.min, pos2(area.right(), area.bottom() - if props.show_controls { 6.0 } else { 0.0 }));
+    let painter = ui.painter_at(lines_rect);
+    let fade = 48.0f32.min(lines_rect.height() * 0.2).max(1.0);
     for (i, g) in state.cache.iter().enumerate() {
         let is_cur = Some(i) == current;
         let galley = if is_cur { &g.big } else { &g.small };
@@ -239,12 +251,12 @@ pub fn lyrics_view(ui: &mut Ui, props: &LyricsProps<'_>, state: &mut LyricsViewS
         };
         let pos = pos2(anchor_x, top);
         let rect = galley.rect.translate(pos.to_vec2());
-        if rect.bottom() < area.top() || rect.top() > area.bottom() {
+        // edge fade: fully transparent once the line's far edge reaches the boundary
+        let edge = (rect.top() - lines_rect.top()).min(lines_rect.bottom() - rect.bottom());
+        let edge_a = (edge / fade).clamp(0.0, 1.0);
+        if edge_a <= 0.0 {
             continue;
         }
-        // edge fade
-        let edge = (rect.center().y - area.top()).min(area.bottom() - rect.center().y);
-        let edge_a = (edge / fade).clamp(0.0, 1.0);
 
         let hit = rect.expand2(vec2(10.0, gap * 0.4));
         let resp = ui

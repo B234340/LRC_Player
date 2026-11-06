@@ -19,7 +19,8 @@ use crate::presentation::ui::{
     views::{
         eq_panel, lyrics_view, queue_panel, EqPanelProps, LyricsProps, QueueItem, QueueProps, TrackRow,
     },
-    widgets::{button, empty_state, ButtonKind, Tex},
+    format::format_count,
+    widgets::{button, dialog, dialog_error, dialog_text, dialog_text_field, empty_state, ButtonKind, DialogButton, DialogResult, DialogSpec, Tex},
     Icon, Page, RepeatMode, RightPanel, UiAction,
 };
 
@@ -28,7 +29,7 @@ use crate::presentation::ui::{
 pub(crate) struct QueueRowsCache {
     paths: Vec<String>,
     library_revision: u64,
-    rows: Vec<TrackRow>,
+    pub(crate) rows: Vec<TrackRow>,
 }
 
 /// Sidebar / context-menu playlist entries (names localized).
@@ -60,7 +61,7 @@ impl GuiApp {
             .unwrap_or_else(|| file_title(&self.play_path))
     }
 
-    fn refresh_queue_rows(&mut self) {
+    pub(crate) fn refresh_queue_rows(&mut self) {
         let cache = &self.queue_rows;
         if cache.paths == self.queue && cache.library_revision == self.library.revision {
             return;
@@ -113,6 +114,8 @@ impl GuiApp {
                         right_panel: self.ui.right_panel,
                         eq_open: self.ui.eq_open,
                         eq_enabled: self.eq.enabled,
+                        queue_len: self.queue.len(),
+                        no_output: self.no_output_device,
                         tr,
                     },
                 ));
@@ -174,7 +177,7 @@ impl GuiApp {
             actions.extend(self.eq_popover(&ctx, tr));
         }
         actions.extend(self.dialogs_ui(&ctx, tr));
-        self.ui.toasts.show(&ctx, shell::transport::HEIGHT + 8.0, &tr);
+        actions.extend(self.ui.toasts.show(&ctx, shell::transport::HEIGHT + 8.0, &tr));
         if let Some(a) = shell::file_drop(&ctx, &tr) {
             actions.push(a);
         }
@@ -184,22 +187,14 @@ impl GuiApp {
     }
 
     fn queue_panel_ui(&mut self, ui: &mut egui::Ui, tr: Tr) -> Vec<UiAction> {
-        // Thumbnails only around the current entry (the loader keeps a bounded backlog).
-        let cur = self.current_queue_index.unwrap_or(0);
-        let lo = cur.saturating_sub(10);
-        let hi = (cur + 60).min(self.queue_rows.rows.len());
-        let arts: Vec<Option<Tex>> = (0..self.queue_rows.rows.len())
-            .map(|i| {
-                if (lo..hi).contains(&i) || i < 30 {
-                    let path = self.queue_rows.rows[i].path.to_string_lossy();
-                    self.artwork.track_thumbnail(&path, super::ArtworkMode::FileFirst).as_ref().map(Tex::from)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let items: Vec<QueueItem> = self
-            .queue_rows
+        let arts = self.queue_arts();
+        let items: Vec<QueueItem> = self.queue_items(arts);
+        queue_panel(ui, &QueueProps { items: &items, current: self.current_queue_index, playing: self.is_playing(), tr })
+    }
+
+    /// Queue rows as panel / page items (call [`Self::refresh_queue_rows`] first).
+    pub(crate) fn queue_items(&self, arts: Vec<Option<Tex>>) -> Vec<QueueItem<'_>> {
+        self.queue_rows
             .rows
             .iter()
             .zip(arts)
@@ -210,8 +205,25 @@ impl GuiApp {
                 artwork,
                 seed: if r.album.is_empty() { &r.title } else { &r.album },
             })
-            .collect();
-        queue_panel(ui, &QueueProps { items: &items, current: self.current_queue_index, playing: self.is_playing(), tr })
+            .collect()
+    }
+
+    /// Thumbnails for the queue rows, only around the current entry (the loader keeps a
+    /// bounded backlog).
+    pub(crate) fn queue_arts(&mut self) -> Vec<Option<Tex>> {
+        let cur = self.current_queue_index.unwrap_or(0);
+        let lo = cur.saturating_sub(10);
+        let hi = (cur + 60).min(self.queue_rows.rows.len());
+        (0..self.queue_rows.rows.len())
+            .map(|i| {
+                if (lo..hi).contains(&i) || i < 30 {
+                    let path = self.queue_rows.rows[i].path.to_string_lossy();
+                    self.artwork.track_thumbnail(&path, super::ArtworkMode::FileFirst).as_ref().map(Tex::from)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn side_lyrics_ui(&mut self, ui: &mut egui::Ui, tr: Tr) -> Vec<UiAction> {
@@ -260,6 +272,8 @@ impl GuiApp {
                         actions.extend(eq_panel(ui, &EqPanelProps { settings: self.eq, tr }));
                         ui.add_space(6.0);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Same 8 px inset as the EQ panel's own content.
+                            ui.add_space(8.0);
                             if button(ui, ButtonKind::Ghost, None, tr.t("dialog.close")).clicked() {
                                 close = true;
                             }
@@ -275,113 +289,117 @@ impl GuiApp {
     fn dialogs_ui(&mut self, ctx: &egui::Context, tr: Tr) -> Vec<UiAction> {
         let mut actions = Vec::new();
         if let Some(modal) = self.ui.modal.clone() {
+            // One id per dialog kind, so switching dialogs counts as opening a new one.
+            let id = Id::new(("app_modal", std::mem::discriminant(&modal)));
             let mut next: Option<Option<Modal>> = None;
-            let resp = egui::Modal::new(Id::new("app_modal")).show(ctx, |ui| {
-                let pal = theme::palette(ui);
-                ui.set_width(380.0);
-                match modal {
-                    Modal::CreatePlaylist { mut name, tracks } => {
-                        ui.label(theme::title(ui, tr.t("playlist.new")).color(pal.text));
-                        ui.add_space(10.0);
-                        let edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
-                        if !edit.has_focus() && !edit.lost_focus() {
-                            edit.request_focus();
+            match modal {
+                Modal::CreatePlaylist { mut name, tracks } => {
+                    let from_queue = !tracks.is_empty();
+                    let title = if from_queue { tr.t("queue.save_as_playlist") } else { tr.t("playlist.new") };
+                    let spec = DialogSpec {
+                        id,
+                        title,
+                        width: 400.0,
+                        confirm: DialogButton::primary(tr.t("playlist.create")),
+                        cancel: Some(tr.t("dialog.cancel")),
+                        extra: None,
+                    };
+                    let playlists = &self.playlists;
+                    let mut valid = false;
+                    let result = dialog(ctx, &spec, |ui, opened| {
+                        if from_queue {
+                            dialog_text(ui, &tr.f("playlist.from_queue_body", &[&format_count(tracks.len())]));
                         }
-                        let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let err = playlists::validate_name(&self.playlists, &name, None).err();
+                        dialog_text_field(ui, &mut name, opened, tr.t("playlist.name_hint"));
+                        let err = playlists::validate_name(playlists, &name, None).err();
                         if let Some(e) = err.filter(|e| *e != playlists::NameError::Empty) {
-                            ui.label(egui::RichText::new(tr.t(e.key())).color(pal.danger).size(12.0));
+                            dialog_error(ui, tr.t(e.key()));
                         }
-                        ui.add_space(12.0);
-                        let mut create = enter;
-                        ui.horizontal(|ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.add_enabled_ui(err.is_none(), |ui| {
-                                    create |= button(ui, ButtonKind::Primary, None, tr.t("playlist.create")).clicked();
-                                });
-                                if button(ui, ButtonKind::Ghost, None, tr.t("dialog.cancel")).clicked() {
-                                    next = Some(None);
-                                }
-                            });
-                        });
-                        if create && err.is_none() {
+                        valid = err.is_none();
+                        valid
+                    });
+                    match result {
+                        DialogResult::Confirm if valid => {
                             if let Ok(id) = self.create_playlist(&name, tracks.clone()) {
                                 actions.push(UiAction::OpenPlaylist(id));
                             }
                             next = Some(None);
-                        } else if next.is_none() {
-                            next = Some(Some(Modal::CreatePlaylist { name, tracks }));
                         }
-                    }
-                    Modal::RenamePlaylist { id, mut name } => {
-                        ui.label(theme::title(ui, tr.t("playlist.rename")).color(pal.text));
-                        ui.add_space(10.0);
-                        let edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
-                        if !edit.has_focus() && !edit.lost_focus() {
-                            edit.request_focus();
-                        }
-                        let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let err = playlists::validate_name(&self.playlists, &name, Some(&id)).err();
-                        if let Some(e) = err.filter(|e| *e != playlists::NameError::Empty) {
-                            ui.label(egui::RichText::new(tr.t(e.key())).color(pal.danger).size(12.0));
-                        }
-                        ui.add_space(12.0);
-                        let mut ok = enter;
-                        ui.horizontal(|ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.add_enabled_ui(err.is_none(), |ui| {
-                                    ok |= button(ui, ButtonKind::Primary, None, tr.t("playlist.rename_ok")).clicked();
-                                });
-                                if button(ui, ButtonKind::Ghost, None, tr.t("dialog.cancel")).clicked() {
-                                    next = Some(None);
-                                }
-                            });
-                        });
-                        if ok && err.is_none() {
-                            let _ = self.rename_playlist(&id, &name);
-                            next = Some(None);
-                        } else if next.is_none() {
-                            next = Some(Some(Modal::RenamePlaylist { id, name }));
-                        }
-                    }
-                    Modal::ClearLibrary => {
-                        ui.label(theme::title(ui, tr.t("folders.clear_library")).color(pal.text));
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new(tr.t("folders.clear_confirm")).color(pal.text_muted));
-                        ui.add_space(14.0);
-                        ui.horizontal(|ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if button(ui, ButtonKind::Danger, Some(Icon::Trash), tr.t("folders.clear")).clicked() {
-                                    self.clear_library();
-                                    next = Some(None);
-                                }
-                                if button(ui, ButtonKind::Ghost, None, tr.t("dialog.cancel")).clicked() {
-                                    next = Some(None);
-                                }
-                            });
-                        });
-                    }
-                    Modal::DeletePlaylist { id, name } => {
-                        ui.label(theme::title(ui, tr.t("playlist.delete_title")).color(pal.text));
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new(format!("「{name}」{}", tr.t("playlist.delete_body"))).color(pal.text_muted));
-                        ui.add_space(14.0);
-                        ui.horizontal(|ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if button(ui, ButtonKind::Danger, Some(Icon::Trash), tr.t("playlist.delete")).clicked() {
-                                    self.delete_playlist(&id);
-                                    next = Some(None);
-                                }
-                                if button(ui, ButtonKind::Ghost, None, tr.t("dialog.cancel")).clicked() {
-                                    next = Some(None);
-                                }
-                            });
-                        });
+                        DialogResult::Cancel => next = Some(None),
+                        _ => next = Some(Some(Modal::CreatePlaylist { name, tracks })),
                     }
                 }
-            });
-            if resp.should_close() {
-                next = Some(None);
+                Modal::RenamePlaylist { id: pid, mut name } => {
+                    let spec = DialogSpec {
+                        id,
+                        title: tr.t("playlist.rename"),
+                        width: 400.0,
+                        confirm: DialogButton::primary(tr.t("playlist.rename_ok")),
+                        cancel: Some(tr.t("dialog.cancel")),
+                        extra: None,
+                    };
+                    let playlists = &self.playlists;
+                    let mut valid = false;
+                    let result = dialog(ctx, &spec, |ui, opened| {
+                        dialog_text_field(ui, &mut name, opened, tr.t("playlist.name_hint"));
+                        let err = playlists::validate_name(playlists, &name, Some(&pid)).err();
+                        if let Some(e) = err.filter(|e| *e != playlists::NameError::Empty) {
+                            dialog_error(ui, tr.t(e.key()));
+                        }
+                        valid = err.is_none();
+                        valid
+                    });
+                    match result {
+                        DialogResult::Confirm if valid => {
+                            let _ = self.rename_playlist(&pid, &name);
+                            next = Some(None);
+                        }
+                        DialogResult::Cancel => next = Some(None),
+                        _ => next = Some(Some(Modal::RenamePlaylist { id: pid, name })),
+                    }
+                }
+                Modal::ClearLibrary => {
+                    let spec = DialogSpec {
+                        id,
+                        title: tr.t("folders.clear_library"),
+                        width: 420.0,
+                        confirm: DialogButton::danger(tr.t("folders.clear")),
+                        cancel: Some(tr.t("dialog.cancel")),
+                        extra: None,
+                    };
+                    match dialog(ctx, &spec, |ui, _| {
+                        dialog_text(ui, tr.t("folders.clear_confirm"));
+                        true
+                    }) {
+                        DialogResult::Confirm => {
+                            self.clear_library();
+                            next = Some(None);
+                        }
+                        DialogResult::Cancel => next = Some(None),
+                        _ => {}
+                    }
+                }
+                Modal::DeletePlaylist { id: pid, name } => {
+                    let spec = DialogSpec {
+                        id,
+                        title: tr.t("playlist.delete_title"),
+                        width: 420.0,
+                        confirm: DialogButton::danger(tr.t("playlist.delete")),
+                        cancel: Some(tr.t("dialog.cancel")),
+                        extra: None,
+                    };
+                    match dialog(ctx, &spec, |ui, _| {
+                        dialog_text(ui, &tr.f("playlist.delete_body", &[&name]));
+                        true
+                    }) {
+                        DialogResult::Confirm => {
+                            self.delete_playlist(&pid);
+                            next = Some(None);
+                        }
+                        DialogResult::Cancel => next = Some(None),
+                        _ => {}
+                    }
+                }
             }
             if let Some(n) = next {
                 self.ui.modal = n;
@@ -390,12 +408,16 @@ impl GuiApp {
 
         if let Some(details) = self.ui.details.clone() {
             let row = self.library.display_row(&details.path);
-            let mut close = false;
-            let resp = egui::Modal::new(Id::new("details_modal")).show(ctx, |ui| {
+            let spec = DialogSpec {
+                id: Id::new("details_modal"),
+                title: tr.t("details.title"),
+                width: 480.0,
+                confirm: DialogButton::primary(tr.t("dialog.close")),
+                cancel: None,
+                extra: Some(DialogButton::secondary(Some(Icon::Folder), tr.t("menu.open_folder"))),
+            };
+            let result = dialog(ctx, &spec, |ui, _| {
                 let pal = theme::palette(ui);
-                ui.set_width(460.0);
-                ui.label(theme::title(ui, tr.t("details.title")).color(pal.text));
-                ui.add_space(10.0);
                 let none = "—".to_string();
                 let fields: [(&str, String); 8] = [
                     (tr.t("table.title"), row.title.clone()),
@@ -414,20 +436,12 @@ impl GuiApp {
                         ui.end_row();
                     }
                 });
-                ui.add_space(14.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if button(ui, ButtonKind::Primary, None, tr.t("dialog.close")).clicked() {
-                            close = true;
-                        }
-                        if button(ui, ButtonKind::Secondary, Some(Icon::Folder), tr.t("menu.open_folder")).clicked() {
-                            actions.push(UiAction::OpenContainingFolder(Path::new(&details.path).to_path_buf()));
-                        }
-                    });
-                });
+                true
             });
-            if close || resp.should_close() {
-                self.ui.details = None;
+            match result {
+                DialogResult::Extra => actions.push(UiAction::OpenContainingFolder(Path::new(&details.path).to_path_buf())),
+                DialogResult::Confirm | DialogResult::Cancel => self.ui.details = None,
+                DialogResult::Open => {}
             }
         }
         actions

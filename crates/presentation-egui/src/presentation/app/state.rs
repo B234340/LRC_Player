@@ -25,8 +25,9 @@ use crate::presentation::app::{
     library_index::LibraryIndex, media_controls::MediaControlsBridge, playlists, scan_status,
     spectrum::FftAnalyzer, track_info, ArtworkLoader, GuiApp, UiShell,
 };
+use crate::presentation::ui::views::album_grid::{ALBUM_CARD_DEFAULT, ALBUM_CARD_MAX, ALBUM_CARD_MIN};
 use crate::presentation::ui::{
-    shell::SidebarState, views::NowPlayingState, widgets::Toasts, Accent, Page, RightPanel, ThemeMode,
+    shell::SidebarState, views::{Column, NowPlayingState}, widgets::Toasts, Accent, Page, RightPanel, ThemeMode,
 };
 
 /// How a [`GuiApp`] is built. [`AppOptions::default`] is the real application.
@@ -89,6 +90,7 @@ fn page_key(page: Page) -> &'static str {
         Page::Artists => "artists",
         Page::Playlists => "playlists",
         Page::Folders => "folders",
+        Page::Queue => "queue",
         Page::Settings => "settings",
     }
 }
@@ -102,9 +104,27 @@ pub(crate) fn page_from_key(key: &str) -> Option<Page> {
         "artists" | "Artists" => Page::Artists,
         "playlists" | "Playlists" => Page::Playlists,
         "folders" | "Scan" => Page::Folders,
+        "queue" => Page::Queue,
         "settings" | "Settings" => Page::Settings,
         _ => return None,
     })
+}
+
+/// Optional library columns and their persisted keys.
+fn column_key(c: Column) -> Option<&'static str> {
+    match c {
+        Column::Year => Some("year"),
+        Column::Genre => Some("genre"),
+        _ => None,
+    }
+}
+
+fn column_from_key(key: &str) -> Option<Column> {
+    match key {
+        "year" => Some(Column::Year),
+        "genre" => Some(Column::Genre),
+        _ => None,
+    }
 }
 
 fn right_panel_key(panel: Option<RightPanel>) -> Option<String> {
@@ -125,7 +145,13 @@ fn right_panel_from_key(key: Option<&str>) -> Option<RightPanel> {
 /// Saved window geometry for the native options (`apps/gui`): `None` on first start.
 pub fn initial_window() -> Option<WindowStateDto> {
     let state = StateFile::open().and_then(|f| f.load()).ok()?;
-    state.window.filter(|w| w.width >= 200.0 && w.height >= 150.0)
+    let [min_w, min_h] = crate::presentation::ui::shell::MIN_WINDOW_SIZE;
+    state.window.filter(|w| w.width >= 200.0 && w.height >= 150.0).map(|mut w| {
+        // Never restore below the minimum size (older versions allowed smaller windows).
+        w.width = w.width.max(min_w);
+        w.height = w.height.max(min_h);
+        w
+    })
 }
 
 impl GuiApp {
@@ -222,6 +248,7 @@ impl GuiApp {
             engine,
             engine_snapshot: None,
             device_names,
+            no_output_device: false,
             preferred_output_device: cfg.preferred_output_device.clone(),
             active_output_device: None,
 
@@ -289,6 +316,9 @@ impl GuiApp {
                 toasts: Toasts::new(),
                 library_table: Default::default(),
                 library_query: String::new(),
+                library_columns: state.library_columns.iter().filter_map(|k| column_from_key(k)).collect(),
+                history: Vec::new(),
+                album_card_size: state.album_card_size.filter(|s| s.is_finite()).unwrap_or(ALBUM_CARD_DEFAULT).clamp(ALBUM_CARD_MIN, ALBUM_CARD_MAX),
                 detail_table: Default::default(),
                 detail_query: String::new(),
                 artist_query: String::new(),
@@ -356,6 +386,8 @@ impl GuiApp {
             right_panel: right_panel_key(self.ui.right_panel),
             sidebar_collapsed: self.ui.sidebar.collapsed,
             window: self.ui.window,
+            library_columns: self.ui.library_columns.iter().filter_map(|c| column_key(*c)).map(str::to_string).collect(),
+            album_card_size: Some(self.ui.album_card_size),
         }
     }
 

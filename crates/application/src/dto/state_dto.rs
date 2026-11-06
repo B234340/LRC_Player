@@ -188,6 +188,12 @@ pub struct StateDto {
     pub sidebar_collapsed: bool,
     #[serde(default)]
     pub window: Option<WindowStateDto>,
+    /// Optional library table columns that are shown (`"year"`, `"genre"`).
+    #[serde(default)]
+    pub library_columns: Vec<String>,
+    /// Album grid card width in logical px (`None` = default).
+    #[serde(default)]
+    pub album_card_size: Option<f32>,
 }
 
 impl Default for StateDto {
@@ -221,6 +227,8 @@ impl Default for StateDto {
             right_panel: None,
             sidebar_collapsed: false,
             window: None,
+            library_columns: Vec::new(),
+            album_card_size: None,
         }
     }
 }

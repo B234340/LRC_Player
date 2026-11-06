@@ -5,12 +5,14 @@
 //! optional mutable UI-state struct and return [`UiAction`]s. Nothing depends on `GuiApp`.
 
 pub mod actions;
+pub mod collate;
 pub mod fonts;
 pub mod format;
 pub mod i18n;
 pub mod icons;
 pub mod shell;
 pub mod shortcuts;
+pub mod text;
 pub mod theme;
 pub mod views;
 pub mod widgets;

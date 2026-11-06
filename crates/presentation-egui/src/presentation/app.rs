@@ -66,7 +66,7 @@ pub(crate) use artwork_loader::ArtworkLoader;
 
 use crate::presentation::ui::{
     shell::SidebarState,
-    views::{LyricsViewState, NowPlayingState, TrackTableState},
+    views::{Column, LyricsViewState, NowPlayingState, TrackTableState},
     widgets::Toasts,
     Accent, Lang, Page, RightPanel, ThemeMode, Tr,
 };
@@ -91,6 +91,15 @@ pub(crate) enum Modal {
     ClearLibrary,
 }
 
+/// A place in the app (page + detail view), for "Back".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NavLocation {
+    pub(crate) page: Page,
+    pub(crate) album: Option<String>,
+    pub(crate) artist: Option<String>,
+    pub(crate) playlist: Option<String>,
+}
+
 /// The "Details" dialog for one track.
 #[derive(Debug, Clone)]
 pub(crate) struct DetailsDialog {
@@ -109,6 +118,12 @@ pub(crate) struct UiShell {
     pub(crate) toasts: Toasts,
     pub(crate) library_table: TrackTableState,
     pub(crate) library_query: String,
+    /// Optional library columns that are shown (Year / Genre; persisted).
+    pub(crate) library_columns: Vec<Column>,
+    /// Previous locations (most recent last) for "Back".
+    pub(crate) history: Vec<NavLocation>,
+    /// Album grid card width (px, persisted).
+    pub(crate) album_card_size: f32,
     /// Table of the album / artist / playlist detail page (reset on navigation).
     pub(crate) detail_table: TrackTableState,
     pub(crate) detail_query: String,
@@ -142,6 +157,9 @@ pub struct GuiApp {
     pub(crate) engine_snapshot: Option<EngineSnapshot>,
     /// Output device names for the device combo (refreshed on demand).
     pub(crate) device_names: Vec<String>,
+    /// The engine could not open any audio output (no device). Shown as a quiet indicator;
+    /// cleared when `DeviceChanged` reports a device.
+    pub(crate) no_output_device: bool,
     /// Configured output device; `None` follows the system default.
     pub(crate) preferred_output_device: Option<String>,
     /// Device the engine currently renders to (from `DeviceChanged`).
