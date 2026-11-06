@@ -9,13 +9,75 @@ use super::priority;
 use super::renderer::Renderer;
 use super::DeviceInfo;
 
+/// cpal's default host is ALSA on these targets. ALSA's "default device" is the constant
+/// `default` PCM (the sound server, if any, follows the system default by itself), so polling
+/// it for changes is pointless, and probing devices means opening PCMs, which is expensive
+/// (config re-evaluation, sound-server connections, stderr noise on failure).
+pub(crate) const ALSA_HOST: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd"
+));
+
 /// Names of all output devices of the default host.
+///
+/// On ALSA the names come from the ALSA name hints (playback-capable PCMs), which needs no
+/// PCM to be opened; cpal's enumeration would open every PCM of the system, twice.
 pub(crate) fn output_device_names() -> Vec<String> {
-    let host = cpal::default_host();
-    match host.output_devices() {
-        Ok(devs) => devs.filter_map(|d| d.name().ok()).collect(),
-        Err(_) => Vec::new(),
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    {
+        alsa_hint_names()
     }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )))]
+    {
+        let host = cpal::default_host();
+        match host.output_devices() {
+            Ok(devs) => devs.filter_map(|d| d.name().ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// Playback-capable PCM names from the ALSA configuration/card hints (the same names cpal
+/// reports, minus `null`), without opening any PCM.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+fn alsa_hint_names() -> Vec<String> {
+    let Ok(hints) = alsa::device_name::HintIter::new_str(None, "pcm") else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    for hint in hints {
+        let Some(name) = hint.name else { continue };
+        if name == "null" || hint.direction == Some(alsa::Direction::Capture) {
+            continue;
+        }
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Whether `name` is currently a known output device (cheap on every host: on ALSA it reads
+/// name hints only).
+pub(crate) fn output_device_exists(name: &str) -> bool {
+    output_device_names().iter().any(|n| n == name)
 }
 
 /// Name of the current system default output device.
@@ -160,10 +222,15 @@ pub(crate) fn open_cpal(
     let mut fell_back = false;
     let device = match preferred {
         Some(name) => {
-            let found = host
-                .output_devices()
-                .ok()
-                .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == name).unwrap_or(false)));
+            // cpal's ALSA enumeration opens PCMs one by one until the name matches: skip it
+            // when the name hints already say the device is not there.
+            let found = if ALSA_HOST && !output_device_exists(name) {
+                None
+            } else {
+                host.output_devices().ok().and_then(|mut devs| {
+                    devs.find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                })
+            };
             match found {
                 Some(d) => Some(d),
                 None => {

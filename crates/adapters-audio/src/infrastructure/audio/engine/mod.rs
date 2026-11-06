@@ -22,6 +22,7 @@
 
 pub(crate) mod channel_map;
 mod convert;
+mod device_watch;
 mod dsp;
 mod engine_thread;
 mod output;
@@ -76,7 +77,16 @@ pub struct EngineConfig {
     pub resampler: ResamplerKind,
     /// Initial linear volume (0..=2; >1 is gain with soft limiting).
     pub volume: f32,
-    /// How often the engine thread checks for default-device changes / device reappearance.
+    /// Base interval of the engine thread's device probes:
+    /// - no device open: retries back off from this interval, doubling up to 30 s
+    ///   (load/play restart the backoff);
+    /// - WASAPI/CoreAudio: default-device changes (when following the default) and the
+    ///   return of a missing preferred device are checked at this interval;
+    /// - ALSA (Linux/BSD): the default device is never polled (it is the constant `default`
+    ///   PCM, which the sound server reroutes itself); a missing preferred device is looked
+    ///   for every `max(device_poll_ms, 10 s)` using name hints only.
+    ///
+    /// Stream errors and stalls trigger reopening regardless of this interval.
     pub device_poll_ms: u32,
 }
 
@@ -200,7 +210,8 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     /// Spawns the engine thread and opens the output. A missing device is not an error: an
-    /// `Error`/`DeviceChanged{None}` event is emitted and the engine retries periodically.
+    /// `Error`/`DeviceChanged{None}` event is emitted and the engine retries with backoff
+    /// (see [`EngineConfig::device_poll_ms`]).
     pub fn new(cfg: EngineConfig) -> Result<Self> {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let (ev_tx, events_rx) = crossbeam_channel::unbounded();
