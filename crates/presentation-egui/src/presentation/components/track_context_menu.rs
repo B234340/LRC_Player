@@ -40,15 +40,15 @@ where
     // --- 基本再生操作 ---
     if ui.button("Play now").clicked() {
         outcome.play_now_path = Some(track_path.to_string());
-        ui.close_menu(); // アクション実行後はメニューを閉じる
+        ui.close(); // アクション実行後はメニューを閉じる
     }
     if ui.button("Play next").clicked() {
         outcome.next_path = Some(track_path.to_string());
-        ui.close_menu();
+        ui.close();
     }
     if ui.button(enqueue_label).clicked() {
         outcome.enqueue_path = Some(track_path.to_string());
-        ui.close_menu();
+        ui.close();
     }
 
     ui.separator(); // 区切り線
@@ -59,7 +59,7 @@ where
         if ui.button(target_name).clicked() {
             // 選択されたプレイリストのインデックスとトラックパスを結果に格納
             outcome.add_to_playlist = Some((*target_index, track_path.to_string()));
-            ui.close_menu();
+            ui.close();
         }
     }
 
@@ -71,7 +71,7 @@ where
     // --- 共通メニュー項目 ---
     if ui.button("Show details").clicked() {
         outcome.show_details_path = Some(track_path.to_string());
-        ui.close_menu();
+        ui.close();
     }
 
     // クリックされたアクションの情報を返却

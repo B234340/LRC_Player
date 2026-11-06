@@ -264,7 +264,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 } else {
                     outcome.remove_indices = Some(vec![index]);
                 }
-                ui.close_menu();
+                ui.close();
             }
         },
     );

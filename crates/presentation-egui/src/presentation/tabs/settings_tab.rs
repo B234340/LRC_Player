@@ -21,7 +21,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
     ui.separator();
     ui.label(translate("theme", app.language));
-    egui::ComboBox::from_id_source("theme_combo")
+    egui::ComboBox::from_id_salt("theme_combo")
         .selected_text(match app.theme {
             Theme::System => translate("theme_system", app.language),
             Theme::Light => translate("theme_light", app.language),
@@ -40,7 +40,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
     ui.separator();
     ui.label(translate("log_level", app.language));
-    egui::ComboBox::from_id_source("log_level_combo")
+    egui::ComboBox::from_id_salt("log_level_combo")
         .selected_text(match app.log_level {
             LogLevel::Error => translate("log_level_error", app.language),
             LogLevel::Warn => translate("log_level_warn", app.language),

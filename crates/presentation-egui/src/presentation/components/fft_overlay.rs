@@ -373,7 +373,7 @@ pub fn render_fft_overlay(
 	let peak_color = egui::Color32::from_rgba_unmultiplied(255, 70, 70, 180);
 	let display_max_hz = data.max_freq_hz.min(FFT_MAX_FREQ_HZ as f32);
 
-	painter.rect_stroke(plot, 0.0, egui::Stroke::new(1.0, axis_color));
+	painter.rect_stroke(plot, 0.0, egui::Stroke::new(1.0, axis_color), egui::StrokeKind::Middle);
 
 	for db in (-60..=0).step_by(10) {
 		let y = map_db_to_y(plot, db as f32);

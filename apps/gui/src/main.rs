@@ -161,7 +161,7 @@ fn main() -> Result<()> {
     let _ = eframe::run_native(
         "LRC Player GUI",
         options,
-        Box::new(|cc| Box::new(lrc_player::presentation::app::GuiApp::new(cc))),
+        Box::new(|cc| Ok(Box::new(lrc_player::presentation::app::GuiApp::new(cc)))),
     );
 
     Ok(())

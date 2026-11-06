@@ -24,13 +24,19 @@ ringbuf = "0.2"
 crossbeam-channel = "0.5"
 directories = "4"
 image = "0.24"
-eframe = "0.22"
+eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 fontdb = "0.10"
 rustfft = "6.2"
 lrc_player_domain = { path = "../domain" }
 lrc_player_ports = { path = "../ports" }
 lrc_player_application = { path = "../application" }
 lrc_player_shared = { path = "../../shared/contracts" }
+
+# eframe's `winit/default` feature (enabled only by eframe's default features, which we turn off to
+# keep the glow renderer instead of wgpu) is what provides runtime-loaded Wayland and client-side
+# window decorations. Re-enable those winit features directly so Linux behaves as with eframe 0.22.
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["wayland-dlopen", "wayland-csd-adwaita"] }
 
 [target.'cfg(windows)'.dependencies.winapi]
 version = "0.3.9"

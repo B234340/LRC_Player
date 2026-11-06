@@ -53,7 +53,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
         // 各モードの選択ボタンを作成（selectable_valueは選択状態を視覚的に表示するボタン）
         if ui.add_sized(
                 button_size,
-                egui::SelectableLabel::new(
+                egui::Button::selectable(
                     app.playback_mode == lrc_player_domain::model::PlaybackMode::Sequential,
                     "Sequential",
                 ),
@@ -65,7 +65,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
         if ui.add_sized(
             button_size,
-            egui::SelectableLabel::new(
+            egui::Button::selectable(
                 app.playback_mode == lrc_player_domain::model::PlaybackMode::RepeatOne,
                 "Repeat One",
             ),).clicked()
@@ -76,7 +76,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
         if ui.add_sized(
             button_size,
-            egui::SelectableLabel::new(
+            egui::Button::selectable(
                 app.playback_mode == lrc_player_domain::model::PlaybackMode::RepeatAll,
                 "Repeat All",
             ),).clicked()
@@ -87,7 +87,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
 
         if ui.add_sized(
             button_size,
-            egui::SelectableLabel::new(
+            egui::Button::selectable(
                 app.playback_mode == lrc_player_domain::model::PlaybackMode::Shuffle,
                 "Shuffle",
             ),).clicked()
@@ -163,7 +163,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                     app.load_lyrics_file(index);
                 }
                 if select_response.hovered() {
-                    ui.painter().rect_stroke(select_rect, 4.0, egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_fill));
+                    ui.painter().rect_stroke(select_rect, 4.0, egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_fill), egui::StrokeKind::Middle);
                 }
                 // 「Load」ボタン：明示的な読み込み用（選択時の自動読み込みの補助）
                 if ui
@@ -232,7 +232,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
                 .allocate_ui_with_layout(
                     egui::vec2(available_width, image_size.y),
                     egui::Layout::top_down(egui::Align::Center),
-                    |ui| ui.image(texture, image_size),
+                    |ui| ui.image((texture.id(), image_size)),
                 )
                 .inner;
 
@@ -275,7 +275,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut GuiApp) {
             let offset_label = format!("Offset: {:+} ms", app.lyrics_offset_ms);
             let text_style = egui::TextStyle::Button.resolve(ui.style());
             let measure_text = |text: &str| {
-                ui.ctx().fonts(|fonts| {
+                ui.ctx().fonts_mut(|fonts| {
                     let mut job = egui::text::LayoutJob::default();
                     job.append(
                         text,

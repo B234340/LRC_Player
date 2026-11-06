@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
-eframe = "0.22"
+eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 fontdb = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "net", "io-util"] }
 tracing = "0.1"

@@ -182,7 +182,7 @@ pub(crate) struct TrackDetailsDialog {
 }
 
 impl App for GuiApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.active_tab == Tab::Scan
             || self.last_scan_status.as_deref() == Some("Requested scan")
         {
@@ -197,10 +197,10 @@ impl App for GuiApp {
             PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking
         ) || self.pending_seek_ms.is_some()
         {
-            ctx.request_repaint_after(Duration::from_millis(16));
+            ui.request_repaint_after(Duration::from_millis(16));
         }
 
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+        egui::Panel::top("top_panel").show(ui, |ui| {
             let tab_size = ui.spacing().interact_size * 2.0;
             ui.heading(translate("title", self.language));
             ui.horizontal(|ui| {
@@ -217,7 +217,7 @@ impl App for GuiApp {
                     if ui
                         .add_sized(
                             tab_size,
-                            egui::SelectableLabel::new(self.active_tab == tab, tab.label()),
+                            egui::Button::selectable(self.active_tab == tab, tab.label()),
                         )
                         .clicked()
                     {
@@ -231,15 +231,15 @@ impl App for GuiApp {
             });
         });
 
-        egui::SidePanel::left("side_panel")
+        egui::Panel::left("side_panel")
             .resizable(false)
-            .min_width(if self.side_panel_expanded { 240.0 } else { 32.0 })
-            .default_width(if self.side_panel_expanded { 240.0 } else { 32.0 })
-            .show(ctx, |ui| {
+            .min_size(if self.side_panel_expanded { 240.0 } else { 32.0 })
+            .default_size(if self.side_panel_expanded { 240.0 } else { 32.0 })
+            .show(ui, |ui| {
                 output::ui(ui, self);
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
+        egui::CentralPanel::default().show(ui, |ui| match self.active_tab {
             Tab::Library => tabs::library_tab::ui(ui, self),
             Tab::Play => tabs::play_tab::ui(ui, self),
             Tab::Playlist => tabs::playlist_tab::ui(ui, self),

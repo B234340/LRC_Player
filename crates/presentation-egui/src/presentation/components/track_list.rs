@@ -338,7 +338,7 @@ where
 
     // --- スクロールエリアの構築と描画 ---
     let mut area = egui::ScrollArea::vertical()
-        .id_source(id_source)          // スクロール位置記憶用の一意識別子
+        .id_salt(id_source)          // スクロール位置記憶用の一意識別子
         .auto_shrink([false, false]);  // コンテンツに合わせて縮小しない
     
     // 最大高さが指定されていれば適用
@@ -505,7 +505,7 @@ where
     };
 
     let mut area = egui::ScrollArea::vertical()
-        .id_source(id_source)
+        .id_salt(id_source)
         .auto_shrink([false, false]);
     if let Some(height) = max_height {
         area = area.max_height(height);
