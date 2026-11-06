@@ -5,6 +5,7 @@ use eframe::egui::{
     ScrollArea, Sense, Stroke, Ui, Vec2,
 };
 
+use super::track_table::TrackDragPayload;
 use crate::presentation::ui::{
     actions::UiAction,
     format::{format_count, format_duration_opt, format_total},
@@ -70,23 +71,73 @@ pub fn queue_panel(ui: &mut Ui, props: &QueueProps<'_>) -> Vec<UiAction> {
     ui.add_space(6.0);
 
     if props.items.is_empty() {
-        empty_state(ui, Icon::Queue, tr.t("queue.empty"), tr.t("queue.empty_hint"), None);
+        actions.extend(queue_empty(ui, id, tr));
         return actions;
     }
 
+    actions.extend(queue_rows(ui, id, props, 0));
+    actions
+}
+
+/// Fixed slots of a queue row (independent of hover, so hovering never moves anything).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RowSlots {
+    pub art: Rect,
+    pub text: Rect,
+    /// Remove button (shown on hover over the duration).
+    pub remove: Rect,
+    pub grip: Rect,
+}
+
+/// Trailing area reserved for duration / grip + remove.
+const TRAILING_W: f32 = 74.0;
+
+pub(crate) fn row_slots(rect: Rect) -> RowSlots {
+    let bg = rect.shrink2(vec2(0.0, 2.0));
+    let art = Rect::from_min_size(pos2(bg.left() + 8.0, bg.center().y - 18.0), Vec2::splat(36.0));
+    let text_left = art.right() + 10.0;
+    let text = Rect::from_min_max(pos2(text_left, bg.top()), pos2((bg.right() - TRAILING_W).max(text_left + 20.0), bg.bottom()));
+    RowSlots {
+        art,
+        text,
+        remove: Rect::from_center_size(pos2(bg.right() - 20.0, bg.center().y), Vec2::splat(28.0)),
+        grip: Rect::from_center_size(pos2(bg.right() - 50.0, bg.center().y), Vec2::splat(14.0)),
+    }
+}
+
+/// Paint the drop indicator line at `y` across `rect`.
+fn insertion_line(ui: &Ui, rect: Rect, y: f32, color: Color32) {
+    ui.painter().hline(rect.x_range().shrink(6.0), y, Stroke::new(2.0, color));
+    ui.painter().circle_filled(pos2(rect.left() + 6.0, y), 3.0, color);
+}
+
+/// Rows of the queue from index `first` on (the queue page lists only "up next"):
+/// double-click plays, hover shows remove, drag reorders, and tracks dragged from any
+/// track table can be dropped between rows (`QueueInsert`) or below the list (append).
+pub fn queue_rows(ui: &mut Ui, id: Id, props: &QueueProps<'_>, first: usize) -> Vec<UiAction> {
+    let pal = theme::palette(ui);
+    let tr = props.tr;
+    let mut actions = Vec::new();
     let width = ui.available_width();
     let mut drop: Option<(usize, usize)> = None;
-    ScrollArea::vertical()
+    let mut insert: Option<(Vec<std::path::PathBuf>, usize)> = None;
+    let count = props.items.len().saturating_sub(first);
+    let out = ScrollArea::vertical()
         .id_salt(id.with("scroll"))
         .auto_shrink([false, false])
-        .show_rows(ui, ROW_H, props.items.len(), |ui, range| {
+        .show_rows(ui, ROW_H, count, |ui, range| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
-            for i in range {
+            for row in range {
+                let i = first + row;
                 let item = &props.items[i];
-                let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click_and_drag());
+                // Fixed-size row with a stable id; everything hover-dependent below only
+                // changes what is painted, never the layout.
+                let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::hover());
+                let resp = ui.interact(rect, id.with(("row", i)), Sense::click_and_drag());
                 let is_cur = props.current == Some(i);
                 let played = props.current.is_some_and(|c| i < c);
-                let hovered = resp.hovered() || resp.dragged();
+                // Geometric hover: the remove button on top of the row must not un-hover it.
+                let hovered = resp.dragged() || (ui.rect_contains_pointer(rect) && !egui::DragAndDrop::has_any_payload(ui.ctx()));
                 let painter = ui.painter();
                 let bg = rect.shrink2(vec2(0.0, 2.0));
                 if is_cur {
@@ -94,8 +145,8 @@ pub fn queue_panel(ui: &mut Ui, props: &QueueProps<'_>) -> Vec<UiAction> {
                 } else if hovered {
                     painter.rect_filled(bg, 8.0, pal.hover);
                 }
-                // artwork / grip
-                let art = Rect::from_min_size(pos2(bg.left() + 8.0, bg.center().y - 18.0), Vec2::splat(36.0));
+                let slots = row_slots(rect);
+                let art = slots.art;
                 paint_artwork(ui, art, item.artwork, 5, item.seed);
                 if is_cur {
                     painter.rect_filled(art, 5.0, Color32::from_black_alpha(110));
@@ -105,10 +156,9 @@ pub fn queue_panel(ui: &mut Ui, props: &QueueProps<'_>) -> Vec<UiAction> {
                     painter.rect_filled(art, 5.0, Color32::from_black_alpha(90));
                     paint_icon(painter, art.shrink(10.0), Icon::Play, Color32::WHITE);
                 }
-                // text
-                let text_left = art.right() + 10.0;
-                let right_w = if hovered { 70.0 } else { 46.0 };
-                let tw = (bg.right() - right_w - text_left).max(20.0);
+                // text (truncation width does not depend on hover)
+                let text_left = slots.text.left();
+                let tw = slots.text.width();
                 let alpha = if played { 0.55 } else { 1.0 };
                 let title_c = theme::with_alpha(if is_cur { pal.accent_fg } else { pal.text }, alpha);
                 let font = if is_cur { theme::bold_font(ui.ctx(), 13.0) } else { FontId::proportional(13.0) };
@@ -121,18 +171,22 @@ pub fn queue_panel(ui: &mut Ui, props: &QueueProps<'_>) -> Vec<UiAction> {
                 j.wrap = egui::text::TextWrapping::truncate_at_width(tw);
                 let g = painter.layout_job(j);
                 painter.galley(pos2(text_left, bg.center().y + 2.0), g, sub_c);
-                // duration or remove button
+                // Trailing slot: duration at rest; grip + remove button on hover (overlay
+                // widgets via `interact`, which never touches the layout cursor).
                 if hovered {
-                    let r = Rect::from_center_size(pos2(bg.right() - 20.0, bg.center().y), Vec2::splat(28.0));
+                    let r = slots.remove;
                     let rm = ui
-                        .scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
-                            icon_button_ex(ui, Icon::Close, 12.0, IconButtonStyle { padding: Some(8.0), ..Default::default() }, tr.t("queue.remove"))
-                        })
-                        .inner;
+                        .interact(r, id.with(("remove", i)), Sense::click())
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(tr.t("queue.remove"));
+                    if rm.hovered() {
+                        ui.painter().rect_filled(r, 6.0, pal.pressed);
+                    }
+                    paint_icon(ui.painter(), r.shrink(8.0), Icon::Close, if rm.hovered() { pal.text } else { pal.text_muted });
                     if rm.clicked() {
                         actions.push(UiAction::QueueRemove(i));
                     }
-                    paint_icon(ui.painter(), Rect::from_center_size(pos2(bg.right() - 50.0, bg.center().y), Vec2::splat(14.0)), Icon::Grip, pal.text_faint);
+                    paint_icon(ui.painter(), slots.grip, Icon::Grip, pal.text_faint);
                 } else {
                     let d = format_duration_opt(item.duration_ms);
                     let g = ui.painter().layout_no_wrap(d, FontId::proportional(12.0), sub_c);
@@ -146,24 +200,43 @@ pub fn queue_panel(ui: &mut Ui, props: &QueueProps<'_>) -> Vec<UiAction> {
                 if resp.dragged() {
                     resp.clone().on_hover_cursor(CursorIcon::Grabbing);
                 }
+                let below = ui.input(|inp| inp.pointer.hover_pos()).is_some_and(|h| h.y > rect.center().y);
+                let y = if below { rect.bottom() } else { rect.top() };
                 if let Some(p) = resp.dnd_hover_payload::<QueueDrag>() {
-                    let below = ui.input(|inp| inp.pointer.hover_pos()).is_some_and(|h| h.y > rect.center().y);
                     if p.from != i {
-                        let y = if below { rect.bottom() } else { rect.top() };
-                        ui.painter().hline(rect.x_range().shrink(6.0), y, Stroke::new(2.0, pal.accent));
-                        ui.painter().circle_filled(pos2(rect.left() + 6.0, y), 3.0, pal.accent);
+                        insertion_line(ui, rect, y, pal.accent);
                     }
                 }
                 if let Some(p) = resp.dnd_release_payload::<QueueDrag>() {
-                    let below = ui.input(|inp| inp.pointer.hover_pos()).is_some_and(|h| h.y > rect.center().y);
                     drop = Some((p.from, i + usize::from(below)));
+                }
+                if resp.dnd_hover_payload::<TrackDragPayload>().is_some() {
+                    insertion_line(ui, rect, y, pal.accent);
+                }
+                if let Some(p) = resp.dnd_release_payload::<TrackDragPayload>() {
+                    insert = Some((p.paths.clone(), i + usize::from(below)));
                 }
             }
         });
+    // Below the last row: append.
+    let content_bottom = out.inner_rect.top() + (out.content_size.y - out.state.offset.y);
+    let rest = Rect::from_min_max(pos2(out.inner_rect.left(), content_bottom.max(out.inner_rect.top())), out.inner_rect.max);
+    if rest.height() > 4.0 {
+        let r = ui.interact(rest, id.with("drop_end"), Sense::hover());
+        if r.dnd_hover_payload::<TrackDragPayload>().is_some() {
+            insertion_line(ui, rest, rest.top() + 1.0, pal.accent);
+        }
+        if let Some(p) = r.dnd_release_payload::<TrackDragPayload>() {
+            insert = Some((p.paths.clone(), props.items.len()));
+        }
+    }
     if let Some((from, to)) = drop {
         if from != to && from + 1 != to {
             actions.push(UiAction::QueueReorder { from, to });
         }
+    }
+    if let Some((paths, at)) = insert {
+        actions.push(UiAction::QueueInsert { paths, at });
     }
     // ghost
     if let Some(p) = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()) {
@@ -181,6 +254,23 @@ pub fn queue_panel(ui: &mut Ui, props: &QueueProps<'_>) -> Vec<UiAction> {
     actions
 }
 
+/// Empty queue: hint, and the whole area accepts tracks dragged from a table.
+pub fn queue_empty(ui: &mut Ui, id: Id, tr: Tr) -> Vec<UiAction> {
+    let pal = theme::palette(ui);
+    let rect = ui.available_rect_before_wrap();
+    let r = ui.interact(rect, id.with("drop_empty"), Sense::hover());
+    let hovering = r.dnd_hover_payload::<TrackDragPayload>().is_some();
+    let mut actions = Vec::new();
+    if let Some(p) = r.dnd_release_payload::<TrackDragPayload>() {
+        actions.push(UiAction::QueueInsert { paths: p.paths.clone(), at: 0 });
+    }
+    if hovering {
+        ui.painter().rect_stroke(rect.shrink(4.0), 12.0, Stroke::new(1.5, pal.accent), egui::StrokeKind::Inside);
+    }
+    empty_state(ui, Icon::Queue, tr.t("queue.empty"), tr.t("queue.empty_hint"), None);
+    actions
+}
+
 /// Map a `QueueReorder { from, to }` (insertion index before removal) onto a vector.
 pub fn apply_reorder<T>(items: &mut Vec<T>, from: usize, to: usize) {
     if from >= items.len() {
@@ -194,6 +284,34 @@ pub fn apply_reorder<T>(items: &mut Vec<T>, from: usize, to: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hovering a row only changes paint: row rects stay identical, and the slots (art,
+    /// text width, trailing area) do not depend on hover.
+    #[test]
+    fn hover_does_not_move_rows() {
+        use egui_kittest::Harness;
+        let titles = ["One", "Two", "Three"];
+        let read_rows = |h: &Harness<'_, ()>| -> Vec<Rect> {
+            let id = Id::new("queue_panel");
+            (0..3).map(|i| h.ctx.read_response(id.with(("row", i))).expect("row").rect).collect()
+        };
+        let mut h = Harness::builder().with_size(vec2(360.0, 400.0)).build_ui(move |ui| {
+            let items: Vec<QueueItem> = titles
+                .iter()
+                .map(|t| QueueItem { title: t, artist: "A", duration_ms: Some(200_000), artwork: None, seed: t })
+                .collect();
+            let _ = queue_panel(ui, &QueueProps { items: &items, current: Some(0), playing: true, tr: Tr::JA });
+        });
+        h.run_steps(3);
+        let rest = read_rows(&h);
+        h.hover_at(rest[1].center());
+        for _ in 0..5 {
+            h.run_steps(1);
+            assert_eq!(read_rows(&h), rest, "rows moved while hovering");
+        }
+        let s = row_slots(rest[1]);
+        assert!(s.text.right() <= s.grip.left(), "text never overlaps the trailing slot");
+    }
 
     #[test]
     fn reorder_semantics() {

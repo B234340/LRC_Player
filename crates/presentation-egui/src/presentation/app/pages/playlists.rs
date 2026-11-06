@@ -5,14 +5,14 @@ use std::path::Path;
 
 use eframe::egui::{self, pos2, vec2, CursorIcon, FontId, Rect, ScrollArea, Sense, Ui, Vec2};
 
-use super::{albums::detail_header, back_link, hash_key, tracks_summary};
+use super::{albums::{detail_art_size, detail_header}, back_nav, hash_key, tracks_summary};
 use crate::presentation::app::{playlists as pl, shell::playlist_entries, GuiApp, Modal};
 use crate::presentation::ui::{
     format::format_count,
     i18n::Tr,
     icons::{icon_button, paint_icon, Icon},
     theme,
-    views::{track_table, Column, IndexMode, TrackDragPayload, TrackTableProps},
+    views::{track_table, Column, IndexMode, TrackDragPayload, TableLinks, TrackTableProps},
     widgets::{button, empty_state, section_header, ButtonKind},
     Page, UiAction,
 };
@@ -58,7 +58,8 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
             let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click());
             let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
             let drop_hover = resp.dnd_hover_payload::<TrackDragPayload>().is_some();
-            if resp.hovered() || drop_hover {
+            // Geometric hover so the row stays highlighted over its action buttons.
+            if ui.rect_contains_pointer(rect) || drop_hover {
                 ui.painter().rect_filled(rect, 8.0, pal.hover);
             }
             if drop_hover {
@@ -108,8 +109,8 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
 
 fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, id: &str) -> Vec<UiAction> {
     let mut actions = Vec::new();
-    if back_link(ui, tr.t("nav.playlists")) {
-        actions.push(UiAction::Navigate(Page::Playlists));
+    if let Some(a) = back_nav(app, ui, &tr, Page::Playlists) {
+        actions.push(a);
         return actions;
     }
     ui.add_space(8.0);
@@ -128,7 +129,7 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, id: &str) -> Vec<UiAction> {
     let mut remove_selected = false;
     detail_header(
         ui,
-        |ui| playlist_tile(ui, 140.0, favorite, id),
+        |ui| playlist_tile(ui, detail_art_size(ui, 140.0), favorite, id),
         tr.t("playlist.kicker"),
         &name,
         None,
@@ -143,7 +144,7 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, id: &str) -> Vec<UiAction> {
                 }
             });
             if !favorite {
-                if button(ui, ButtonKind::Ghost, Some(Icon::Edit), tr.t("playlist.rename")).clicked() {
+                if button(ui, ButtonKind::Secondary, Some(Icon::Edit), tr.t("playlist.rename")).clicked() {
                     app.ui.modal = Some(Modal::RenamePlaylist { id: id.to_string(), name: list.name.clone() });
                 }
                 if button(ui, ButtonKind::Danger, Some(Icon::Trash), tr.t("playlist.delete")).clicked() {
@@ -177,6 +178,8 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, id: &str) -> Vec<UiAction> {
             reorderable: true,
             playlists: &entries,
             removable: true,
+            optional_columns: &[],
+            links: TableLinks::ALL,
             tr,
         },
         &mut app.ui.detail_table,

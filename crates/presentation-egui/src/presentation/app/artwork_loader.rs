@@ -15,7 +15,11 @@
 //! * textures are shared per source image (many tracks of an album share `cover.jpg`) and
 //!   evicted least-recently-used beyond a budget;
 //! * the worker serves the newest request first and drops stale backlog when the user
-//!   scrolls quickly.
+//!   scrolls quickly;
+//! * the Now Playing page may ask for a sharper copy of the current cover
+//!   ([`ArtworkLoader::play_artwork_hires`], 1536 / 2048 px) when the cover is shown larger
+//!   than 1024 physical px; only one such texture exists and it is dropped shortly after
+//!   the page stops asking (page left, window shrunk, track changed).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
@@ -40,6 +44,11 @@ const ROW_THUMB_SIDE: u32 = 128;
 const ALBUM_THUMB_SIDE: u32 = 256;
 /// Max side of the Play-tab artwork.
 const PLAY_ART_SIDE: u32 = 1024;
+/// Intermediate and max side of the on-demand sharper Now Playing artwork (16 MiB RGBA).
+const PLAY_ART_HIRES_MID: u32 = 1536;
+const PLAY_ART_HIRES_MAX: u32 = 2048;
+/// Frames the sharper artwork survives without being asked for (then it is freed).
+const HIRES_GRACE_FRAMES: u64 = 30;
 /// Texture budget for row/album thumbnails before LRU eviction.
 const MAX_TEXTURES: usize = 384;
 /// Backlog limit; older requests are dropped (they are re-requested when visible again).
@@ -65,6 +74,7 @@ enum Job {
     Track { key: TrackKey },
     Album { title: String },
     Play { track: String },
+    PlayHires { track: String, side: u32 },
     ClearCaches,
 }
 
@@ -81,6 +91,9 @@ enum Done {
         regular: Option<egui::ColorImage>,
         blur: Option<egui::ColorImage>,
     },
+    /// `image` is `None` when the source is not larger than the regular Play artwork.
+    PlayHires { track: String, side: u32, image: Option<egui::ColorImage> },
+    PlayHiresDropped { track: String, side: u32 },
 }
 
 enum TrackSlot {
@@ -106,6 +119,28 @@ struct Queue {
     shutdown: bool,
 }
 
+/// The sharper Now Playing artwork (see [`ArtworkLoader::play_artwork_hires`]).
+struct HiresArt {
+    track: String,
+    /// Side requested last; `u32::MAX` once the source is known to be no larger.
+    side: u32,
+    pending: bool,
+    texture: Option<egui::TextureHandle>,
+    last_used: u64,
+}
+
+/// Side to request for a cover shown at `needed_px` physical pixels; `None` when the
+/// regular 1024 px texture is sharp enough.
+fn hires_side(needed_px: f32) -> Option<u32> {
+    if needed_px.is_nan() || needed_px <= PLAY_ART_SIDE as f32 {
+        None
+    } else if needed_px <= PLAY_ART_HIRES_MID as f32 {
+        Some(PLAY_ART_HIRES_MID)
+    } else {
+        Some(PLAY_ART_HIRES_MAX)
+    }
+}
+
 /// Play-tab artwork result: (track, regular, blurred background).
 pub(crate) type PlayArtwork = (String, Option<egui::TextureHandle>, Option<egui::TextureHandle>);
 
@@ -118,6 +153,7 @@ pub(crate) struct ArtworkLoader {
     sources: HashMap<String, SourceTexture>,
     albums: HashMap<String, AlbumSlot>,
     play_result: Option<PlayArtwork>,
+    hires: Option<HiresArt>,
     frame: u64,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -144,6 +180,7 @@ impl ArtworkLoader {
             sources: HashMap::new(),
             albums: HashMap::new(),
             play_result: None,
+            hires: None,
             frame: 0,
             worker,
         }
@@ -203,6 +240,7 @@ impl ArtworkLoader {
     /// Requests the Play-tab artwork (full + blurred) for `track`.
     pub(crate) fn request_play_artwork(&mut self, track: &str) {
         self.play_result = None;
+        self.hires = None;
         self.push(Job::Play {
             track: track.to_string(),
         });
@@ -214,6 +252,38 @@ impl ArtworkLoader {
             Some((t, _, _)) if t == track => self.play_result.take(),
             _ => None,
         }
+    }
+
+    /// Sharper artwork for the Now Playing page when the cover is shown at `needed_px`
+    /// physical pixels (> 1024). Call every frame while it is needed: it is decoded once
+    /// (1536 or 2048 px, never upscaled) and freed [`HIRES_GRACE_FRAMES`] frames after the
+    /// last call. `None` while loading, when not needed, or when the source is not larger
+    /// than the regular texture (then use the regular one).
+    pub(crate) fn play_artwork_hires(&mut self, track: &str, needed_px: f32) -> Option<egui::TextureHandle> {
+        let side = hires_side(needed_px)?;
+        let frame = self.frame;
+        if let Some(h) = self.hires.as_mut().filter(|h| h.track == track) {
+            h.last_used = frame;
+            if h.side < side {
+                // Needs more than requested so far: ask again, keep showing the old copy.
+                h.side = side;
+                h.pending = true;
+                let job = Job::PlayHires { track: track.to_string(), side };
+                let texture = h.texture.clone();
+                self.push(job);
+                return texture;
+            }
+            return h.texture.clone();
+        }
+        self.hires = Some(HiresArt { track: track.to_string(), side, pending: true, texture: None, last_used: frame });
+        self.push(Job::PlayHires { track: track.to_string(), side });
+        None
+    }
+
+    /// Size of the sharper Now Playing texture currently held (tests).
+    #[cfg(test)]
+    pub(crate) fn hires_texture_size(&self) -> Option<[usize; 2]> {
+        self.hires.as_ref()?.texture.as_ref().map(|t| t.size())
     }
 
     /// Uploads finished images. Call once per frame on the UI thread.
@@ -271,6 +341,27 @@ impl ArtworkLoader {
                     });
                     self.play_result = Some((track, regular, blur));
                 }
+                Done::PlayHires { track, side, image } => {
+                    let Some(h) = self.hires.as_mut().filter(|h| h.track == track && h.side == side) else {
+                        continue; // stale (track changed or a larger copy was asked for)
+                    };
+                    h.pending = false;
+                    match image {
+                        Some(img) => {
+                            if (img.size[0] as u32) < side {
+                                // The source is smaller than asked: nothing more to gain.
+                                h.side = u32::MAX;
+                            }
+                            h.texture = Some(ctx.load_texture("play_artwork_hires", img, egui::TextureOptions::LINEAR));
+                        }
+                        None => h.side = u32::MAX,
+                    }
+                }
+                Done::PlayHiresDropped { track, side } => {
+                    if self.hires.as_ref().is_some_and(|h| h.track == track && h.side == side && h.pending) {
+                        self.hires = None; // asked again next frame
+                    }
+                }
             }
         }
     }
@@ -278,6 +369,9 @@ impl ArtworkLoader {
     /// Advances the LRU clock and evicts textures beyond the budget.
     pub(crate) fn end_frame(&mut self) {
         self.frame += 1;
+        if self.hires.as_ref().is_some_and(|h| h.last_used + HIRES_GRACE_FRAMES < self.frame) {
+            self.hires = None;
+        }
         let ready_albums = self
             .albums
             .values()
@@ -320,6 +414,7 @@ impl ArtworkLoader {
 
     /// Forgets everything (after a scan / library clear); the worker drops its folder cache.
     pub(crate) fn clear(&mut self) {
+        self.hires = None;
         self.tracks.clear();
         self.sources.clear();
         self.albums.clear();
@@ -405,6 +500,7 @@ impl Worker {
                     let dropped = match job {
                         Job::Track { key } => Some(Done::TrackDropped { key }),
                         Job::Album { title } => Some(Done::AlbumDropped { title }),
+                        Job::PlayHires { track, side } => Some(Done::PlayHiresDropped { track, side }),
                         Job::Play { .. } | Job::ClearCaches => None,
                     };
                     if let Some(d) = dropped {
@@ -414,6 +510,9 @@ impl Worker {
             }
             // Play-tab requests first, otherwise newest first (what the user looks at now).
             if let Some(pos) = q.jobs.iter().rposition(|j| matches!(j, Job::Play { .. } | Job::ClearCaches)) {
+                return q.jobs.remove(pos);
+            }
+            if let Some(pos) = q.jobs.iter().rposition(|j| matches!(j, Job::PlayHires { .. })) {
                 return q.jobs.remove(pos);
             }
             if let Some(job) = q.jobs.pop_back() {
@@ -432,6 +531,10 @@ impl Worker {
                     title,
                 },
                 Job::Play { track } => self.load_play(track),
+                Job::PlayHires { track, side } => {
+                    let image = self.load_play_hires(&track, side);
+                    Done::PlayHires { track, side, image }
+                }
                 Job::ClearCaches => {
                     self.dirs.clear();
                     self.dir_order.clear();
@@ -577,12 +680,27 @@ impl Worker {
         extract_embedded(Path::new(first)).map(|img| to_color_image(square_thumbnail(img, ALBUM_THUMB_SIDE)))
     }
 
-    fn load_play(&mut self, track: String) -> Done {
-        let path = PathBuf::from(&track);
-        let image = match self.cover_file(&path) {
+    fn play_source(&mut self, track: &str) -> Option<DynamicImage> {
+        let path = PathBuf::from(track);
+        match self.cover_file(&path) {
             Some(cover) => decode_file(&cover).or_else(|| extract_embedded(&path)),
             None => extract_embedded(&path),
-        };
+        }
+    }
+
+    /// Sharper Now Playing cover (≤ `side`), or `None` when the source is not larger than
+    /// the regular [`PLAY_ART_SIDE`] copy. Re-decodes the source (worker thread only).
+    fn load_play_hires(&mut self, track: &str, side: u32) -> Option<egui::ColorImage> {
+        let image = self.play_source(track)?;
+        let (w, h) = image.dimensions();
+        if w.min(h) <= PLAY_ART_SIDE {
+            return None;
+        }
+        Some(to_color_image(square_thumbnail(image, side)))
+    }
+
+    fn load_play(&mut self, track: String) -> Done {
+        let image = self.play_source(&track);
         let Some(image) = image else {
             return Done::Play {
                 track,
@@ -667,4 +785,27 @@ fn to_color_image(image: DynamicImage) -> egui::ColorImage {
     let rgba = image.to_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
     egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hires_side_policy() {
+        assert_eq!(hires_side(0.0), None);
+        assert_eq!(hires_side(f32::NAN), None);
+        assert_eq!(hires_side(1024.0), None);
+        assert_eq!(hires_side(1025.0), Some(1536));
+        assert_eq!(hires_side(1536.0), Some(1536));
+        assert_eq!(hires_side(1537.0), Some(2048));
+        assert_eq!(hires_side(5000.0), Some(2048));
+    }
+
+    #[test]
+    fn square_thumbnail_never_upscales() {
+        let img = DynamicImage::new_rgba8(1400, 1200);
+        assert_eq!(square_thumbnail(img.clone(), 2048).dimensions(), (1200, 1200));
+        assert_eq!(square_thumbnail(img, 1024).dimensions(), (1024, 1024));
+    }
 }

@@ -148,15 +148,18 @@ fn main() -> Result<()> {
     let _ = server_thread;
 
     // Restore the last window size / position / maximized state (saved in state.json).
+    // The minimum size keeps the sidebar's nav, playlists and bottom block from colliding
+    // (see `ui::shell::MIN_WINDOW_SIZE`).
+    let [min_w, min_h] = lrc_player::presentation::ui::shell::MIN_WINDOW_SIZE;
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("LRC Player")
         .with_app_id("lrc_player")
         .with_inner_size([1280.0, 820.0])
-        .with_min_inner_size([720.0, 480.0])
+        .with_min_inner_size([min_w, min_h])
         .with_drag_and_drop(true);
     if let Some(window) = lrc_player::presentation::app::initial_window() {
         viewport = viewport
-            .with_inner_size([window.width.max(720.0), window.height.max(480.0)])
+            .with_inner_size([window.width.max(min_w), window.height.max(min_h)])
             .with_maximized(window.maximized);
         let on_screen = |v: f32| (-4_000.0..16_000.0).contains(&v);
         if let (Some(x), Some(y)) = (window.x.filter(|v| on_screen(*v)), window.y.filter(|v| on_screen(*v))) {

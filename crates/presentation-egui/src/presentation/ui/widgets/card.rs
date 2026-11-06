@@ -56,12 +56,19 @@ pub enum ButtonKind {
     Ghost,
     /// Danger text, danger fill on hover.
     Danger,
+    /// Solid danger fill: the confirming button of a destructive dialog.
+    DangerSolid,
 }
 
 /// Painted button with optional leading icon (height 32).
 pub fn button(ui: &mut Ui, kind: ButtonKind, icon: Option<Icon>, text: &str) -> Response {
+    button_sized(ui, kind, icon, text, 0.0)
+}
+
+/// [`button`] with a minimum width (content centered), e.g. for dialog button rows.
+pub fn button_sized(ui: &mut Ui, kind: ButtonKind, icon: Option<Icon>, text: &str, min_width: f32) -> Response {
     let pal = theme::palette(ui);
-    let font = if kind == ButtonKind::Primary {
+    let font = if matches!(kind, ButtonKind::Primary | ButtonKind::DangerSolid) {
         theme::bold_font(ui.ctx(), theme::size::BODY)
     } else {
         FontId::proportional(theme::size::BODY)
@@ -69,7 +76,8 @@ pub fn button(ui: &mut Ui, kind: ButtonKind, icon: Option<Icon>, text: &str) -> 
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER);
     let icon_w = if icon.is_some() { 16.0 + 6.0 } else { 0.0 };
     let pad = if text.is_empty() { 8.0 } else { 14.0 };
-    let size = vec2(galley.size().x + icon_w + pad * 2.0 - if text.is_empty() { 6.0 } else { 0.0 }, 32.0);
+    let content_w = galley.size().x + icon_w + pad * 2.0 - if text.is_empty() { 6.0 } else { 0.0 };
+    let size = vec2(content_w.max(min_width), 32.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
     if ui.is_rect_visible(rect) {
@@ -91,10 +99,14 @@ pub fn button(ui: &mut Ui, kind: ButtonKind, icon: Option<Icon>, text: &str) -> 
                 pal.danger,
                 Stroke::new(1.0, theme::with_alpha(pal.danger, 0.35)),
             ),
+            ButtonKind::DangerSolid => {
+                let f = theme::blend(pal.danger, if pal.dark { theme::lighten(pal.danger, 0.12) } else { theme::darken(pal.danger, 0.10) }, t);
+                (f, egui::Color32::WHITE, Stroke::NONE)
+            }
         };
         let fill = if pressed { theme::blend(fill, pal.pressed, 0.4) } else { fill };
         ui.painter().rect(rect, radius::MD, fill, stroke, egui::StrokeKind::Inside);
-        let mut x = rect.left() + pad;
+        let mut x = rect.left() + pad + (rect.width() - content_w).max(0.0) / 2.0;
         if let Some(icon) = icon {
             let r = Rect::from_center_size(egui::pos2(x + 8.0, rect.center().y), Vec2::splat(16.0));
             paint_icon(ui.painter(), r, icon, fg);

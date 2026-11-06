@@ -33,7 +33,23 @@ pub struct TransportProps<'a> {
     pub right_panel: Option<RightPanel>,
     pub eq_open: bool,
     pub eq_enabled: bool,
+    /// Number of queued tracks (badge on the queue button).
+    pub queue_len: usize,
+    /// No audio output device is available: the volume area shows a quiet indicator.
+    pub no_output: bool,
     pub tr: Tr,
+}
+
+/// Small count pill at the top-right corner of an icon button.
+fn count_badge(ui: &Ui, button: Rect, count: usize, pal: &theme::Palette) {
+    let text = if count > 999 { "999+".to_owned() } else { count.to_string() };
+    let g = ui.painter().layout_no_wrap(text, FontId::proportional(9.5), pal.accent_text);
+    let w = (g.size().x + 8.0).max(15.0);
+    let r = Rect::from_center_size(pos2(button.right() - 4.0, button.top() + 7.0), vec2(w, 15.0));
+    // Ring in the bar color so the pill reads as separate from the icon.
+    ui.painter().rect_filled(r.expand(1.5), 9.0, pal.bg);
+    ui.painter().rect_filled(r, 7.5, pal.accent);
+    ui.painter().galley(r.center() - g.size() / 2.0, g, pal.accent_text);
 }
 
 /// Preferred height of the panel hosting the transport bar.
@@ -49,7 +65,8 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
 
     let w = full.width();
     let wide = w >= 920.0;
-    let medium = w >= 640.0;
+    // Medium layout (queue / lyrics buttons, slim volume) down to the minimum window width.
+    let medium = w >= 600.0;
     let pad = 14.0;
     let inner = full.shrink2(vec2(pad, 0.0));
 
@@ -169,16 +186,29 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
         // volume (right-most)
         // icon (34) + spacing + slider
         let vol_w = 36.0 + if slider_w > 0.0 { slider_w + 2.0 } else { 0.0 };
-        let vol = rui
-            .allocate_ui_with_layout(vec2(vol_w, 40.0), Layout::left_to_right(Align::Center), |ui| {
-                volume_control(ui, Id::new("transport_volume"), props.volume, props.muted, slider_w, &tr)
-            })
-            .inner;
-        if let Some(g) = vol.set_gain {
-            actions.push(UiAction::SetVolume(g));
-        }
-        if vol.toggle_mute {
-            actions.push(UiAction::ToggleMute);
+        if props.no_output {
+            // Quiet "no device" indicator in place of the volume control.
+            rui.allocate_ui_with_layout(vec2(vol_w, 40.0), Layout::left_to_right(Align::Center), |ui| {
+                let style = IconButtonStyle { color: Some(pal.text_faint), ..Default::default() };
+                if icon_button_ex(ui, Icon::Mute, 18.0, style, tr.t("transport.no_output_tip")).clicked() {
+                    actions.push(UiAction::Navigate(Page::Settings));
+                }
+                if slider_w > 0.0 {
+                    ui.add(egui::Label::new(RichText::new(tr.t("transport.no_output")).size(11.5).color(pal.text_faint)).truncate());
+                }
+            });
+        } else {
+            let vol = rui
+                .allocate_ui_with_layout(vec2(vol_w, 40.0), Layout::left_to_right(Align::Center), |ui| {
+                    volume_control(ui, Id::new("transport_volume"), props.volume, props.muted, slider_w, &tr)
+                })
+                .inner;
+            if let Some(g) = vol.set_gain {
+                actions.push(UiAction::SetVolume(g));
+            }
+            if vol.toggle_mute {
+                actions.push(UiAction::ToggleMute);
+            }
         }
         if medium {
             rui.add_space(6.0);
@@ -188,7 +218,12 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
                 actions.push(UiAction::ToggleEq);
             }
             let q = props.right_panel == Some(RightPanel::Queue);
-            if icon_button(&mut rui, Icon::Queue, 17.0, q, tr.t("transport.queue")).clicked() {
+            let tip = tr.f("transport.queue_n", &[&props.queue_len]);
+            let qb = icon_button(&mut rui, Icon::Queue, 17.0, q, &tip);
+            if props.queue_len > 0 {
+                count_badge(&rui, qb.rect, props.queue_len, &pal);
+            }
+            if qb.clicked() {
                 actions.push(UiAction::ToggleRightPanel(RightPanel::Queue));
             }
             let l = props.right_panel == Some(RightPanel::Lyrics);

@@ -6,6 +6,7 @@
 use lrc_player_domain::model::PlaybackState;
 
 use crate::presentation::app::GuiApp;
+use crate::presentation::ui::{widgets::ToastKind, Page, UiAction};
 
 /// Index of `current` after moving `from` to insertion index `to` (`apply_reorder` semantics).
 pub(crate) fn remap_after_move(current: usize, from: usize, to: usize) -> usize {
@@ -67,7 +68,7 @@ impl GuiApp {
         }
         self.on_queue_changed();
         let tr = self.tr();
-        self.toast_success(tr.f("toast.play_next", &[&count]));
+        self.toast_with_action(ToastKind::Success, tr.f("toast.play_next", &[&count]), tr.t("toast.show_queue"), UiAction::Navigate(Page::Queue));
     }
 
     /// Appends to the queue with a toast.
@@ -83,7 +84,24 @@ impl GuiApp {
             Some(title) => tr.f("toast.enqueued_one", &[&title]),
             None => tr.f("toast.enqueued_many", &[&count]),
         };
-        self.toast_success(msg);
+        self.toast_with_action(ToastKind::Success, msg, tr.t("toast.show_queue"), UiAction::Navigate(Page::Queue));
+    }
+
+    /// Inserts `paths` before queue index `at` (drag & drop onto the queue).
+    pub(crate) fn queue_insert(&mut self, paths: Vec<String>, at: usize) {
+        let paths: Vec<String> = paths.into_iter().filter(|p| !p.trim().is_empty()).collect();
+        if paths.is_empty() {
+            return;
+        }
+        let count = paths.len();
+        let at = at.min(self.queue.len());
+        self.queue.splice(at..at, paths);
+        if let Some(cur) = self.current_queue_index {
+            if cur >= at {
+                self.current_queue_index = Some(cur + count);
+            }
+        }
+        self.on_queue_changed();
     }
 
     pub(crate) fn queue_reorder(&mut self, from: usize, to: usize) {

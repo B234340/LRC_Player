@@ -21,6 +21,8 @@ pub const SHORTCUT_LIST: &[(&str, &str)] = &[
     ("Ctrl + F", "shortcut.search"),
     ("Ctrl + L", "shortcut.lyrics"),
     ("Ctrl + ,", "shortcut.settings"),
+    ("Ctrl + U", "shortcut.queue"),
+    ("Alt + ←", "shortcut.back"),
     ("Esc", "shortcut.escape"),
 ];
 
@@ -46,6 +48,14 @@ pub fn global_shortcuts(ctx: &Context, volume_gain: f32) -> Vec<UiAction> {
         }
         if i.consume_shortcut(&cmd(Key::Comma)) {
             out.push(UiAction::Navigate(Page::Settings));
+        }
+        if i.consume_shortcut(&cmd(Key::U)) {
+            out.push(UiAction::Navigate(Page::Queue));
+        }
+        if i.consume_key(Modifiers::ALT, Key::ArrowLeft)
+            || i.pointer.button_pressed(eframe::egui::PointerButton::Extra1)
+        {
+            out.push(UiAction::Back);
         }
         if i.consume_key(Modifiers::SHIFT, Key::ArrowLeft) {
             out.push(UiAction::Previous);

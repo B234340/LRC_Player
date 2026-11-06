@@ -21,6 +21,8 @@ use lrc_player_application::infrastructure::library_tracks::{
 };
 use lrc_player_application::infrastructure::persistence::MetaCache;
 
+use crate::presentation::app::ArtistViewMode;
+use crate::presentation::ui::collate::{collate, SortKey};
 use crate::presentation::ui::views::{AlbumItem, TrackRow};
 
 /// Batch size / interval for detail updates sent to the UI.
@@ -68,6 +70,43 @@ fn apply_details(row: &mut TrackRow, d: &TrackDetails) {
     }
     row.track_no = d.track_no.or(row.track_no);
     row.disc_no = d.disc_no.or(row.disc_no);
+}
+
+/// Default library order: album artist (track artist when the album has none) → album →
+/// disc → track number → title → path, with the shared collation for text. Rows without an
+/// artist / album go after the tagged ones; missing disc / track numbers go last.
+pub(crate) fn default_order(rows: &[TrackRow], owners: &[String]) -> Vec<usize> {
+    struct Key {
+        owner: SortKey,
+        album: SortKey,
+        title: SortKey,
+    }
+    let keys: Vec<Key> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let owner = owners.get(i).map(String::as_str).filter(|o| !o.trim().is_empty()).unwrap_or(&r.artist);
+            Key { owner: SortKey::new(owner), album: SortKey::new(&r.album), title: SortKey::new(&r.title) }
+        })
+        .collect();
+    let opt_last = |a: Option<u32>, b: Option<u32>| match (a, b) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    };
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (ka, kb) = (&keys[a], &keys[b]);
+        (ka.owner.is_empty(), &ka.owner)
+            .cmp(&(kb.owner.is_empty(), &kb.owner))
+            .then_with(|| (ka.album.is_empty(), &ka.album).cmp(&(kb.album.is_empty(), &kb.album)))
+            .then_with(|| opt_last(rows[a].disc_no, rows[b].disc_no))
+            .then_with(|| opt_last(rows[a].track_no, rows[b].track_no))
+            .then_with(|| ka.title.cmp(&kb.title))
+            .then_with(|| rows[a].path.cmp(&rows[b].path))
+    });
+    order
 }
 
 /// An artist with the rows and albums that belong to them.
@@ -276,13 +315,19 @@ pub(crate) struct LibraryIndex {
     pub rows: Arc<Vec<TrackRow>>,
     /// Album key of each row.
     owners: Vec<String>,
+    /// Whether each row's owner comes from an album-artist tag (else the track artist).
+    owner_tagged: Vec<bool>,
     /// Bumped whenever `rows` changes.
     pub revision: u64,
     pub albums: Vec<AlbumItem>,
     /// Album key -> rows (disc / track number / path order).
     album_rows: HashMap<String, Vec<usize>>,
+    /// Artists grouped by track artist.
     pub artists: Vec<ArtistEntry>,
     artist_pos: HashMap<String, usize>,
+    /// Artists grouped by album artist (falling back to the track artist).
+    pub album_artists: Vec<ArtistEntry>,
+    album_artist_pos: HashMap<String, usize>,
     by_path: HashMap<PathBuf, usize>,
     /// Probed rows for paths outside the library.
     extra: HashMap<PathBuf, TrackRow>,
@@ -298,11 +343,14 @@ impl LibraryIndex {
         Self {
             rows: Arc::new(Vec::new()),
             owners: Vec::new(),
+            owner_tagged: Vec::new(),
             revision: 1,
             albums: Vec::new(),
             album_rows: HashMap::new(),
             artists: Vec::new(),
             artist_pos: HashMap::new(),
+            album_artists: Vec::new(),
+            album_artist_pos: HashMap::new(),
             by_path: HashMap::new(),
             extra: HashMap::new(),
             requested_extra: HashSet::new(),
@@ -327,6 +375,7 @@ impl LibraryIndex {
         while let Ok(done) = self.worker.rx.try_recv() {
             match done {
                 Done::Rows(rows) => {
+                    self.owner_tagged = rows.iter().map(|r| !r.album_artist.trim().is_empty()).collect();
                     let (rows, owners): (Vec<TrackRow>, Vec<String>) = rows.into_iter().map(row_from_db).unzip();
                     self.rows = Arc::new(rows);
                     self.owners = owners;
@@ -371,41 +420,49 @@ impl LibraryIndex {
         false
     }
 
-    /// Recomputes lookups, albums and artists from `rows`.
+    /// Recomputes lookups, albums and artists from `rows`, and puts `rows` (with `owners`)
+    /// into the default library order (see [`default_order`]).
     pub(crate) fn rebuild(&mut self) {
+        self.sort_rows_default();
         self.by_path = self.rows.iter().enumerate().map(|(i, r)| (r.path.clone(), i)).collect();
         let mut album_rows: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut album_meta: HashMap<String, (String, String, Option<i32>)> = HashMap::new();
+        let mut album_meta: HashMap<String, (String, String, Option<i32>, bool)> = HashMap::new();
         let mut artist_map: HashMap<String, ArtistEntry> = HashMap::new();
+        let mut album_artist_map: HashMap<String, ArtistEntry> = HashMap::new();
+        let add = |map: &mut HashMap<String, ArtistEntry>, name: &str, i: usize, album_key: Option<&String>| {
+            let entry = map
+                .entry(name.to_string())
+                .or_insert_with(|| ArtistEntry { name: name.to_string(), ..Default::default() });
+            if entry.tracks.last() != Some(&i) {
+                entry.tracks.push(i);
+            }
+            if let Some(key) = album_key {
+                if !entry.albums.contains(key) {
+                    entry.albums.push(key.clone());
+                }
+            }
+        };
         for (i, row) in self.rows.iter().enumerate() {
             let owner = self.owners.get(i).map(String::as_str).unwrap_or("");
-            if !row.album.trim().is_empty() {
-                let key = album_key(&row.album, owner);
+            let key = (!row.album.trim().is_empty()).then(|| album_key(&row.album, owner));
+            if let Some(key) = &key {
                 album_rows.entry(key.clone()).or_default().push(i);
                 let meta = album_meta
-                    .entry(key)
-                    .or_insert_with(|| (row.album.clone(), owner.to_string(), None));
+                    .entry(key.clone())
+                    .or_insert_with(|| (row.album.clone(), owner.to_string(), None, false));
                 if let Some(y) = row.year {
                     meta.2 = Some(meta.2.map_or(y, |m: i32| m.max(y)));
                 }
+                meta.3 |= self.owner_tagged.get(i).copied().unwrap_or(false);
             }
-            for name in [row.artist.as_str(), owner] {
-                if name.trim().is_empty() {
-                    continue;
-                }
-                let entry = artist_map.entry(name.to_string()).or_insert_with(|| ArtistEntry { name: name.to_string(), ..Default::default() });
-                if entry.tracks.last() != Some(&i) {
-                    entry.tracks.push(i);
-                }
-                if !row.album.trim().is_empty() {
-                    let key = album_key(&row.album, owner);
-                    if !entry.albums.contains(&key) {
-                        entry.albums.push(key);
-                    }
-                }
-                if name == owner {
-                    break;
-                }
+            // Artist view: the track artist (album artist when the track has none).
+            let artist = if row.artist.trim().is_empty() { owner } else { row.artist.as_str() };
+            if !artist.trim().is_empty() {
+                add(&mut artist_map, artist, i, key.as_ref());
+            }
+            // Album artist view: the album artist (track artist when the album has none).
+            if !owner.trim().is_empty() {
+                add(&mut album_artist_map, owner, i, key.as_ref());
             }
         }
         for rows in album_rows.values_mut() {
@@ -413,31 +470,58 @@ impl LibraryIndex {
             rows.sort_by(|&a, &b| {
                 let ka = (r[a].disc_no.unwrap_or(0), r[a].track_no.unwrap_or(u32::MAX));
                 let kb = (r[b].disc_no.unwrap_or(0), r[b].track_no.unwrap_or(u32::MAX));
-                ka.cmp(&kb).then_with(|| r[a].path.cmp(&r[b].path))
+                ka.cmp(&kb)
+                    .then_with(|| collate(&r[a].title, &r[b].title))
+                    .then_with(|| r[a].path.cmp(&r[b].path))
             });
         }
-        let mut albums: Vec<AlbumItem> = album_meta
+        let mut albums: Vec<(SortKey, SortKey, AlbumItem)> = album_meta
             .into_iter()
-            .map(|(key, (title, artist, year))| AlbumItem {
-                track_count: album_rows.get(&key).map_or(0, Vec::len),
-                key,
-                title,
-                artist,
-                year,
+            .map(|(key, (title, artist, year, album_artist))| {
+                let item = AlbumItem { track_count: album_rows.get(&key).map_or(0, Vec::len), key, title, artist, year, album_artist };
+                (SortKey::new(&item.title), SortKey::new(&item.artist), item)
             })
             .collect();
-        albums.sort_by(|a, b| {
-            a.title
-                .to_lowercase()
-                .cmp(&b.title.to_lowercase())
-                .then_with(|| a.artist.to_lowercase().cmp(&b.artist.to_lowercase()))
-        });
-        let mut artists: Vec<ArtistEntry> = artist_map.into_values().collect();
-        artists.sort_by_key(|a| a.name.to_lowercase());
-        self.artist_pos = artists.iter().enumerate().map(|(i, a)| (a.name.clone(), i)).collect();
-        self.albums = albums;
+        albums.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.key.cmp(&b.2.key)));
+        let album_order: HashMap<&str, usize> = albums.iter().enumerate().map(|(i, a)| (a.2.key.as_str(), i)).collect();
+        let finish = |map: HashMap<String, ArtistEntry>| -> (Vec<ArtistEntry>, HashMap<String, usize>) {
+            let mut list: Vec<(SortKey, ArtistEntry)> = map.into_values().map(|mut a| {
+                a.albums.sort_by_key(|k| album_order.get(k.as_str()).copied().unwrap_or(usize::MAX));
+                (SortKey::new(&a.name), a)
+            }).collect();
+            list.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(&b.1.name)));
+            let list: Vec<ArtistEntry> = list.into_iter().map(|(_, a)| a).collect();
+            let pos = list.iter().enumerate().map(|(i, a)| (a.name.clone(), i)).collect();
+            (list, pos)
+        };
+        let (artists, artist_pos) = finish(artist_map);
+        let (album_artists, album_artist_pos) = finish(album_artist_map);
+        self.albums = albums.into_iter().map(|(_, _, a)| a).collect();
         self.album_rows = album_rows;
         self.artists = artists;
+        self.artist_pos = artist_pos;
+        self.album_artists = album_artists;
+        self.album_artist_pos = album_artist_pos;
+    }
+
+    /// Sorts `rows` / `owners` into [`default_order`] (no-op when already sorted).
+    fn sort_rows_default(&mut self) {
+        if self.owners.len() != self.rows.len() {
+            self.owners.resize(self.rows.len(), String::new());
+        }
+        if self.owner_tagged.len() != self.rows.len() {
+            self.owner_tagged.resize(self.rows.len(), false);
+        }
+        let order = default_order(&self.rows, &self.owners);
+        if order.iter().enumerate().all(|(i, &j)| i == j) {
+            return;
+        }
+        let rows = Arc::make_mut(&mut self.rows);
+        let mut taken: Vec<Option<TrackRow>> = rows.drain(..).map(Some).collect();
+        rows.extend(order.iter().map(|&i| taken[i].take().unwrap_or_default()));
+        let mut owners: Vec<Option<String>> = self.owners.drain(..).map(Some).collect();
+        self.owners = order.iter().map(|&i| owners[i].take().unwrap_or_default()).collect();
+        self.owner_tagged = order.iter().map(|&i| self.owner_tagged[i]).collect();
     }
 
     pub(crate) fn row_index(&self, path: &Path) -> Option<usize> {
@@ -506,8 +590,20 @@ impl LibraryIndex {
         )
     }
 
-    pub(crate) fn artist(&self, name: &str) -> Option<&ArtistEntry> {
-        self.artist_pos.get(name).map(|&i| &self.artists[i])
+    /// Artist list for the view mode (`AlbumArtist` groups by album artist; `Artist` and
+    /// the legacy `Composer` group by track artist).
+    pub(crate) fn artists_for(&self, mode: ArtistViewMode) -> &[ArtistEntry] {
+        match mode {
+            ArtistViewMode::AlbumArtist => &self.album_artists,
+            _ => &self.artists,
+        }
+    }
+
+    pub(crate) fn artist(&self, name: &str, mode: ArtistViewMode) -> Option<&ArtistEntry> {
+        match mode {
+            ArtistViewMode::AlbumArtist => self.album_artist_pos.get(name).map(|&i| &self.album_artists[i]),
+            _ => self.artist_pos.get(name).map(|&i| &self.artists[i]),
+        }
     }
 
     pub(crate) fn paths_of(&self, rows: &[usize]) -> Vec<String> {
@@ -531,6 +627,49 @@ mod tests {
     }
 
     #[test]
+    fn default_order_is_artist_album_disc_track_title() {
+        let ctx = egui::Context::default();
+        let mut index = LibraryIndex::new(ctx, false);
+        let rows = vec![
+            db_row("/z/1.flac", "Track 10", "米津玄師", "STRAY SHEEP", ""),
+            db_row("/z/2.flac", "Song", "", "", ""),
+            db_row("/z/3.flac", "Track 2", "米津玄師", "STRAY SHEEP", ""),
+            db_row("/z/4.flac", "Blinding Lights", "The Weeknd", "After Hours", ""),
+            db_row("/z/5.flac", "アイドル", "YOASOBI", "THE BOOK 3", ""),
+            db_row("/z/6.flac", "夜に駆ける", "YOASOBI", "THE BOOK", ""),
+            db_row("/z/7.flac", "Levitating", "Dua Lipa", "Future Nostalgia", ""),
+            db_row("/z/8.flac", "Feat", "Guest", "THE BOOK", "YOASOBI"),
+            db_row("/z/9.flac", "あいうえお", "あいみょん", "", ""),
+        ];
+        let (rows, owners): (Vec<TrackRow>, Vec<String>) = rows.into_iter().map(row_from_db).unzip();
+        index.rows = Arc::new(rows);
+        index.owners = owners;
+        index.rebuild();
+        let titles: Vec<&str> = index.rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Levitating",      // Dua Lipa
+                "Blinding Lights", // (The) Weeknd
+                "Feat",            // YOASOBI / THE BOOK (album artist), no track numbers -> title
+                "夜に駆ける",
+                "アイドル",        // THE BOOK 3
+                "あいうえお",      // kana artist (kana sort after Latin)
+                "Track 2",         // kanji artist, natural number order
+                "Track 10",
+                "Song",            // no artist -> last
+            ]
+        );
+        let names: Vec<&str> = index.artists_for(ArtistViewMode::Artist).iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["Dua Lipa", "Guest", "The Weeknd", "YOASOBI", "あいみょん", "米津玄師"]);
+        let names: Vec<&str> = index.artists_for(ArtistViewMode::AlbumArtist).iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["Dua Lipa", "The Weeknd", "YOASOBI", "あいみょん", "米津玄師"]);
+        let albums: Vec<&str> = index.albums.iter().map(|a| a.title.as_str()).collect();
+        // "THE BOOK" files under B (leading "The" ignored)
+        assert_eq!(albums, vec!["After Hours", "THE BOOK", "THE BOOK 3", "Future Nostalgia", "STRAY SHEEP"]);
+    }
+
+    #[test]
     fn groups_albums_and_artists_and_applies_details() {
         let ctx = egui::Context::default();
         let mut index = LibraryIndex::new(ctx, false);
@@ -547,17 +686,24 @@ mod tests {
         let a = index.find_album("A", "X").unwrap();
         assert_eq!(index.album(&a).unwrap().track_count, 2);
         assert_eq!(index.display_row("/m/a/1.flac").title, "1", "untagged title falls back to the file stem");
-        assert!(index.artist("X").is_some());
-        assert_eq!(index.artist("X").unwrap().tracks.len(), 2);
+        assert!(index.artist("X", ArtistViewMode::Artist).is_some());
+        assert_eq!(index.artist("X", ArtistViewMode::Artist).unwrap().tracks.len(), 1);
+        assert_eq!(index.artist("X feat. Y", ArtistViewMode::Artist).unwrap().tracks.len(), 1);
+        assert_eq!(index.artist("X", ArtistViewMode::AlbumArtist).unwrap().tracks.len(), 2);
+        assert!(index.artist("X feat. Y", ArtistViewMode::AlbumArtist).is_none());
         assert_eq!(index.display_row("/elsewhere/song.mp3").title, "song");
 
-        // Track numbers order the album.
+        // Track numbers order the album (and the default library order).
+        let i2 = index.row_index(Path::new("/m/a/2.flac")).unwrap();
+        let i1 = index.row_index(Path::new("/m/a/1.flac")).unwrap();
         let rows = Arc::make_mut(&mut index.rows);
-        apply_details(&mut rows[0], &TrackDetails { track_no: Some(2), duration_ms: Some(1000), ..Default::default() });
-        apply_details(&mut rows[1], &TrackDetails { track_no: Some(1), year: Some(2001), ..Default::default() });
+        apply_details(&mut rows[i2], &TrackDetails { track_no: Some(1), duration_ms: Some(1000), ..Default::default() });
+        apply_details(&mut rows[i1], &TrackDetails { track_no: Some(2), year: Some(2001), ..Default::default() });
         index.rebuild();
         let order = index.paths_of(index.album_rows(&a));
-        assert_eq!(order, vec!["/m/a/1.flac".to_string(), "/m/a/2.flac".to_string()]);
+        assert_eq!(order, vec!["/m/a/2.flac".to_string(), "/m/a/1.flac".to_string()]);
+        let all: Vec<String> = index.rows.iter().map(|r| r.path.to_string_lossy().into_owned()).collect();
+        assert_eq!(all, vec!["/m/a/2.flac", "/m/a/1.flac", "/m/b/1.flac"]);
         assert_eq!(index.album(&a).unwrap().year, Some(2001));
     }
 }

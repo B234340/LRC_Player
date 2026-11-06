@@ -7,6 +7,7 @@ mod folders;
 mod library;
 mod now_playing;
 mod playlists;
+mod queue;
 mod settings;
 
 use std::hash::{Hash, Hasher};
@@ -66,6 +67,15 @@ pub(crate) fn back_link(ui: &mut Ui, label: &str) -> bool {
     button(ui, ButtonKind::Ghost, Some(Icon::ChevronLeft), label).clicked()
 }
 
+/// Back link of a detail page: returns to the previous location (e.g. the library table
+/// with its search and scroll position) when there is one, else to `parent`.
+pub(crate) fn back_nav(app: &GuiApp, ui: &mut Ui, tr: &Tr, parent: Page) -> Option<UiAction> {
+    match app.back_label(tr) {
+        Some(label) => back_link(ui, label).then_some(UiAction::Back),
+        None => back_link(ui, tr.t(shell::sidebar::page_label_key(parent))).then_some(UiAction::Navigate(parent)),
+    }
+}
+
 /// Round avatar with the first letter (artists) or an icon.
 pub(crate) fn avatar(ui: &mut Ui, size: f32, name: &str, icon: Option<Icon>) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
@@ -110,6 +120,7 @@ impl GuiApp {
                 Page::Artists => artists::show(self, ui, tr),
                 Page::Playlists => playlists::show(self, ui, tr),
                 Page::Folders => folders::show(self, ui, tr),
+                Page::Queue => queue::show(self, ui, tr),
                 Page::Settings => settings::show(self, ui, tr),
                 Page::NowPlaying => Vec::new(),
             };

@@ -7,11 +7,14 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use lrc_player_domain::model::PlaybackState;
 
-use crate::presentation::app::{DetailsDialog, GuiApp, Modal};
+use crate::presentation::app::{ArtistViewMode, DetailsDialog, GuiApp, Modal, NavLocation};
 use crate::presentation::ui::{
     widgets::{gain_to_ui, ToastKind},
     Page, RightPanel, UiAction,
 };
+
+/// Locations kept for "Back".
+const HISTORY_LIMIT: usize = 50;
 
 /// Identical toasts within this window are dropped (e.g. repeated engine errors).
 const TOAST_DEDUP: Duration = Duration::from_secs(2);
@@ -70,11 +73,58 @@ impl GuiApp {
         self.push_toast(ToastKind::Error, text);
     }
 
+    /// Toast with an action button (e.g. "Show queue").
+    pub(crate) fn toast_with_action(&mut self, kind: ToastKind, text: String, label: &str, action: UiAction) {
+        self.ui.last_toast = Some((text.clone(), Instant::now()));
+        self.ui.toasts.push_with_action(kind, text, kind.default_secs() + 1.5, label, action);
+    }
+
+    fn location(&self) -> NavLocation {
+        NavLocation {
+            page: self.ui.page,
+            album: self.ui.album_detail.clone(),
+            artist: self.ui.artist_detail.clone(),
+            playlist: self.ui.playlist_detail.clone(),
+        }
+    }
+
+    /// Remembers the current location before moving elsewhere (for [`UiAction::Back`]).
+    fn push_history(&mut self) {
+        let here = self.location();
+        if self.ui.history.last() != Some(&here) {
+            self.ui.history.push(here);
+            if self.ui.history.len() > HISTORY_LIMIT {
+                self.ui.history.remove(0);
+            }
+        }
+    }
+
+    /// Label of the location [`UiAction::Back`] returns to (the page name).
+    pub(crate) fn back_label(&self, tr: &crate::presentation::ui::Tr) -> Option<&'static str> {
+        let loc = self.ui.history.last()?;
+        Some(tr.t(crate::presentation::ui::shell::sidebar::page_label_key(loc.page)))
+    }
+
+    /// Returns to the previous location; the library search and table scroll are kept.
+    pub(crate) fn go_back(&mut self) {
+        let Some(loc) = self.ui.history.pop() else { return };
+        let detail_changed = loc.album != self.ui.album_detail || loc.artist != self.ui.artist_detail || loc.playlist != self.ui.playlist_detail;
+        self.ui.page = loc.page;
+        self.ui.album_detail = loc.album;
+        self.ui.artist_detail = loc.artist;
+        self.ui.playlist_detail = loc.playlist;
+        if detail_changed {
+            self.reset_detail_table();
+        }
+        self.save_state();
+    }
+
     /// Switches the main page (leaving any detail view).
     pub(crate) fn navigate(&mut self, page: Page) {
         if self.ui.page == page && self.ui.album_detail.is_none() && self.ui.artist_detail.is_none() && self.ui.playlist_detail.is_none() {
             return;
         }
+        self.push_history();
         self.ui.page = page;
         self.ui.album_detail = None;
         self.ui.artist_detail = None;
@@ -89,6 +139,7 @@ impl GuiApp {
     }
 
     pub(crate) fn open_album(&mut self, key: String) {
+        self.push_history();
         self.ui.page = Page::Albums;
         self.ui.album_detail = Some(key);
         self.ui.artist_detail = None;
@@ -98,6 +149,7 @@ impl GuiApp {
     }
 
     pub(crate) fn open_artist(&mut self, name: String) {
+        self.push_history();
         self.ui.page = Page::Artists;
         self.ui.artist_detail = Some(name);
         self.ui.album_detail = None;
@@ -107,6 +159,7 @@ impl GuiApp {
     }
 
     pub(crate) fn open_playlist(&mut self, id: String) {
+        self.push_history();
         self.ui.page = Page::Playlists;
         self.ui.playlist_detail = Some(id);
         self.ui.album_detail = None;
@@ -149,6 +202,7 @@ impl GuiApp {
 
             // ----- navigation / chrome -----
             UiAction::Navigate(page) => self.navigate(page),
+            UiAction::Back => self.go_back(),
             UiAction::ToggleSidebar => self.save_state(),
             UiAction::ToggleRightPanel(panel) => {
                 self.ui.right_panel = if self.ui.right_panel == Some(panel) { None } else { Some(panel) };
@@ -169,15 +223,43 @@ impl GuiApp {
             }
             UiAction::OpenPlaylist(id) => self.open_playlist(id),
             UiAction::OpenAlbum(key) => self.open_album(key),
-            UiAction::OpenArtist(name) | UiAction::ShowArtist(name) => {
+            UiAction::OpenArtist(name) => {
                 if name.trim().is_empty() {
                     return;
                 }
                 self.open_artist(name)
             }
+            UiAction::OpenArtistAs { name, album_artist } => {
+                if name.trim().is_empty() {
+                    return;
+                }
+                let mode = if album_artist { ArtistViewMode::AlbumArtist } else { ArtistViewMode::Artist };
+                if self.artist_view_mode != mode {
+                    self.artist_view_mode = mode;
+                }
+                self.open_artist(name)
+            }
+            UiAction::ShowArtist(name) => {
+                if name.trim().is_empty() {
+                    return;
+                }
+                // A track's artist: show it in the "Artist" grouping.
+                if self.artist_view_mode == ArtistViewMode::AlbumArtist {
+                    self.artist_view_mode = ArtistViewMode::Artist;
+                }
+                self.open_artist(name)
+            }
 
             // ----- library / tracks -----
-            UiAction::PlayTracks { paths, start } => self.play_tracks(path_strings(paths), start),
+            UiAction::PlayTracks { paths, start } => {
+                let paths = path_strings(paths);
+                let replaced = !self.queue.is_empty() && self.queue != paths;
+                let count = paths.len();
+                self.play_tracks(paths, start);
+                if replaced && count > 0 {
+                    self.toast_with_action(ToastKind::Info, tr.f("toast.queue_replaced", &[&count]), tr.t("toast.show_queue"), UiAction::Navigate(Page::Queue));
+                }
+            }
             UiAction::PlayAlbum(key) => {
                 let paths = self.library.paths_of(self.library.album_rows(&key));
                 self.play_tracks(paths, 0);
@@ -185,6 +267,28 @@ impl GuiApp {
             UiAction::PlayNext(paths) => self.play_next_tracks(path_strings(paths)),
             UiAction::Enqueue(paths) => self.enqueue_with_toast(path_strings(paths)),
             UiAction::AddToPlaylist { playlist_id, paths } => self.add_to_playlist(&playlist_id, path_strings(paths)),
+            UiAction::ShowAlbumOfTrack(path) => {
+                let key = self.library.album_key_of(&path).or_else(|| {
+                    let row = self.library.display_row(&path.to_string_lossy());
+                    self.library.find_album(&row.album, &row.artist)
+                });
+                match key {
+                    Some(key) => self.open_album(key),
+                    None => {
+                        let row = self.library.display_row(&path.to_string_lossy());
+                        if !row.album.is_empty() {
+                            self.toast_info(tr.f("toast.album_not_in_library", &[&row.album]));
+                        }
+                    }
+                }
+            }
+            UiAction::SetColumnVisible { column, visible } => {
+                self.ui.library_columns.retain(|c| *c != column);
+                if visible {
+                    self.ui.library_columns.push(column);
+                }
+                self.save_state();
+            }
             UiAction::ShowAlbum { album, artist } => match self.library.find_album(&album, &artist) {
                 Some(key) => self.open_album(key),
                 None => self.toast_info(tr.f("toast.album_not_in_library", &[&album])),
@@ -206,6 +310,7 @@ impl GuiApp {
             UiAction::QueueReorder { from, to } => self.queue_reorder(from, to),
             UiAction::QueueRemove(i) => self.queue_remove(i),
             UiAction::QueueClear => self.queue_clear(),
+            UiAction::QueueInsert { paths, at } => self.queue_insert(path_strings(paths), at),
             UiAction::QueueSaveAsPlaylist => {
                 if !self.queue.is_empty() {
                     let name = self.suggest_playlist_name(tr.t("playlist.from_queue"));

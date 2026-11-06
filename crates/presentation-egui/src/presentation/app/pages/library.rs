@@ -9,10 +9,21 @@ use crate::presentation::app::{shell::playlist_entries, GuiApp};
 use crate::presentation::ui::{
     format::format_count,
     i18n::Tr,
-    views::{track_table, Column, IndexMode, TrackTableProps},
+    views::{track_table, Column, IndexMode, TableLinks, TrackTableProps},
     widgets::{search_box, section_header},
     UiAction,
 };
+
+/// Columns the header context menu can add to the library table.
+const OPTIONAL_COLUMNS: [Column; 2] = [Column::Year, Column::Genre];
+
+/// Default columns plus the enabled optional ones (Year / Genre before Time).
+fn library_columns(optional: &[Column]) -> Vec<Column> {
+    let mut cols = vec![Column::Index, Column::Title, Column::Artist, Column::Album];
+    cols.extend(OPTIONAL_COLUMNS.iter().copied().filter(|c| optional.contains(c)));
+    cols.push(Column::Duration);
+    cols
+}
 
 pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
     let total = app.library.rows.len();
@@ -37,6 +48,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
         loading(ui, tr.t("library.loading"));
         return Vec::new();
     }
+    let columns = library_columns(&app.ui.library_columns);
     let playing = app.is_playing();
     let entries = playlist_entries(&app.playlists, &tr);
     let now = (!app.play_path.is_empty()).then(|| Path::new(app.play_path.as_str()));
@@ -47,13 +59,15 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
             rows: &app.library.rows,
             rows_revision: app.library.revision,
             query: &app.ui.library_query,
-            columns: &Column::DEFAULT,
+            columns: &columns,
             now_playing: now,
             playing,
             index_mode: IndexMode::Position,
             reorderable: false,
             playlists: &entries,
             removable: false,
+            optional_columns: &OPTIONAL_COLUMNS,
+            links: TableLinks::ALL,
             tr,
         },
         &mut app.ui.library_table,

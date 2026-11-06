@@ -1,9 +1,18 @@
 //! Now Playing: artwork over the blurred backdrop, title / artist / album links, synced
 //! lyrics (karaoke, click-to-seek, offset + font controls) and an optional slim spectrum.
+//!
+//! The view reports how large the cover is shown (`wanted_art_px`, physical px, including
+//! the enlarged view); beyond 1024 px the page asks the artwork loader for a sharper copy
+//! (1536 / 2048 px). The loader frees it a few frames after the page stops asking, i.e.
+//! shortly after leaving this page.
 
 use eframe::egui::{self, pos2, Rect, Ui};
 
 use crate::presentation::app::{lyrics::lyric_lines, spectrum::paint_spectrum_strip, GuiApp};
+
+/// Height of the spectrum strip under the artwork column, and the gap above it.
+const SPECTRUM_H: f32 = 34.0;
+const SPECTRUM_GAP: f32 = 14.0;
 use crate::presentation::ui::{
     i18n::Tr,
     views::{now_playing, LyricsProps, NowPlayingProps},
@@ -40,12 +49,20 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
         can_save_offset: app.selected_lyrics_index.is_some(),
         tr,
     });
+    let show_spectrum = app.config.show_spectrum && has_track;
+    app.ui.now.bottom_reserve = if show_spectrum { SPECTRUM_H + SPECTRUM_GAP } else { 0.0 };
+    // Sharper cover when it is shown beyond the regular 1024 px texture (last frame's size).
+    let hires = match &app.play_artwork_handle {
+        Some(_) if has_track => app.artwork.play_artwork_hires(&app.play_path, app.ui.now.wanted_art_px),
+        _ => None,
+    };
+    let artwork = hires.as_ref().or(app.play_artwork_handle.as_ref()).map(Tex::from);
     let props = NowPlayingProps {
         has_track,
         title: &title,
         artist: &artist,
         album: &album,
-        artwork: app.play_artwork_handle.as_ref().map(Tex::from),
+        artwork,
         backdrop: app.play_backdrop_handle.as_ref().map(Tex::from),
         seed: &seed,
         lyrics,
@@ -53,17 +70,19 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
     };
     let actions = now_playing(&mut child, &props, &mut app.ui.now);
 
-    // Slim spectrum under the artwork column (wide layout only), drawn over the backdrop.
-    let inner = rect.shrink(32.0);
-    if app.config.show_spectrum && has_track && inner.width() >= 820.0 {
+    // Slim spectrum under the artwork column (wide layout only), drawn over the backdrop in
+    // the space the view kept free for it.
+    let layout = app.ui.now.layout.filter(|l| l.wide);
+    if let Some(layout) = layout.filter(|_| show_spectrum) {
         if app.is_playing() {
             if let Some(tap) = app.spectrum_tap() {
                 app.spectrum.update(&tap);
             }
         }
-        let col_w = (inner.width() * 0.42).clamp(300.0, 520.0);
-        let strip = Rect::from_min_max(pos2(inner.left() + 24.0, inner.bottom() - 34.0), pos2(inner.left() + col_w - 24.0, inner.bottom()));
-        paint_spectrum_strip(ui.painter(), strip, &app.spectrum, egui::Color32::from_white_alpha(200));
+        let (art, inner) = (layout.art, layout.inner);
+        let top = (inner.bottom() - SPECTRUM_H).max(layout.info.bottom() + 8.0);
+        let strip = Rect::from_min_max(pos2(art.left() + 24.0, top), pos2(art.right() - 24.0, inner.bottom()));
+        paint_spectrum_strip(&ui.painter_at(rect), strip, &app.spectrum, egui::Color32::from_white_alpha(200));
     }
     actions
 }

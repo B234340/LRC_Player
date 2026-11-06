@@ -14,6 +14,8 @@ pub enum Page {
     #[default]
     NowPlaying,
     Library,
+    /// Full-page play queue (now playing + up next).
+    Queue,
     Albums,
     Artists,
     Playlists,
@@ -23,8 +25,9 @@ pub enum Page {
 
 impl Page {
     /// Pages in sidebar order (Settings is pinned to the bottom separately).
-    pub const MAIN: [Page; 6] = [
+    pub const MAIN: [Page; 7] = [
         Page::NowPlaying,
+        Page::Queue,
         Page::Library,
         Page::Albums,
         Page::Artists,
@@ -89,6 +92,8 @@ pub enum UiAction {
 
     // ----- navigation / chrome -----
     Navigate(Page),
+    /// Go back to the previous location (← button, mouse back button, Alt+←).
+    Back,
     ToggleSidebar,
     ToggleRightPanel(RightPanel),
     /// Toggle the EQ popover/window.
@@ -100,6 +105,9 @@ pub enum UiAction {
     OpenAlbum(String),
     /// Open the artist page by artist name.
     OpenArtist(String),
+    /// Open the artist page in a given grouping (`album_artist` = Album artist mode), e.g.
+    /// from the artist shown on an album card.
+    OpenArtistAs { name: String, album_artist: bool },
 
     // ----- library / tracks -----
     /// Replace the queue with `paths` and start at `start`.
@@ -113,7 +121,10 @@ pub enum UiAction {
     AddToPlaylist { playlist_id: String, paths: Vec<PathBuf> },
     /// Show the album the track belongs to (album name, artist).
     ShowAlbum { album: String, artist: String },
+    /// Open the artist page of a track's artist (switches the Artists view to "Artist").
     ShowArtist(String),
+    /// Open the album page of the album `path` belongs to.
+    ShowAlbumOfTrack(PathBuf),
     OpenContainingFolder(PathBuf),
     ShowDetails(PathBuf),
     /// Table header clicked.
@@ -125,6 +136,8 @@ pub enum UiAction {
     Reorder { from: usize, to: usize },
     /// Remove rows (source-row indices) from the list the table shows (e.g. a playlist).
     RemoveRows(Vec<usize>),
+    /// Show / hide an optional track-table column (header context menu).
+    SetColumnVisible { column: crate::presentation::ui::views::Column, visible: bool },
 
     // ----- queue -----
     QueuePlayIndex(usize),
@@ -132,6 +145,8 @@ pub enum UiAction {
     QueueRemove(usize),
     QueueClear,
     QueueSaveAsPlaylist,
+    /// Insert tracks into the queue before index `at` (drag & drop onto the queue).
+    QueueInsert { paths: Vec<PathBuf>, at: usize },
 
     // ----- lyrics -----
     /// Seek to the start of lyric line `index` (`start_ms` is the line's lyric time,

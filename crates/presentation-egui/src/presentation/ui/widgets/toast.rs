@@ -5,6 +5,7 @@ use eframe::egui::{
 };
 
 use crate::presentation::ui::{
+    actions::UiAction,
     i18n::Tr,
     icons::{self, icon_button_ex, Icon, IconButtonStyle},
     theme::{self, radius},
@@ -49,6 +50,8 @@ pub struct Toast {
     remaining: f32,
     /// Time since shown, for the fade-in.
     age: f32,
+    /// Optional action button: (label, action emitted when clicked; the toast closes).
+    pub action: Option<(String, UiAction)>,
 }
 
 /// Toast queue. Push from anywhere; call [`Toasts::show`] once per frame.
@@ -83,7 +86,17 @@ impl Toasts {
     pub fn push(&mut self, kind: ToastKind, text: impl Into<String>, secs: f32) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.items.push(Toast { id, kind, text: text.into(), secs, remaining: secs, age: 0.0 });
+        self.items.push(Toast { id, kind, text: text.into(), secs, remaining: secs, age: 0.0, action: None });
+        id
+    }
+
+    /// Toast with an action button (e.g. "Show queue"); [`Toasts::show`] returns the action
+    /// when it is clicked.
+    pub fn push_with_action(&mut self, kind: ToastKind, text: impl Into<String>, secs: f32, label: impl Into<String>, action: UiAction) -> u64 {
+        let id = self.push(kind, text, secs);
+        if let Some(t) = self.items.last_mut() {
+            t.action = Some((label.into(), action));
+        }
         id
     }
 
@@ -113,13 +126,14 @@ impl Toasts {
     }
 
     /// Draw the toasts in the bottom-right corner. `bottom_inset` keeps them above the
-    /// transport bar.
-    pub fn show(&mut self, ctx: &Context, bottom_inset: f32, tr: &Tr) {
+    /// transport bar. Returns the actions of clicked toast buttons.
+    pub fn show(&mut self, ctx: &Context, bottom_inset: f32, tr: &Tr) -> Vec<UiAction> {
+        let mut actions = Vec::new();
         let now = ctx.input(|i| i.time);
         let dt = self.last_time.map(|t| (now - t) as f32).unwrap_or(0.0).clamp(0.0, 0.25);
         self.last_time = Some(now);
         if self.items.is_empty() {
-            return;
+            return actions;
         }
         let pal = theme::palette_for(ctx, ctx.global_style().visuals.dark_mode);
         let mut dismissed: Vec<u64> = Vec::new();
@@ -130,7 +144,7 @@ impl Toasts {
             .anchor(Align2::RIGHT_BOTTOM, vec2(-self.margin.x, -(self.margin.y + bottom_inset)))
             .interactable(true)
             .show(ctx, |ui| {
-                ui.set_max_width(360.0);
+                ui.set_max_width(410.0);
                 ui.spacing_mut().item_spacing.y = 8.0;
                 // newest at the bottom
                 for toast in self.items[..visible].iter_mut() {
@@ -152,12 +166,15 @@ impl Toasts {
                         .inner_margin(Margin { left: 12, right: 6, top: 8, bottom: 8 });
                     let resp = frame
                         .show(ui, |ui| {
-                            ui.set_width(330.0);
+                            ui.set_width(if toast.action.is_some() { 390.0 } else { 330.0 });
                             ui.horizontal(|ui| {
                                 let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
                                 icons::paint_icon(ui.painter(), r, toast.kind.icon(), accent);
                                 ui.add_space(4.0);
-                                let w = ui.available_width() - 34.0;
+                                let action_w = toast.action.as_ref().map_or(0.0, |(label, _)| {
+                                    ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(12.5), pal.text).size().x + 26.0
+                                });
+                                let w = ui.available_width() - 34.0 - action_w;
                                 ui.allocate_ui(vec2(w, 20.0), |ui| {
                                     ui.add(egui::Label::new(RichText::new(&toast.text).color(pal.text)).wrap());
                                 });
@@ -171,6 +188,12 @@ impl Toasts {
                                     );
                                     if close.clicked() {
                                         dismissed.push(toast.id);
+                                    }
+                                    if let Some((label, action)) = &toast.action {
+                                        if action_button(ui, label, accent).clicked() {
+                                            actions.push(action.clone());
+                                            dismissed.push(toast.id);
+                                        }
                                     }
                                 });
                             });
@@ -195,7 +218,19 @@ impl Toasts {
         if !self.items.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
+        actions
     }
+}
+
+/// Compact text button in the toast's accent color.
+fn action_button(ui: &mut egui::Ui, label: &str, accent: egui::Color32) -> egui::Response {
+    let g = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(12.5), accent);
+    let (rect, resp) = ui.allocate_exact_size(vec2(g.size().x + 18.0, 26.0), Sense::click());
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+    let fill = if resp.hovered() { theme::with_alpha(accent, 0.18) } else { theme::with_alpha(accent, 0.10) };
+    ui.painter().rect_filled(rect, radius::MD, fill);
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, accent);
+    resp
 }
 
 #[cfg(test)]
@@ -211,5 +246,7 @@ mod tests {
         t.dismiss(a);
         assert_eq!(t.len(), 1);
         assert_eq!(t.items[0].kind, ToastKind::Error);
+        t.push_with_action(ToastKind::Success, "c", 3.0, "Show", UiAction::QueueClear);
+        assert_eq!(t.items[1].action.as_ref().map(|a| a.0.as_str()), Some("Show"));
     }
 }

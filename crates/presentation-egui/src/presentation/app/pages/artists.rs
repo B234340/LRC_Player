@@ -4,32 +4,56 @@ use std::path::Path;
 
 use eframe::egui::{self, pos2, vec2, CursorIcon, FontId, Rect, ScrollArea, Sense, Ui};
 
-use super::{albums::detail_header, avatar, back_link, hash_key, loading, tracks_summary};
-use crate::presentation::app::{shell::playlist_entries, GuiApp};
+use super::{albums::{detail_art_size, detail_header}, avatar, back_nav, hash_key, loading, tracks_summary};
+use crate::presentation::app::{shell::playlist_entries, ArtistViewMode, GuiApp};
 use crate::presentation::ui::{
+    collate::collate,
     format::format_count,
     i18n::Tr,
     icons::Icon,
     theme,
-    views::{normalize, track_table, Column, IndexMode, TrackTableProps},
-    widgets::{button, empty_state, paint_artwork, search_box_with_hint, section_header, ButtonKind, Tex},
+    views::{normalize, track_table, Column, IndexMode, TableLinks, TrackTableProps},
+    widgets::{button, empty_state, paint_artwork, search_box_with_hint, section_header, segmented, ButtonKind, Tex},
     Page, UiAction,
 };
 
 const ROW_H: f32 = 56.0;
+
+fn other_mode(mode: ArtistViewMode) -> ArtistViewMode {
+    if mode == ArtistViewMode::AlbumArtist {
+        ArtistViewMode::Artist
+    } else {
+        ArtistViewMode::AlbumArtist
+    }
+}
 
 pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
     if let Some(name) = app.ui.artist_detail.clone() {
         return detail(app, ui, tr, &name);
     }
     let mut actions = Vec::new();
-    let sub = format!("{} {}", format_count(app.library.artists.len()), tr.t("artists.count"));
+    let mode = app.artist_view_mode;
+    let sub = format!("{} {}", format_count(app.library.artists_for(mode).len()), tr.t("artists.count"));
     let focus = app.ui.focus_search;
     let query = &mut app.ui.artist_query;
+    let mut new_mode = None;
+    // The Artist / Album artist switch sits under the header (left-aligned), so it never
+    // competes with the search box for width.
     section_header(ui, tr.t("nav.artists"), Some(&sub), |ui| {
-        let w = (ui.available_width() * 0.5).clamp(180.0, 320.0);
+        let w = (ui.available_width() * 0.5).clamp(140.0, 320.0);
         search_box_with_hint(ui, egui::Id::new("artist_search"), query, w, focus, &tr, tr.t("search.artists"));
     });
+    ui.add_space(10.0);
+    let labels = [tr.t("artists.mode_artist"), tr.t("artists.mode_album_artist")];
+    let current = usize::from(mode == ArtistViewMode::AlbumArtist);
+    if let Some(i) = segmented(ui, egui::Id::new("artist_view_mode"), &labels, current) {
+        new_mode = Some(if i == 1 { ArtistViewMode::AlbumArtist } else { ArtistViewMode::Artist });
+    }
+    if let Some(m) = new_mode {
+        app.artist_view_mode = m;
+        app.save_state();
+    }
+    let mode = app.artist_view_mode;
     ui.add_space(12.0);
     if !app.library.loaded {
         loading(ui, tr.t("library.loading"));
@@ -38,14 +62,14 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
     let q = normalize(app.ui.artist_query.trim());
     let visible: Vec<usize> = app
         .library
-        .artists
+        .artists_for(mode)
         .iter()
         .enumerate()
         .filter(|(_, a)| q.is_empty() || normalize(&a.name).contains(&q))
         .map(|(i, _)| i)
         .collect();
     if visible.is_empty() {
-        let (title, hint) = if app.library.artists.is_empty() {
+        let (title, hint) = if app.library.artists_for(mode).is_empty() {
             (tr.t("artists.empty"), tr.t("library.empty_hint"))
         } else {
             (tr.t("table.no_results"), tr.t("table.no_results_hint"))
@@ -58,7 +82,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
     ScrollArea::vertical().id_salt("artists_list").auto_shrink([false, false]).show_rows(ui, ROW_H, visible.len(), |ui, range| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         for pos in range {
-            let a = &app.library.artists[visible[pos]];
+            let a = &app.library.artists_for(mode)[visible[pos]];
             let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click());
             let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
             if resp.hovered() {
@@ -92,12 +116,13 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
 
 fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, name: &str) -> Vec<UiAction> {
     let mut actions = Vec::new();
-    if back_link(ui, tr.t("nav.artists")) {
-        actions.push(UiAction::Navigate(Page::Artists));
+    if let Some(a) = back_nav(app, ui, &tr, Page::Artists) {
+        actions.push(a);
         return actions;
     }
     ui.add_space(8.0);
-    let Some(entry) = app.library.artist(name).cloned() else {
+    let mode = app.artist_view_mode;
+    let Some(entry) = app.library.artist(name, mode).or_else(|| app.library.artist(name, other_mode(mode))).cloned() else {
         if app.library.loaded {
             ui.label(theme::muted(ui, tr.t("artists.not_found")));
         } else {
@@ -106,17 +131,20 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, name: &str) -> Vec<UiAction> {
         return actions;
     };
     let library = &app.library;
-    app.ui.detail_rows.ensure(hash_key(("artist", name, library.revision)), || {
-        let mut idx = entry.tracks.clone();
+    app.ui.detail_rows.ensure(hash_key(("artist", name, mode == ArtistViewMode::AlbumArtist, library.revision)), || {
+        // Album order of the artist's albums strip, then disc / track / title.
         let r = &library.rows;
-        idx.sort_by(|&a, &b| {
-            r[a].album
-                .to_lowercase()
-                .cmp(&r[b].album.to_lowercase())
+        let album_pos = |i: usize| {
+            library.album_key_of(&r[i].path).and_then(|k| entry.albums.iter().position(|a| *a == k)).unwrap_or(usize::MAX)
+        };
+        let mut idx: Vec<(usize, usize)> = entry.tracks.iter().map(|&i| (album_pos(i), i)).collect();
+        idx.sort_by(|&(pa, a), &(pb, b)| {
+            pa.cmp(&pb)
                 .then((r[a].disc_no, r[a].track_no).cmp(&(r[b].disc_no, r[b].track_no)))
-                .then_with(|| r[a].path.cmp(&r[b].path))
+                .then_with(|| collate(&r[a].title, &r[b].title))
+                .then_with(|| a.cmp(&b))
         });
-        idx.iter().map(|&i| r[i].clone()).collect()
+        idx.iter().map(|&(_, i)| r[i].clone()).collect()
     });
     let meta = format!(
         "{} {} · {}",
@@ -128,7 +156,7 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, name: &str) -> Vec<UiAction> {
     detail_header(
         ui,
         |ui| {
-            avatar(ui, 140.0, name, None);
+            avatar(ui, detail_art_size(ui, 140.0), name, None);
         },
         tr.t("artists.kicker"),
         name,
@@ -200,6 +228,9 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, name: &str) -> Vec<UiAction> {
             reorderable: false,
             playlists: &entries,
             removable: false,
+            optional_columns: &[],
+            // The artist column would point to this page.
+            links: TableLinks { title: true, artist: false, album: true },
             tr,
         },
         &mut app.ui.detail_table,

@@ -160,6 +160,7 @@ fn mock_albums() -> Vec<AlbumItem> {
                 artist: (*a).into(),
                 year: Some(2019 + (v.len() % 5) as i32),
                 track_count: 8 + v.len() % 6,
+                album_artist: false,
             });
         }
     }
@@ -301,6 +302,8 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                     right_panel: right,
                     eq_open: false,
                     eq_enabled: true,
+                    queue_len: 12,
+                    no_output: false,
                     tr,
                 },
             );
@@ -423,6 +426,8 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                                 reorderable: false,
                                 playlists: &playlists,
                                 removable: false,
+                                optional_columns: &[Column::Year, Column::Genre],
+                                links: crate::presentation::ui::views::TableLinks::ALL,
                                 tr,
                             },
                             &mut s.table,
@@ -436,7 +441,7 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                         let albums = &mock.albums;
                         album_grid(
                             ui,
-                            &AlbumGridProps { id_salt: "albums", albums, now_playing: Some(albums[0].key.as_str()), tr },
+                            &AlbumGridProps { id_salt: "albums", albums, now_playing: Some(albums[0].key.as_str()), card_size: crate::presentation::ui::views::album_grid::ALBUM_CARD_DEFAULT, tr },
                             &mut |key| {
                                 let i = albums.iter().position(|a| a.key == key)?;
                                 covers[i].as_ref().map(Tex::from)
@@ -591,6 +596,8 @@ fn transport_widths() {
                         right_panel: Some(RightPanel::Lyrics),
                         eq_open: true,
                         eq_enabled: false,
+                        queue_len: 12,
+                        no_output: false,
                         tr: Tr::JA,
                     },
                 );

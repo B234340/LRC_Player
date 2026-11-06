@@ -121,6 +121,45 @@ pub enum IndexMode {
     TrackNumber,
 }
 
+/// Which cell texts act as links. Only the painted text is clickable (pointer cursor,
+/// accent color and underline on hover); the rest of the cell still selects the row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TableLinks {
+    /// Title plays the view from that row (like a double-click).
+    pub title: bool,
+    /// Artist opens the artist page (`UiAction::ShowArtist`).
+    pub artist: bool,
+    /// Album opens the album page (`UiAction::ShowAlbumOfTrack`).
+    pub album: bool,
+}
+
+impl TableLinks {
+    pub const ALL: TableLinks = TableLinks { title: true, artist: true, album: true };
+    pub const NONE: TableLinks = TableLinks { title: false, artist: false, album: false };
+
+    pub fn enabled(self, c: Column) -> bool {
+        match c {
+            Column::Title => self.title,
+            Column::Artist => self.artist,
+            Column::Album => self.album,
+            _ => false,
+        }
+    }
+}
+
+/// Rect of a cell's text as painted: left-aligned (or right-aligned) with [`CELL_PAD`],
+/// vertically centered.
+pub(crate) fn cell_text_rect(cell: Rect, text: Vec2, right: bool) -> Rect {
+    let x = if right { cell.right() - CELL_PAD - text.x } else { cell.left() + CELL_PAD };
+    Rect::from_min_size(pos2(x, cell.center().y - text.y / 2.0), text)
+}
+
+/// The link (if any) whose text is under `pos`. Link rects get 2 px of vertical slack so
+/// the underline is part of the target.
+pub(crate) fn hit_link(links: &[(Column, Rect)], pos: egui::Pos2) -> Option<Column> {
+    links.iter().find(|(_, r)| r.expand2(vec2(0.0, 2.0)).contains(pos)).map(|(c, _)| *c)
+}
+
 /// Payload carried while dragging rows (to reorder, or onto a sidebar playlist).
 #[derive(Clone, Debug)]
 pub struct TrackDragPayload {
@@ -148,6 +187,11 @@ pub struct TrackTableProps<'a> {
     pub playlists: &'a [PlaylistEntry<'a>],
     /// Offer "Remove from playlist" (context menu, Delete key) emitting `RemoveRows`.
     pub removable: bool,
+    /// Columns the header context menu can show / hide (emits `SetColumnVisible`); empty =
+    /// no header menu. A column is shown when it is in `columns`.
+    pub optional_columns: &'a [Column],
+    /// Cell texts that act as links.
+    pub links: TableLinks,
     pub tr: Tr,
 }
 
@@ -261,6 +305,8 @@ impl TrackTableState {
 const HEADER_H: f32 = 32.0;
 const ROW_H: f32 = theme::metrics::ROW_HEIGHT;
 const CELL_PAD: f32 = 10.0;
+/// Width reserved at the end of the title cell for the hover ⋯ button.
+const MORE_SLOT: f32 = 28.0;
 
 /// Layout of visible columns: (column, x offset, width).
 ///
@@ -387,6 +433,9 @@ fn table_body(
             let icon = if state.sort.descending { Icon::ChevronDown } else { Icon::ChevronUp };
             paint_icon(ui.painter(), Rect::from_center_size(pos2(tx + gw + 9.0, r.center().y), Vec2::splat(11.0)), icon, pal.accent_fg);
         }
+        if !props.optional_columns.is_empty() {
+            resp.context_menu(|ui| column_menu(ui, props, &mut actions));
+        }
         if resp.clicked() {
             let col = c.sort();
             state.sort = if *c == Column::Index {
@@ -460,6 +509,7 @@ fn table_body(
     }
 
     let mut drop: Option<(usize, usize)> = None;
+    let dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
     let out = scroll.show_rows(ui, ROW_H, view.len(), |ui, range| {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
         for pos in range {
@@ -468,18 +518,88 @@ fn table_body(
             let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click_and_drag());
             let is_now = props.now_playing.is_some_and(|p| p == row.path);
             let selected = state.selected.contains(&row_idx);
-            paint_row(ui, &pal, props, &cols, rect, &resp, row, pos, is_now, selected, has_focus && state.cursor == Some(pos));
+            let play_view = |start: usize| UiAction::PlayTracks {
+                paths: view.iter().map(|&i| props.rows[i].path.clone()).collect(),
+                start,
+            };
+
+            // Hover affordances: ▶ in the # cell, ⋯ at the end of the title cell.
+            let more_id = table_id.with(("more", row_idx));
+            let more_open = egui::Popup::is_id_open(ui.ctx(), more_id.with("popup"));
+            let row_hovered = !dragging && ui.rect_contains_pointer(rect);
+            let buttons = row_hovered || more_open;
+            let hover = if row_hovered { ui.ctx().pointer_hover_pos() } else { None };
+            let links = paint_row(ui, &pal, props, &cols, rect, &resp, row, pos, is_now, selected, has_focus && state.cursor == Some(pos), hover, buttons);
+            let hovered_link = hover.and_then(|p| hit_link(&links, p));
+            let resp = match hovered_link {
+                Some(c) => {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                    let tip = match c {
+                        Column::Title => tr.t("table.click_to_play"),
+                        Column::Artist => tr.t("menu.show_artist"),
+                        _ => tr.t("menu.show_album"),
+                    };
+                    resp.on_hover_text_at_pointer(tip)
+                }
+                None => resp,
+            };
+            if buttons {
+                if let Some((_, x, w)) = cols.iter().find(|c| c.0 == Column::Index) {
+                    let cell = Rect::from_min_size(pos2(rect.left() + x, rect.top()), vec2(*w, ROW_H));
+                    let r = Rect::from_center_size(pos2(cell.right() - CELL_PAD - 7.0, cell.center().y), Vec2::splat(24.0));
+                    let play = ui
+                        .interact(r, table_id.with(("play", row_idx)), Sense::click())
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(tr.t("table.play_from_here"));
+                    if play.clicked() {
+                        actions.push(play_view(pos));
+                    }
+                }
+                if let Some((_, x, w)) = cols.iter().find(|c| c.0 == Column::Title) {
+                    let r = Rect::from_center_size(pos2(rect.left() + x + w - 16.0, rect.center().y), Vec2::splat(24.0));
+                    let more = ui
+                        .interact(r, more_id, Sense::click())
+                        .on_hover_cursor(CursorIcon::PointingHand);
+                    let hot = more.hovered() || more_open;
+                    if hot {
+                        ui.painter().rect_filled(r, 6.0, if selected { pal.hover } else { pal.pressed });
+                    }
+                    paint_icon(ui.painter(), r.shrink(5.0), Icon::More, if hot { pal.text } else { pal.text_muted });
+                    let more = if more_open { more } else { more.on_hover_text(tr.t("table.more")) };
+                    if more.clicked() && !selected {
+                        state.selected.clear();
+                        state.selected.insert(row_idx);
+                        state.anchor = Some(pos);
+                        state.cursor = Some(pos);
+                    }
+                    egui::Popup::menu(&more).show(|ui| {
+                        context_menu(ui, props, state, view, row, &mut actions);
+                    });
+                }
+            }
 
             if resp.clicked() {
                 focus_resp.request_focus();
                 let mods = ui.input(|i| i.modifiers);
                 click_select(state, view, pos, mods);
+                let link = if mods.shift || mods.command {
+                    None
+                } else {
+                    resp.interact_pointer_pos().and_then(|p| hit_link(&links, p))
+                };
+                match link {
+                    // The second click of a double-click on a title is not a second play.
+                    Some(Column::Title) if !resp.double_clicked() => actions.push(play_view(pos)),
+                    Some(Column::Artist) => actions.push(UiAction::ShowArtist(row.artist.clone())),
+                    Some(Column::Album) => actions.push(UiAction::ShowAlbumOfTrack(row.path.clone())),
+                    _ => {}
+                }
             }
             if resp.double_clicked() {
-                actions.push(UiAction::PlayTracks {
-                    paths: view.iter().map(|&i| props.rows[i].path.clone()).collect(),
-                    start: pos,
-                });
+                let on_link = resp.interact_pointer_pos().and_then(|p| hit_link(&links, p)).is_some();
+                if !on_link {
+                    actions.push(play_view(pos));
+                }
             }
             if resp.secondary_clicked() && !selected {
                 state.selected.clear();
@@ -561,12 +681,15 @@ fn paint_row(
     is_now: bool,
     selected: bool,
     cursor: bool,
-) {
+    hover: Option<egui::Pos2>,
+    buttons: bool,
+) -> Vec<(Column, Rect)> {
+    let mut links = Vec::new();
     if !ui.is_rect_visible(rect) {
-        return;
+        return links;
     }
     let painter = ui.painter();
-    let hovered = resp.hovered();
+    let hovered = resp.hovered() || buttons;
     let bg = rect.shrink2(vec2(2.0, 1.0));
     if selected {
         painter.rect_filled(bg, 6.0, pal.selected);
@@ -585,6 +708,11 @@ fn paint_row(
         let inner_w = w - CELL_PAD * 2.0;
         let (text, color, font): (String, Color32, FontId) = match c {
             Column::Index => {
+                if buttons {
+                    let ir = Rect::from_center_size(pos2(cell.right() - CELL_PAD - 7.0, cell.center().y), Vec2::splat(13.0));
+                    paint_icon(painter, ir, Icon::Play, if is_now { pal.accent_fg } else { pal.text });
+                    continue;
+                }
                 if is_now {
                     let icon = if props.playing { Icon::Volume2 } else { Icon::Speaker };
                     let ir = Rect::from_center_size(pos2(cell.right() - CELL_PAD - 7.0, cell.center().y), Vec2::splat(14.0));
@@ -611,11 +739,23 @@ fn paint_row(
         if text.is_empty() {
             continue;
         }
-        let job = cell_job(&text, font, color, inner_w, false);
+        // The end of the title cell is reserved for the ⋯ button (always, so the text never
+        // re-truncates when the row is hovered).
+        let inner_w = if *c == Column::Title { inner_w - MORE_SLOT } else { inner_w };
+        let job = cell_job(&text, font, Color32::PLACEHOLDER, inner_w, false);
         let g = painter.layout_job(job);
-        let tx = if c.right_aligned() { cell.right() - CELL_PAD - g.size().x } else { cell.left() + CELL_PAD };
-        painter.galley(pos2(tx, cell.center().y - g.size().y / 2.0), g, color);
+        let text_rect = cell_text_rect(cell, g.size(), c.right_aligned());
+        let mut color = color;
+        if props.links.enabled(*c) {
+            if hover.is_some_and(|p| hit_link(&[(*c, text_rect)], p).is_some()) {
+                color = pal.accent_fg;
+                painter.hline(text_rect.x_range(), text_rect.bottom() - 1.0, Stroke::new(1.0, color));
+            }
+            links.push((*c, text_rect));
+        }
+        painter.galley(text_rect.min, g, color);
     }
+    links
 }
 
 fn click_select(state: &mut TrackTableState, view: &[usize], pos: usize, mods: Modifiers) {
@@ -723,7 +863,7 @@ fn context_menu(
         if p.is_empty() { vec![row.path.clone()] } else { p }
     };
     let item = |ui: &mut Ui, icon: Icon, text: &str| -> bool { menu_item(ui, icon, text).clicked() };
-    if item(ui, Icon::Play, tr.t("menu.play")) {
+    if item(ui, Icon::Play, tr.t("menu.play_replace")) {
         actions.push(UiAction::PlayTracks { paths: paths.clone(), start: 0 });
         ui.close();
     }
@@ -731,7 +871,7 @@ fn context_menu(
         actions.push(UiAction::PlayNext(paths.clone()));
         ui.close();
     }
-    if item(ui, Icon::Queue, tr.t("menu.add_to_queue")) {
+    if item(ui, Icon::Queue, tr.t("menu.add_to_queue_end")) {
         actions.push(UiAction::Enqueue(paths.clone()));
         ui.close();
     }
@@ -748,7 +888,7 @@ fn context_menu(
     });
     ui.separator();
     if item(ui, Icon::Album, tr.t("menu.show_album")) {
-        actions.push(UiAction::ShowAlbum { album: row.album.clone(), artist: row.artist.clone() });
+        actions.push(UiAction::ShowAlbumOfTrack(row.path.clone()));
         ui.close();
     }
     if item(ui, Icon::Artist, tr.t("menu.show_artist")) {
@@ -776,6 +916,41 @@ fn context_menu(
             ui.close();
         }
     }
+}
+
+/// Header context menu: show / hide the optional columns.
+fn column_menu(ui: &mut Ui, props: &TrackTableProps<'_>, actions: &mut Vec<UiAction>) {
+    let tr = props.tr;
+    ui.set_max_width(200.0);
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(theme::caption(ui, tr.t("table.columns")));
+    });
+    for c in props.optional_columns {
+        let visible = props.columns.contains(c);
+        if check_item(ui, visible, tr.t(c.label_key())).clicked() {
+            actions.push(UiAction::SetColumnVisible { column: *c, visible: !visible });
+            ui.close();
+        }
+    }
+}
+
+/// Menu entry with a leading check mark.
+pub fn check_item(ui: &mut Ui, checked: bool, text: &str) -> Response {
+    let pal = theme::palette(ui);
+    let width = ui.available_width().clamp(160.0, 240.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 6.0, pal.hover);
+    }
+    let color = if resp.hovered() { pal.text } else { theme::blend(pal.text, pal.text_muted, 0.25) };
+    if checked {
+        paint_icon(ui.painter(), Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), Vec2::splat(14.0)), Icon::Check, pal.accent_fg);
+    }
+    let g = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(theme::size::BODY), color);
+    ui.painter().galley(pos2(rect.left() + 34.0, rect.center().y - g.size().y / 2.0), g, color);
+    resp
 }
 
 /// Menu entry with a leading icon.
@@ -808,6 +983,35 @@ fn drag_ghost(ui: &Ui, pal: &Palette, pos: egui::Pos2, label: &str, count: usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_hit_testing_covers_only_the_text() {
+        let cell = Rect::from_min_size(pos2(100.0, 50.0), vec2(200.0, ROW_H));
+        let text = vec2(60.0, 16.0);
+        let r = cell_text_rect(cell, text, false);
+        assert_eq!(r.left(), 100.0 + CELL_PAD);
+        assert!((r.center().y - cell.center().y).abs() < 0.01);
+        let rr = cell_text_rect(cell, text, true);
+        assert_eq!(rr.right(), cell.right() - CELL_PAD);
+
+        let artist_cell = cell.translate(vec2(200.0, 0.0));
+        let links = [(Column::Title, r), (Column::Artist, cell_text_rect(artist_cell, vec2(40.0, 16.0), false))];
+        // on the title text
+        assert_eq!(hit_link(&links, r.center()), Some(Column::Title));
+        // just under the text (underline slack)
+        assert_eq!(hit_link(&links, pos2(r.center().x, r.bottom() + 1.5)), Some(Column::Title));
+        // empty space of the title cell after the text: no link (row selection)
+        assert_eq!(hit_link(&links, pos2(r.right() + 20.0, r.center().y)), None);
+        // the cell padding before the text is not a link either
+        assert_eq!(hit_link(&links, pos2(cell.left() + 2.0, r.center().y)), None);
+        // artist text
+        assert_eq!(hit_link(&links, pos2(artist_cell.left() + CELL_PAD + 5.0, cell.center().y)), Some(Column::Artist));
+        // above the row's text band
+        assert_eq!(hit_link(&links, pos2(r.center().x, cell.top() + 1.0)), None);
+        assert!(TableLinks::ALL.enabled(Column::Album));
+        assert!(!TableLinks::ALL.enabled(Column::Duration));
+        assert!(!TableLinks::NONE.enabled(Column::Title));
+    }
 
     #[test]
     fn columns_shrink_before_dropping() {
