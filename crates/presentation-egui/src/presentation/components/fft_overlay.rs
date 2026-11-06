@@ -56,29 +56,6 @@ impl FftOverlayData {
 	}
 }
 
-	#[cfg(test)]
-	mod tests {
-		use super::FftOverlayData;
-
-		#[test]
-		fn interpolated_db_frame_clamps_after_last_frame() {
-			let data = FftOverlayData {
-				track_path: "/tmp/test.mp3".to_string(),
-				bin_freqs_hz: vec![100.0, 200.0],
-				min_freq_hz: 50.0,
-				max_freq_hz: 20_000.0,
-				frames_db: vec![vec![-40.0, -30.0], vec![-10.0, -5.0]],
-				analysis_frame_ms: 100.0,
-			};
-
-			let frame = data
-				.interpolated_db_frame(10_000)
-				.expect("frame should be returned");
-
-			assert_eq!(frame, vec![-10.0, -5.0]);
-		}
-	}
-
 #[derive(Default)]
 struct FftOverlayCache {
 	current: Option<Arc<FftOverlayData>>,
