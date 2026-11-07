@@ -1,4 +1,4 @@
-use lrc_player_domain::services::DedupService;
+use lrc_player_domain::services::compute_partial_hash;
 use lrc_player_adapters_lyrics::infrastructure::lyrics::Lyrics;
 use lrc_player_adapters_persistence::persistence::MetaCache;
 use crate::infrastructure::scan::file_scanner::FileScanner;
@@ -6,13 +6,17 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::default::get_probe;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+
+/// Progress updates are sent at most this often (plus once at the end).
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 type AudioTagMeta = (
     Option<String>,
@@ -33,10 +37,15 @@ pub struct ScanHandle {
     pub id: u64,
 }
 
+/// Cumulative counts for one scan job. The progress channel closes when the job has
+/// finished (or was cancelled) and everything it found has been committed to the database.
 #[derive(Clone, Debug)]
 pub struct Progress {
+    /// Supported files (audio + lyrics) found so far.
     pub scanned: u64,
+    /// Files read successfully (hashed / parsed).
     pub parsed: u64,
+    /// Audio tracks and lyrics files written to the database.
     pub registered: u64,
 }
 
@@ -97,13 +106,15 @@ enum DBCommand {
         last_seen: i64,
     },
     Checkpoint,
+    /// Commit everything staged so far, then acknowledge.
+    Flush(oneshot::Sender<()>),
 }
 
 /// Handle to control the IO worker. Cloneable.
 #[derive(Clone)]
 pub struct IoWorkerHandle {
     cmd_tx: mpsc::Sender<WorkerCommand>,
-    progress_senders: Arc<Mutex<HashMap<u64, broadcast::Sender<Progress>>>>,
+    progress_senders: ProgressSenders,
     db_tx: mpsc::Sender<DBCommand>,
     _inner: Arc<Mutex<()>>, // placeholder for possible shared state
 }
@@ -194,11 +205,7 @@ impl IoWorkerHandle {
     ) -> Result<ScanHandle> {
         let id = rand::random::<u64>();
         let (progress_tx, _progress_rx) = broadcast::channel(32);
-        let mut senders = self
-            .progress_senders
-            .try_lock()
-            .expect("failed to lock progress_senders in start_scan");
-        senders.insert(id, progress_tx.clone());
+        lock(&self.progress_senders).insert(id, progress_tx);
 
         let cmd = WorkerCommand::Start { id, paths, options };
         self.cmd_tx
@@ -218,13 +225,11 @@ impl IoWorkerHandle {
     }
 
     pub fn subscribe(&self, handle: &ScanHandle) -> broadcast::Receiver<Progress> {
-        let senders = self
-            .progress_senders
-            .try_lock()
-            .expect("failed to lock progress_senders in subscribe");
-        if let Some(sender) = senders.get(&handle.id) {
+        if let Some(sender) = lock(&self.progress_senders).get(&handle.id) {
             sender.subscribe()
         } else {
+            // The job already finished: hand out a closed channel holding one empty update,
+            // so the subscriber sees the end of the scan right away.
             let (tx, rx) = broadcast::channel(1);
             let _ = tx.send(Progress {
                 scanned: 0,
@@ -252,12 +257,11 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
     let (db_tx, mut db_rx) = mpsc::channel::<DBCommand>(64);
 
     // Progress sender map
-    let progress_senders: Arc<Mutex<HashMap<u64, broadcast::Sender<Progress>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let progress_senders: ProgressSenders = Arc::new(StdMutex::new(HashMap::new()));
 
     // Active job cancellation senders
-    let active_jobs: Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let active_jobs: ActiveJobs = Arc::new(StdMutex::new(HashMap::new()));
+    let job_db_path = db_path.clone();
 
     // Spawn DB worker
     tokio::spawn(async move {
@@ -280,6 +284,13 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                 maybe_cmd = db_rx.recv() => {
                     match maybe_cmd {
                         Some(db_cmd) => {
+                            let db_cmd = match (db_cmd, meta.as_ref()) {
+                                (DBCommand::Flush(ack), None) => {
+                                    let _ = ack.send(());
+                                    continue;
+                                }
+                                (cmd, _) => cmd,
+                            };
                             if let Some(m) = meta.as_ref() {
                                 match db_cmd {
                                     DBCommand::UpsertFile { path, norm_path, size, mtime, device, inode, stable_key } => {
@@ -340,6 +351,13 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
                                         let _ = m.checkpoint();
                                         staged_count = 0;
                                     }
+                                    DBCommand::Flush(ack) => {
+                                        if let Err(err) = m.checkpoint() {
+                                            log_warn(&format!("scan checkpoint failed: {err:#}"));
+                                        }
+                                        staged_count = 0;
+                                        let _ = ack.send(());
+                                    }
                                 }
                                 if staged_count >= CHECKPOINT_N {
                                     let _ = m.checkpoint();
@@ -369,227 +387,29 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 WorkerCommand::Start { id, paths, options } => {
-                    let (cancel_tx, mut cancel_rx) = oneshot::channel();
-                    jobs.lock().await.insert(id, cancel_tx);
-
-                    let sender = {
-                        let senders = progress_senders_clone.lock().await;
-                        senders
-                            .get(&id)
-                            .cloned()
-                            .unwrap_or_else(|| broadcast::channel(1).0)
+                    let (cancel_tx, cancel_rx) = oneshot::channel();
+                    lock(&jobs).insert(id, cancel_tx);
+                    let sender = lock(&progress_senders_clone)
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| broadcast::channel(1).0);
+                    let job = ScanJob {
+                        id,
+                        paths,
+                        excludes: options.excludes,
+                        cancel_rx,
+                        cancelled: false,
+                        sender,
+                        db_tx: db_tx_clone.clone(),
+                        db_path: job_db_path.clone(),
+                        progress_senders: progress_senders_clone.clone(),
+                        jobs: jobs.clone(),
                     };
-
-                    let dedup = DedupService::new();
-                    let db_for_job = db_tx_clone.clone();
-                    let _fast_scan = options.fast;
-                    let maybe_cache = MetaCache::open_default().ok();
-                    tokio::spawn(async move {
-                        let scanner = FileScanner::new();
-                        if paths.is_empty() {
-                            let total = 5u64;
-                            for i in 0..total {
-                                if cancel_rx.try_recv().is_ok() {
-                                    break;
-                                }
-                                let _ = sender.send(Progress {
-                                    scanned: i + 1,
-                                    parsed: i,
-                                    registered: i / 2,
-                                });
-                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                            }
-                        } else {
-                            for path in paths.into_iter() {
-                                if cancel_rx.try_recv().is_ok() {
-                                    break;
-                                }
-
-                                let files = scanner.enumerate_paths(&path, &options.excludes);
-                                for file_path in files.into_iter() {
-                                    if cancel_rx.try_recv().is_ok() {
-                                        break;
-                                    }
-
-                                    let file_path_clone = file_path.clone();
-                                    let dedup_for_partial = dedup.clone();
-                                    let partial_result = tokio::task::spawn_blocking(move || {
-                                        dedup_for_partial.compute_stable_key(&file_path_clone)
-                                    })
-                                    .await;
-
-                                    let partial_hash = match partial_result {
-                                        Ok(Ok(hash)) => Some(hash),
-                                        _ => None,
-                                    };
-
-                                    let scanned = 1;
-                                    let parsed = partial_hash.is_some() as u64;
-                                    let registered = 0;
-                                    let _ = sender.send(Progress {
-                                        scanned,
-                                        parsed,
-                                        registered,
-                                    });
-
-                                    if scanner.is_audio_file(&file_path) {
-                                        if let Some(partial) = partial_hash.clone() {
-                                            if let Ok(meta) = std::fs::metadata(&file_path) {
-                                                let size = meta.len() as i64;
-                                                let mtime = meta
-                                                    .modified()
-                                                    .ok()
-                                                    .and_then(|t| {
-                                                        t.duration_since(std::time::UNIX_EPOCH).ok()
-                                                    })
-                                                    .map(|d| d.as_secs() as i64)
-                                                    .unwrap_or(0);
-                                                let norm = file_path.to_string_lossy().to_string();
-                                                let db_sender = db_for_job.clone();
-                                                let _ = db_sender
-                                                    .send(DBCommand::UpsertFile {
-                                                        path: file_path.to_string_lossy().to_string(),
-                                                        norm_path: norm.clone(),
-                                                        size,
-                                                        mtime,
-                                                        device: None,
-                                                        inode: None,
-                                                        stable_key: Some(partial.clone()),
-                                                    })
-                                                    .await;
-
-                                                let (title, artist, album_artist, composer, album) =
-                                                    extract_audio_tags(&file_path);
-                                                let now_ts = std::time::SystemTime::now()
-                                                    .duration_since(std::time::UNIX_EPOCH)
-                                                    .map(|d| d.as_secs() as i64)
-                                                    .unwrap_or(0);
-                                                let content_id = file_path.to_string_lossy().to_string();
-                                                let _ = db_sender
-                                                    .send(DBCommand::UpsertTrack {
-                                                        content_id: content_id.clone(),
-                                                        title,
-                                                        artist,
-                                                        album_artist,
-                                                        composer,
-                                                        album,
-                                                        canonical_location_id: None,
-                                                        created_at: now_ts,
-                                                    })
-                                                    .await;
-
-                                                let _ = db_sender
-                                                    .send(DBCommand::UpsertLocation {
-                                                        content_id: content_id.clone(),
-                                                        path: file_path.to_string_lossy().to_string(),
-                                                        device: None,
-                                                        inode: None,
-                                                        size,
-                                                        mtime,
-                                                        last_seen: now_ts,
-                                                        preferred: false,
-                                                        available: true,
-                                                    })
-                                                    .await;
-
-                                                let _ = db_sender
-                                                    .send(DBCommand::UpsertHash {
-                                                        content_id: content_id.clone(),
-                                                        algo: "blake3-partial".to_string(),
-                                                        full_hash: None,
-                                                        partial_hash: Some(partial.clone()),
-                                                        computed_at: now_ts,
-                                                    })
-                                                    .await;
-                                            }
-                                        } else if let Ok(meta) = std::fs::metadata(&file_path) {
-                                            let size = meta.len() as i64;
-                                            let mtime = meta
-                                                .modified()
-                                                .ok()
-                                                .and_then(|t| {
-                                                    t.duration_since(std::time::UNIX_EPOCH).ok()
-                                                })
-                                                .map(|d| d.as_secs() as i64)
-                                                .unwrap_or(0);
-                                            let norm = file_path.to_string_lossy().to_string();
-                                            let db_sender = db_for_job.clone();
-                                            let _ = db_sender
-                                                .send(DBCommand::UpsertFile {
-                                                    path: file_path.to_string_lossy().to_string(),
-                                                    norm_path: norm.clone(),
-                                                    size,
-                                                    mtime,
-                                                    device: None,
-                                                    inode: None,
-                                                    stable_key: None,
-                                                })
-                                                .await;
-                                        }
-                                    } else if scanner.is_lyrics_file(&file_path) {
-                                        let has_timestamps = Lyrics::from_lrc(&file_path)
-                                            .map(|lyrics| !lyrics.lines.is_empty())
-                                            .unwrap_or(false);
-                                        if !has_timestamps {
-                                            continue;
-                                        }
-
-                                        if let Ok(meta) = std::fs::metadata(&file_path) {
-                                            let size = meta.len() as i64;
-                                            let mtime = meta
-                                                .modified()
-                                                .ok()
-                                                .and_then(|t| {
-                                                    t.duration_since(std::time::UNIX_EPOCH).ok()
-                                                })
-                                                .map(|d| d.as_secs() as i64)
-                                                .unwrap_or(0);
-                                            let now_ts = std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .map(|d| d.as_secs() as i64)
-                                                .unwrap_or(0);
-
-                                            let parent_name = file_path
-                                                .parent()
-                                                .and_then(|p| p.file_name())
-                                                .and_then(|n| n.to_str())
-                                                .unwrap_or("");
-                                            let file_stem = file_path
-                                                .file_stem()
-                                                .and_then(|s| s.to_str())
-                                                .unwrap_or("");
-
-                                            let associated_content_id = maybe_cache
-                                                .as_ref()
-                                                .and_then(|cache| {
-                                                    cache
-                                                        .find_track_content_id_by_file_stem_and_parent(
-                                                            file_stem,
-                                                            parent_name,
-                                                        )
-                                                        .ok()
-                                                })
-                                                .flatten();
-
-                                            let db_sender = db_for_job.clone();
-                                            let _ = db_sender
-                                                .send(DBCommand::UpsertLyricsLocation {
-                                                    content_id: associated_content_id.clone(),
-                                                    path: file_path.to_string_lossy().to_string(),
-                                                    size,
-                                                    mtime,
-                                                    last_seen: now_ts,
-                                                })
-                                                .await;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    });
+                    // The job is blocking file I/O from start to end; keep it off the runtime.
+                    tokio::task::spawn_blocking(move || job.run());
                 }
                 WorkerCommand::Cancel { id } => {
-                    if let Some(tx) = jobs.lock().await.remove(&id) {
+                    if let Some(tx) = lock(&jobs).remove(&id) {
                         let _ = tx.send(());
                     }
                 }
@@ -606,3 +426,202 @@ pub fn spawn_io_worker(db_path: Option<std::path::PathBuf>) -> IoWorkerHandle {
 }
 
 
+
+type ProgressSenders = Arc<StdMutex<HashMap<u64, broadcast::Sender<Progress>>>>;
+type ActiveJobs = Arc<StdMutex<HashMap<u64, oneshot::Sender<()>>>>;
+
+fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn log_warn(msg: &str) {
+    eprintln!("[scan] {msg}");
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn size_and_mtime(path: &Path) -> Option<(i64, i64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Some((meta.len() as i64, mtime))
+}
+
+/// One scan job, run on a blocking thread.
+struct ScanJob {
+    id: u64,
+    paths: Vec<PathBuf>,
+    excludes: Vec<PathBuf>,
+    cancel_rx: oneshot::Receiver<()>,
+    cancelled: bool,
+    sender: broadcast::Sender<Progress>,
+    db_tx: mpsc::Sender<DBCommand>,
+    db_path: Option<PathBuf>,
+    progress_senders: ProgressSenders,
+    jobs: ActiveJobs,
+}
+
+impl ScanJob {
+    fn is_cancelled(&mut self) -> bool {
+        if !self.cancelled && matches!(self.cancel_rx.try_recv(), Ok(())) {
+            self.cancelled = true;
+        }
+        self.cancelled
+    }
+
+    fn db(&self, cmd: DBCommand) {
+        let _ = self.db_tx.blocking_send(cmd);
+    }
+
+    /// Commits everything staged so far and waits until the DB worker has done it.
+    fn flush(&self) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self.db_tx.blocking_send(DBCommand::Flush(ack_tx)).is_ok() {
+            let _ = ack_rx.blocking_recv();
+        }
+    }
+
+    fn run(mut self) {
+        let scanner = FileScanner::new();
+        let mut counts = Progress { scanned: 0, parsed: 0, registered: 0 };
+        let mut last_emit: Option<Instant> = None;
+        let emit = |counts: &Progress, last: &mut Option<Instant>, sender: &broadcast::Sender<Progress>, force: bool| {
+            if force || last.is_none_or(|t| t.elapsed() >= PROGRESS_INTERVAL) {
+                let _ = sender.send(counts.clone());
+                *last = Some(Instant::now());
+            }
+        };
+
+        // 1. Find every supported file under every root.
+        let mut audio = Vec::new();
+        let mut lyrics = Vec::new();
+        for root in self.paths.clone() {
+            if self.is_cancelled() {
+                break;
+            }
+            for file in scanner.enumerate_paths(&root, &self.excludes) {
+                if scanner.is_audio_file(&file) {
+                    audio.push(file);
+                } else if scanner.is_lyrics_file(&file) {
+                    lyrics.push(file);
+                }
+            }
+            counts.scanned = (audio.len() + lyrics.len()) as u64;
+            emit(&counts, &mut last_emit, &self.sender, false);
+        }
+
+        // 2. Audio files: stable key + tags, staged into the database.
+        for file in &audio {
+            if self.is_cancelled() {
+                break;
+            }
+            self.register_audio(file, &mut counts);
+            emit(&counts, &mut last_emit, &self.sender, false);
+        }
+
+        // 3. Lyrics files, after the tracks are committed so they can be associated.
+        if !lyrics.is_empty() && !self.is_cancelled() {
+            self.flush();
+            let lookup = self.db_path.as_ref().and_then(|p| MetaCache::new(p).ok());
+            for file in &lyrics {
+                if self.is_cancelled() {
+                    break;
+                }
+                self.register_lyrics(file, lookup.as_ref(), &mut counts);
+                emit(&counts, &mut last_emit, &self.sender, false);
+            }
+        }
+
+        // 4. Commit, report the final counts, then close the channel (= scan finished).
+        self.flush();
+        emit(&counts, &mut last_emit, &self.sender, true);
+        lock(&self.progress_senders).remove(&self.id);
+        lock(&self.jobs).remove(&self.id);
+    }
+
+    fn register_audio(&self, file: &Path, counts: &mut Progress) {
+        let Some((size, mtime)) = size_and_mtime(file) else { return };
+        let path = file.to_string_lossy().to_string();
+        let stable_key = compute_partial_hash(file, 16).ok();
+        self.db(DBCommand::UpsertFile {
+            path: path.clone(),
+            norm_path: path.clone(),
+            size,
+            mtime,
+            device: None,
+            inode: None,
+            stable_key: stable_key.clone(),
+        });
+        let Some(partial) = stable_key else { return };
+        counts.parsed += 1;
+
+        let (title, artist, album_artist, composer, album) = extract_audio_tags(&file.to_path_buf());
+        let now = unix_now();
+        self.db(DBCommand::UpsertTrack {
+            content_id: path.clone(),
+            title,
+            artist,
+            album_artist,
+            composer,
+            album,
+            canonical_location_id: None,
+            created_at: now,
+        });
+        self.db(DBCommand::UpsertLocation {
+            content_id: path.clone(),
+            path: path.clone(),
+            device: None,
+            inode: None,
+            size,
+            mtime,
+            last_seen: now,
+            preferred: false,
+            available: true,
+        });
+        self.db(DBCommand::UpsertHash {
+            content_id: path,
+            algo: "blake3-partial".to_string(),
+            full_hash: None,
+            partial_hash: Some(partial),
+            computed_at: now,
+        });
+        counts.registered += 1;
+    }
+
+    fn register_lyrics(&self, file: &Path, lookup: Option<&MetaCache>, counts: &mut Progress) {
+        let has_timestamps = Lyrics::from_lrc(file)
+            .map(|lyrics| !lyrics.lines.is_empty())
+            .unwrap_or(false);
+        if !has_timestamps {
+            return;
+        }
+        counts.parsed += 1;
+        let Some((size, mtime)) = size_and_mtime(file) else { return };
+        let parent_name = file
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let file_stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let content_id = lookup
+            .and_then(|cache| cache.find_track_content_id_by_file_stem_and_parent(file_stem, parent_name).ok())
+            .flatten();
+        self.db(DBCommand::UpsertLyricsLocation {
+            content_id,
+            path: file.to_string_lossy().to_string(),
+            size,
+            mtime,
+            last_seen: unix_now(),
+        });
+        counts.registered += 1;
+    }
+}

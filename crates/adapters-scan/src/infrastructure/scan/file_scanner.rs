@@ -3,7 +3,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "aac"];
+/// Formats the playback engine can decode (symphonia: MP3, AAC/ALAC in MP4, FLAC, Vorbis, WAV).
+const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "aac", "m4a", "ogg", "oga"];
 const LRC_EXTENSIONS: &[&str] = &["lrc", "LRC"];
 
 #[derive(Default)]
