@@ -336,7 +336,6 @@ impl GuiApp {
                 last_toast: None,
                 window: state.window,
                 detail_rows: Default::default(),
-                scale_guard: Default::default(),
             },
             media: MediaControlsBridge::new(opts.media_controls),
             config: cfg,

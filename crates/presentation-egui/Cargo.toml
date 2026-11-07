@@ -50,8 +50,8 @@ winit = { version = "0.30", default-features = false, features = ["wayland-dlope
 
 [target.'cfg(windows)'.dependencies.winapi]
 version = "0.3.9"
-# shellscalingapi: per-monitor DPI for the window minimum size (app/window_scale.rs).
-features = ["winuser", "windef", "minwindef", "shellscalingapi"]
+# windef/minwindef: window procedure subclassing in app/window_scale.rs.
+features = ["winuser", "windef", "minwindef"]
 
 [dev-dependencies]
 tempfile = "3"
