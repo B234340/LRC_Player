@@ -110,7 +110,14 @@ fn main() -> Result<()> {
                             let _ = update_scan_status("Scan started", Some(0), Some(0), Some(0));
                             let mut progress_rx = coordinator.subscribe_progress(&handle);
                             tokio::spawn(async move {
-                                while let Ok(progress) = progress_rx.recv().await {
+                                // The channel closes when the job has finished and committed its
+                                // results. A lagging receiver only missed intermediate counts.
+                                loop {
+                                    let progress = match progress_rx.recv().await {
+                                        Ok(progress) => progress,
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                    };
                                     let status = format!(
                                         "Scan progress: scanned={} parsed={} registered={}",
                                         progress.scanned, progress.parsed, progress.registered
