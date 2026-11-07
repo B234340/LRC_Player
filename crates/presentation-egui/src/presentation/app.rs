@@ -36,6 +36,7 @@ mod shell;
 mod spectrum;
 mod state;
 mod track_info;
+mod window_scale;
 
 #[cfg(test)]
 mod screenshot_tests;
@@ -147,6 +148,8 @@ pub(crate) struct UiShell {
     pub(crate) window: Option<lrc_player_application::dto::WindowStateDto>,
     /// Rows of the current detail page (album / artist / playlist), rebuilt on change.
     pub(crate) detail_rows: pages::DetailRows,
+    /// Keeps the minimum / logical window size stable across monitors with different DPI.
+    pub(crate) scale_guard: window_scale::ScaleGuard,
 }
 
 pub struct GuiApp {
@@ -336,6 +339,8 @@ impl App for GuiApp {
         self.ensure_play_artwork();
         self.media.ensure_attached(frame, &ctx);
         self.poll_media_controls();
+        let [min_w, min_h] = crate::presentation::ui::shell::MIN_WINDOW_SIZE;
+        self.ui.scale_guard.update(&ctx, egui::vec2(min_w, min_h));
         self.track_window_geometry(&ctx);
 
         self.draw_shell(ui);
