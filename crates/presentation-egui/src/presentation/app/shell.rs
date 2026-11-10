@@ -116,6 +116,7 @@ impl GuiApp {
                         eq_enabled: self.eq.enabled,
                         queue_len: self.queue.len(),
                         no_output: self.no_output_device,
+                        favorite: (!self.play_path.is_empty()).then(|| self.is_favorite_path(&self.play_path)),
                         tr,
                     },
                 ));

@@ -21,7 +21,7 @@ use crate::presentation::ui::{
     shell::PlaylistEntry,
     text,
     theme::{self, Palette},
-    widgets::empty_state,
+    widgets::{empty_state, favorite_button, FavoriteColors},
 };
 
 /// One track as shown in the table.
@@ -89,7 +89,8 @@ impl Column {
             Column::Album => 220.0,
             Column::Year => 64.0,
             Column::Genre => 120.0,
-            Column::Duration => 72.0,
+            // Room for the favorite heart on the left of the time.
+            Column::Duration => 88.0,
         }
     }
 
@@ -98,7 +99,7 @@ impl Column {
             Column::Index => 36.0,
             Column::Title => 160.0,
             Column::Year => 48.0,
-            Column::Duration => 56.0,
+            Column::Duration => 76.0,
             _ => 110.0,
         }
     }
@@ -193,6 +194,9 @@ pub struct TrackTableProps<'a> {
     pub optional_columns: &'a [Column],
     /// Cell texts that act as links.
     pub links: TableLinks,
+    /// Favorite lookup: shows a heart toggle in the duration cell (always when the track is a
+    /// favorite, on hover otherwise) and a menu item. `None` = no favorites UI.
+    pub favorites: Option<&'a dyn Fn(&Path) -> bool>,
     pub tr: Tr,
 }
 
@@ -579,6 +583,20 @@ fn table_body(
                 }
             }
 
+            // Favorite heart at the left of the duration cell.
+            if let Some(is_favorite) = props.favorites {
+                let favorite = is_favorite(&row.path);
+                if favorite || buttons {
+                    if let Some((_, x, _)) = cols.iter().find(|c| c.0 == Column::Duration) {
+                        let r = Rect::from_center_size(pos2(rect.left() + x + CELL_PAD + 9.0, rect.center().y), Vec2::splat(24.0));
+                        let colors = FavoriteColors::from_palette(&pal);
+                        if favorite_button(ui, r, table_id.with(("fav", row_idx)), favorite, colors, &tr).clicked() {
+                            actions.push(UiAction::SetFavorite { paths: vec![row.path.clone()], favorite: !favorite });
+                        }
+                    }
+                }
+            }
+
             if resp.clicked() {
                 focus_resp.request_focus();
                 let mods = ui.input(|i| i.modifiers);
@@ -876,6 +894,15 @@ fn context_menu(
     if item(ui, Icon::Queue, tr.t("menu.add_to_queue_end")) {
         actions.push(UiAction::Enqueue(paths.clone()));
         ui.close();
+    }
+    if let Some(is_favorite) = props.favorites {
+        // Remove when every selected track is already a favorite, add otherwise.
+        let all = paths.iter().all(|p| is_favorite(p));
+        let (icon, key) = if all { (Icon::HeartFilled, "favorite.remove") } else { (Icon::Heart, "favorite.add") };
+        if item(ui, icon, tr.t(key)) {
+            actions.push(UiAction::SetFavorite { paths: paths.clone(), favorite: !all });
+            ui.close();
+        }
     }
     ui.menu_button(tr.t("menu.add_to_playlist"), |ui| {
         if props.playlists.is_empty() {

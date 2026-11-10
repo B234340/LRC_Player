@@ -267,6 +267,8 @@ impl GuiApp {
             UiAction::PlayNext(paths) => self.play_next_tracks(path_strings(paths)),
             UiAction::Enqueue(paths) => self.enqueue_with_toast(path_strings(paths)),
             UiAction::AddToPlaylist { playlist_id, paths } => self.add_to_playlist(&playlist_id, path_strings(paths)),
+            UiAction::SetFavorite { paths, favorite } => self.set_favorite(path_strings(paths), favorite),
+            UiAction::ToggleFavoriteCurrent => self.toggle_favorite_current(),
             UiAction::ShowAlbumOfTrack(path) => {
                 let key = self.library.album_key_of(&path).or_else(|| {
                     let row = self.library.display_row(&path.to_string_lossy());

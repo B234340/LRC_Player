@@ -119,6 +119,10 @@ pub enum UiAction {
     /// Append to the end of the queue.
     Enqueue(Vec<PathBuf>),
     AddToPlaylist { playlist_id: String, paths: Vec<PathBuf> },
+    /// Add the tracks to / remove them from the favorites list.
+    SetFavorite { paths: Vec<PathBuf>, favorite: bool },
+    /// Toggle the favorite state of the playing track.
+    ToggleFavoriteCurrent,
     /// Show the album the track belongs to (album name, artist).
     ShowAlbum { album: String, artist: String },
     /// Open the artist page of a track's artist (switches the Artists view to "Artist").

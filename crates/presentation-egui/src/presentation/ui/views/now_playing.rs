@@ -31,6 +31,8 @@ pub struct NowPlayingProps<'a> {
     pub seed: &'a str,
     /// `None` when the track has no lyrics.
     pub lyrics: Option<LyricsProps<'a>>,
+    /// Favorite state of the track (`None` hides the heart).
+    pub favorite: Option<bool>,
     pub tr: Tr,
 }
 
@@ -341,13 +343,34 @@ fn track_info(ui: &mut Ui, props: &NowPlayingProps<'_>, rect: Rect, actions: &mu
     let mut tui = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Center)));
     tui.set_clip_rect(rect.expand(2.0).intersect(ui.clip_rect()));
     tui.spacing_mut().item_spacing.y = INFO_SPACING;
-    tui.add(
-        egui::Label::new(
-            // Title, artist and album are separate elements, each in its language's font.
-            crate::presentation::ui::text::rich(props.title, TITLE_SIZE, true).color(Color32::WHITE),
-        )
-        .truncate(),
-    );
+    // Title, artist and album are separate elements, each in its language's font. With a heart,
+    // the title keeps a slot free on both sides so it stays centred.
+    const HEART_SLOT: f32 = 34.0;
+    let slot = if props.favorite.is_some() { HEART_SLOT } else { 0.0 };
+    let title_w = (rect.width() - 2.0 * slot).max(0.0);
+    let title = tui
+        .allocate_ui_with_layout(egui::vec2(title_w, 0.0), Layout::top_down(Align::Center), |ui| {
+            ui.add(
+                egui::Label::new(
+                    crate::presentation::ui::text::rich(props.title, TITLE_SIZE, true).color(Color32::WHITE),
+                )
+                .truncate(),
+            )
+        })
+        .inner;
+    if let Some(favorite) = props.favorite {
+        let heart = Rect::from_center_size(
+            egui::pos2(title.rect.right() + HEART_SLOT / 2.0, title.rect.center().y),
+            egui::Vec2::splat(30.0),
+        );
+        let accent = crate::presentation::ui::theme::palette(ui).accent;
+        let colors = crate::presentation::ui::widgets::FavoriteColors::on_dark(accent);
+        if crate::presentation::ui::widgets::favorite_button(&tui, heart, tui.id().with("favorite"), favorite, colors, &props.tr)
+            .clicked()
+        {
+            actions.push(UiAction::ToggleFavoriteCurrent);
+        }
+    }
     let link = |ui: &mut Ui, text: &str, size: f32, alpha: u8| -> bool {
         if text.is_empty() {
             return false;

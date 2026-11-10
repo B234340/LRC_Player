@@ -164,6 +164,7 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, id: &str) -> Vec<UiAction> {
     }
     let entries = playlist_entries(&app.playlists, &tr);
     let now = (!app.play_path.is_empty()).then(|| Path::new(app.play_path.as_str()));
+    let favorites = crate::presentation::app::playlists::favorite_lookup(&app.favorites);
     let table_actions = track_table(
         ui,
         &TrackTableProps {
@@ -180,11 +181,13 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, id: &str) -> Vec<UiAction> {
             removable: true,
             optional_columns: &[],
             links: TableLinks::ALL,
+            favorites: Some(&favorites),
             tr,
         },
         &mut app.ui.detail_table,
     );
     drop(entries);
+    drop(favorites);
     if remove_selected {
         let rows: Vec<usize> = app.ui.detail_table.selected.iter().copied().collect();
         app.remove_from_playlist(id, rows);

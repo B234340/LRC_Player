@@ -214,6 +214,7 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, name: &str) -> Vec<UiAction> {
     let entries = playlist_entries(&app.playlists, &tr);
     let now = (!app.play_path.is_empty()).then(|| Path::new(app.play_path.as_str()));
     let columns = [Column::Index, Column::Title, Column::Album, Column::Duration];
+    let favorites = crate::presentation::app::playlists::favorite_lookup(&app.favorites);
     actions.extend(track_table(
         ui,
         &TrackTableProps {
@@ -231,6 +232,7 @@ fn detail(app: &mut GuiApp, ui: &mut Ui, tr: Tr, name: &str) -> Vec<UiAction> {
             optional_columns: &[],
             // The artist column would point to this page.
             links: TableLinks { title: true, artist: false, album: true },
+            favorites: Some(&favorites),
             tr,
         },
         &mut app.ui.detail_table,

@@ -66,6 +66,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
         backdrop: app.play_backdrop_handle.as_ref().map(Tex::from),
         seed: &seed,
         lyrics,
+        favorite: has_track.then(|| app.is_favorite_path(&app.play_path)),
         tr,
     };
     let actions = now_playing(&mut child, &props, &mut app.ui.now);

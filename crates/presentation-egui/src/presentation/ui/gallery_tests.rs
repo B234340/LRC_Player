@@ -304,6 +304,7 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                     eq_enabled: true,
                     queue_len: 12,
                     no_output: false,
+                    favorite: Some(false),
                     tr,
                 },
             );
@@ -397,6 +398,7 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                         can_save_offset: true,
                         tr,
                     }),
+                    favorite: Some(true),
                     tr,
                 },
                 &mut s.now,
@@ -428,6 +430,7 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                                 removable: false,
                                 optional_columns: &[Column::Year, Column::Genre],
                                 links: crate::presentation::ui::views::TableLinks::ALL,
+                                favorites: None,
                                 tr,
                             },
                             &mut s.table,
@@ -598,6 +601,7 @@ fn transport_widths() {
                         eq_enabled: false,
                         queue_len: 12,
                         no_output: false,
+                        favorite: Some(false),
                         tr: Tr::JA,
                     },
                 );

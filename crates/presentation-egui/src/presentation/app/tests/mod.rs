@@ -218,3 +218,43 @@ fn actions_edit_queue_playlists_and_lyrics() {
     assert_eq!(state.last_tab.as_deref(), Some("library"));
     assert_eq!(super::state::page_from_key("Play"), Some(Page::NowPlaying));
 }
+
+#[test]
+fn favorite_toggles_edit_the_favorites_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = test_app(&ctx, dir.path(), false);
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    let (a, b, c) = (p("a.flac"), p("b.flac"), p("c.flac"));
+    let fav_tracks = |app: &GuiApp| {
+        app.playlists.iter().find(|l| super::playlists::is_favorite(l)).unwrap().tracks.clone()
+    };
+
+    // Toggle the playing track (transport bar / Now Playing heart).
+    app.dispatch(&ctx, UiAction::PlayTracks { paths: vec![a.clone().into()], start: 0 });
+    app.dispatch(&ctx, UiAction::ToggleFavoriteCurrent);
+    assert!(app.is_favorite_path(&a));
+    assert_eq!(fav_tracks(&app), vec![a.clone()]);
+    let toasts_before = app.ui.toasts.len();
+    app.dispatch(&ctx, UiAction::ToggleFavoriteCurrent);
+    assert!(!app.is_favorite_path(&a));
+    assert!(fav_tracks(&app).is_empty());
+    assert_eq!(app.ui.toasts.len(), toasts_before, "single toggles are silent");
+
+    // Several tracks from a table menu: no duplicates, toast, then removal.
+    app.dispatch(&ctx, UiAction::SetFavorite { paths: vec![b.clone().into()], favorite: true });
+    app.dispatch(&ctx, UiAction::SetFavorite { paths: vec![a.clone().into(), b.clone().into(), c.clone().into()], favorite: true });
+    assert_eq!(fav_tracks(&app), vec![b.clone(), a.clone(), c.clone()]);
+    assert!(app.ui.toasts.len() > toasts_before);
+    let lookup = super::playlists::favorite_lookup(&app.favorites);
+    assert!(lookup(Path::new(&c)));
+    drop(lookup);
+    app.dispatch(&ctx, UiAction::SetFavorite { paths: vec![a.clone().into(), c.clone().into()], favorite: false });
+    assert_eq!(fav_tracks(&app), vec![b.clone()]);
+    assert!(app.is_favorite_path(&b) && !app.is_favorite_path(&c));
+
+    // Nothing playing: toggling the current track does nothing.
+    app.play_path.clear();
+    app.dispatch(&ctx, UiAction::ToggleFavoriteCurrent);
+    assert_eq!(fav_tracks(&app), vec![b]);
+}

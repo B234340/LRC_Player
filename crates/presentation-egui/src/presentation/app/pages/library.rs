@@ -52,6 +52,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
     let playing = app.is_playing();
     let entries = playlist_entries(&app.playlists, &tr);
     let now = (!app.play_path.is_empty()).then(|| Path::new(app.play_path.as_str()));
+    let favorites = crate::presentation::app::playlists::favorite_lookup(&app.favorites);
     track_table(
         ui,
         &TrackTableProps {
@@ -68,6 +69,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
             removable: false,
             optional_columns: &OPTIONAL_COLUMNS,
             links: TableLinks::ALL,
+            favorites: Some(&favorites),
             tr,
         },
         &mut app.ui.library_table,
