@@ -2,13 +2,16 @@
 //! Supports playback demo, device inspection, and IPC-driven scan requests.
 
 use clap::Parser;
-use cpal::traits::{DeviceTrait, HostTrait};
 use lrc_player::infrastructure::io_worker::ScanOptions;
 use lrc_player::infrastructure::persistence::MetaCache;
 use lrc_player::infrastructure::scan::ScanCoordinator;
 // AudioOutput import intentionally omitted; use fully-qualified paths where needed.
 use lrc_player::shared::ipc as ipc_mod;
+use lrc_player_adapters_audio::audio::engine::{
+    AudioEngine, EngineConfig, EngineEvent, ResamplerKind,
+};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 #[derive(Parser, Debug)]
@@ -20,7 +23,7 @@ struct Cli {
     /// Play an audio file (demo)
     #[arg(long, value_name = "FILE")]
     play: Option<PathBuf>,
-    /// Resampler taps (window size) for high-quality resampling
+    /// Use a windowed-sinc resampler with N taps (default: FFT resampler)
     #[arg(long, value_name = "N")]
     resampler_taps: Option<usize>,
     /// List available output devices and exit
@@ -43,55 +46,41 @@ async fn main() -> anyhow::Result<()> {
     // matching against available output device names. If exactly one match is found,
     // persist it. If multiple matches are found, print candidates and exit.
     if let Some(name) = cli.set_device.as_ref() {
-        let host = cpal::default_host();
-        match host.output_devices() {
-            Ok(devs) => {
-                let needle = name.to_lowercase();
-                let mut matches: Vec<String> = Vec::new();
-                for d in devs {
-                    if let Ok(n) = d.name() {
-                        if n.to_lowercase().contains(&needle) {
-                            matches.push(n);
-                        }
-                    }
-                }
-
-                match matches.len() {
-                    0 => eprintln!("no matching device found for '{}'", name),
-                    1 => {
-                        let chosen = matches.remove(0);
-                        cfg.preferred_output_device = Some(chosen.clone());
-                        cfg.save().ok();
-                        println!("preferred output device set to: {}", chosen);
-                    }
-                    _ => {
-                        eprintln!("multiple devices match '{}':", name);
-                        for m in matches.iter() {
-                            eprintln!(" - {}", m);
-                        }
-                        eprintln!("Be more specific or use the GUI to pick a device.");
-                    }
-                }
+        let needle = name.to_lowercase();
+        let mut matches: Vec<String> = AudioEngine::output_device_names()
+            .into_iter()
+            .filter(|n| n.to_lowercase().contains(&needle))
+            .collect();
+        match matches.len() {
+            0 => eprintln!("no matching device found for '{}'", name),
+            1 => {
+                let chosen = matches.remove(0);
+                cfg.preferred_output_device = Some(chosen.clone());
+                cfg.save().ok();
+                println!("preferred output device set to: {}", chosen);
             }
-            Err(e) => eprintln!("error enumerating devices: {}", e),
+            _ => {
+                eprintln!("multiple devices match '{}':", name);
+                for m in matches.iter() {
+                    eprintln!(" - {}", m);
+                }
+                eprintln!("Be more specific or use the GUI to pick a device.");
+            }
         }
         return Ok(());
     }
 
     // If user requested device listing, print available output devices and exit.
     if cli.list_devices {
-        let host = cpal::default_host();
-        match host.output_devices() {
-            Ok(devs) => {
-                println!("Available output devices:");
-                for d in devs {
-                    match d.name() {
-                        Ok(n) => println!("- {}", n),
-                        Err(_) => println!("- <unknown device name>"),
-                    }
-                }
-            }
-            Err(e) => eprintln!("error enumerating devices: {}", e),
+        let default = AudioEngine::default_output_device_name();
+        println!("Available output devices:");
+        for n in AudioEngine::output_device_names() {
+            let mark = if Some(&n) == default.as_ref() {
+                " (default)"
+            } else {
+                ""
+            };
+            println!("- {}{}", n, mark);
         }
         return Ok(());
     }
@@ -116,63 +105,53 @@ async fn main() -> anyhow::Result<()> {
             if !cli.scan.is_empty() {
                 let paths = cli.scan.clone();
                 let pb: Vec<_> = paths.into_iter().collect();
-                let opts = ScanOptions { fast: false, excludes: Vec::new() };
+                let opts = ScanOptions {
+                    fast: false,
+                    excludes: Vec::new(),
+                };
                 let handle = coordinator.start_scan(pb, opts).await?;
                 tracing::info!("started initial scan: id={}", handle.id);
             }
 
+            // Keeps the engine (and with it playback) alive while the IPC loop runs.
+            let mut _engine: Option<Arc<AudioEngine>> = None;
             if let Some(play_path) = cli.play.clone() {
                 tracing::info!("play demo requested: {:?}", play_path);
-                // Start output first so we can hand the producer sender and pool to the decoder
-                let mut out = lrc_player::infrastructure::audio::CpalOutput::new();
-                let req_fmt = lrc_player::ports::audio_output::AudioFormat {
-                    sample_rate: 44100,
-                    channels: 2,
-                    sample_format: lrc_player::ports::audio_output::SampleFormat::F32,
+                // Explicit --resampler-taps selects the sinc resampler; it is also persisted.
+                let resampler = match cli.resampler_taps {
+                    Some(taps) => {
+                        cfg.resampler_taps = taps;
+                        let _ = cfg.save();
+                        ResamplerKind::Sinc { sinc_len: taps }
+                    }
+                    None => ResamplerKind::Fft,
                 };
-
-                let eff_fmt =
-                    match out.start_with_device(req_fmt, cfg.preferred_output_device.clone()) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            tracing::error!("audio start failed: {}", e);
-                            return Ok(());
+                let engine = Arc::new(AudioEngine::new(EngineConfig {
+                    device: cfg.preferred_output_device.clone(),
+                    resampler,
+                    ..Default::default()
+                })?);
+                engine.load(play_path.clone(), 0, true);
+                let ev_engine = engine.clone();
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
+                    loop {
+                        tick.tick().await;
+                        while let Some(ev) = ev_engine.try_recv_event() {
+                            match &ev {
+                                EngineEvent::Error { path, message } => {
+                                    tracing::error!("playback error ({:?}): {}", path, message)
+                                }
+                                EngineEvent::TrackFinished { path } => {
+                                    tracing::info!("playback finished: {}", path.display());
+                                    return;
+                                }
+                                other => tracing::info!("audio: {:?}", other),
+                            }
                         }
-                    };
-
-                let producer_tx = out
-                    .producer_sender()
-                    .expect("producer sender should be available after start");
-                let pool = out.pool_handle();
-
-                // decide taps: CLI overrides saved config
-                let taps = cli.resampler_taps.unwrap_or(cfg.resampler_taps);
-                cfg.resampler_taps = taps;
-                let _ = cfg.save();
-
-                // persist selected device name from output
-                if let Some(name) = out.selected_device_name() {
-                    cfg.preferred_output_device = Some(name);
-                    let _ = cfg.save();
-                }
-
-                // spawn decoder that decodes -> converts to eff_fmt -> sends Arc<Vec<f32>> to producer
-                let (_stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
-                let _dec_handle =
-                    lrc_player::infrastructure::audio::decoder::spawn_decode_to_producer(
-                        play_path.clone(),
-                        1024usize,
-                        eff_fmt.sample_rate,
-                        eff_fmt.channels,
-                        producer_tx,
-                        pool,
-                        taps,
-                        Some(0),
-                        stop_rx,
-                    );
-
-                // In this demo we leave playback running until user exits; decoder/writer handle lifecycle
-                // is managed internally.
+                    }
+                });
+                _engine = Some(engine);
             }
 
             // main loop: process incoming IPC scan requests
@@ -181,7 +160,10 @@ async fn main() -> anyhow::Result<()> {
                 let mut paths: Vec<PathBuf> = req.paths.into_iter().map(PathBuf::from).collect();
                 paths.extend(req.lrc_paths.into_iter().map(PathBuf::from));
                 let excludes = req.excludes.into_iter().map(PathBuf::from).collect();
-                let opts = ScanOptions { fast: false, excludes };
+                let opts = ScanOptions {
+                    fast: false,
+                    excludes,
+                };
                 let handle = coordinator.start_scan(paths, opts).await?;
                 tracing::info!("started scan from IPC: id={}", handle.id);
             }

@@ -1,275 +1,170 @@
 //! 歌詞（LRC）ファイルの管理を担当
-//! - 歌詞ファイルの検索
-//! - 読み込みと優先度ソート
+//! - 歌詞候補（ワーカーで 1 回だけ解析・ランク付け済み）の選択
+//! - オフセット（ユーザー調整 + `[offset:]` タグ）は `LyricsTimeline` が 1 回だけ適用
+//! - オフセットの LRC への保存（アトミック置換 + `.bak`）
+//! - ドロップされた `.lrc` を再生中の曲に割り当てる（永続化）
+
+use std::path::Path;
+
+use lrc_player_application::infrastructure::lyrics::{save_lrc_offset, Lyrics, LyricsCandidate, LyricsTimeline};
 
 use crate::presentation::app::GuiApp;
-use lrc_player_application::infrastructure::lyrics::Lyrics;
-use std::fs;
+use crate::presentation::ui::views::LyricLine;
+
+/// Largest user offset accepted from the UI.
+pub(crate) const MAX_LYRICS_OFFSET_MS: i64 = 30_000;
+
+/// Lyric-clock time at playback `position_ms`.
+///
+/// The timeline applies the file's `[offset:]` tag plus the user offset exactly once; callers
+/// must not add `lyrics_offset_ms` themselves.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn overlay_time_ms(timeline: Option<&LyricsTimeline>, position_ms: u64) -> u64 {
+    match timeline {
+        Some(t) => t.lyric_time_ms(position_ms).max(0) as u64,
+        None => position_ms,
+    }
+}
+
+/// Lines for the lyrics view, borrowed from the timeline.
+pub(crate) fn lyric_lines(timeline: &LyricsTimeline, karaoke: bool) -> Vec<LyricLine<'_>> {
+    timeline
+        .lines()
+        .iter()
+        .map(|l| LyricLine { text: &l.text, start_ms: l.start_ms, karaoke: karaoke && l.is_karaoke() })
+        .collect()
+}
 
 impl GuiApp {
-    /// 現在の再生パスに対応する歌詞（LRC）ファイルを検索します。
-    /// 
-    /// この関数は以下の処理を行います：
-    /// 1. 再生パスの有効性チェック
-    /// 2. トラックに関連するLRCファイルを検索
-    /// 3. 検索結果を表示優先度順にソート
-    /// 4. 最も優先度の高いファイルを自動読み込み
-    /// 
-    /// 検索対象：
-    /// - トラックと同じディレクトリ内のLRCファイル
-    /// - スキャン設定で指定されたLRC専用ディレクトリ
-    /// 
-    /// ソート基準：
-    /// 1. 表示優先度ランク（高い順）
-    ///    - トラック名と完全一致するファイルが最優先
-    ///    - アーティスト名を含むファイル
-    ///    - その他のファイル
-    /// 2. ファイル名（アルファベット順）
-    /// 
-    /// 再生パスが空の場合は、すべての歌詞状態をクリアします。
-    pub(crate) fn discover_lyrics_for_current_play_path(&mut self) {
-        // 再生パスが空の場合、全歌詞状態をクリア
-        if self.play_path.is_empty() {
-            self.lyrics_files.clear();
-            self.selected_lyrics_index = None;
-            self.loaded_lyrics = None;
-            return;
+    /// Installs ranked candidates from the worker and loads the best one. A `.lrc` attached
+    /// by drag & drop for this track takes precedence.
+    pub(crate) fn set_lyrics_candidates(&mut self, mut candidates: Vec<LyricsCandidate>) {
+        if let Some(over) = self.lyrics_overrides.get(&self.play_path) {
+            let over = Path::new(over);
+            if let Some(pos) = candidates.iter().position(|c| c.path == over) {
+                let c = candidates.remove(pos);
+                candidates.insert(0, c);
+            } else if over.is_file() {
+                let mut ranked = Lyrics::rank_candidates([over.to_path_buf()]);
+                if let Some(c) = ranked.pop() {
+                    candidates.insert(0, c);
+                }
+            }
         }
-
-        // トラックに関連するLRCファイルを検索
-        // scan_lrc_targets: ユーザーが設定したLRC専用スキャンディレクトリ
-        self.lyrics_files = Lyrics::discover_for_track(&self.play_path, &self.scan_lrc_targets);
-
-        // 検索結果を表示優先度でソート
-        self.lyrics_files.sort_by(|a, b| {
-            // 各ファイルの表示優先度ランクを取得
-            // 解析に失敗した場合はランク0（最低優先度）
-            let a_lyrics = Lyrics::from_lrc(a);
-            let b_lyrics = Lyrics::from_lrc(b);
-            let a_rank = a_lyrics.as_ref().map(|lyrics| lyrics.display_priority_rank()).unwrap_or(0);
-            let b_rank = b_lyrics.as_ref().map(|lyrics| lyrics.display_priority_rank()).unwrap_or(0);
-            let a_line_only = a_lyrics.as_ref().map(|lyrics| lyrics.is_line_only_enhanced()).unwrap_or(false);
-            let b_line_only = b_lyrics.as_ref().map(|lyrics| lyrics.is_line_only_enhanced()).unwrap_or(false);
-
-            b_rank
-                .cmp(&a_rank)
-                .then_with(|| a_line_only.cmp(&b_line_only))
-                .then_with(|| a.file_name().cmp(&b.file_name()))
-        });
-
-        // 選択状態と読み込み済み歌詞をリセット
+        self.lyrics_candidates = candidates;
         self.selected_lyrics_index = None;
-        self.loaded_lyrics = None;
-
-        // 検索結果が存在する場合、最も優先度の高いファイルを自動読み込み
-        if !self.lyrics_files.is_empty() {
+        self.loaded_timeline = None;
+        self.lyrics_revision += 1;
+        if !self.lyrics_candidates.is_empty() {
             self.load_lyrics_file(0);
         }
     }
 
-    /// 指定されたインデックスの歌詞ファイルを読み込みます。
-    /// 
-    /// LRCファイルを解析し、内部的な歌詞データ構造に変換します。
-    /// 読み込みに成功すると、以下の状態が更新されます：
-    /// - `loaded_lyrics`: 解析された歌詞データ
-    /// - `selected_lyrics_index`: 選択中の歌詞ファイルのインデックス
-    /// 
-    /// 読み込みに失敗した場合は、エラーメッセージを標準エラー出力に表示し、
-    /// 状態は更新されません。
-    /// 
-    /// # 引数
-    /// * `index` - `lyrics_files`ベクタ内の読み込むファイルのインデックス
-    /// 
-    /// # パニック
-    /// この関数はパニックしません。インデックスが範囲外の場合や
-    /// ファイル読み込みに失敗した場合は、エラーを出力して正常に戻ります。
+    /// Selects candidate `index` (already parsed; no file I/O).
     pub(crate) fn load_lyrics_file(&mut self, index: usize) {
-        // 指定インデックスのファイルパスを取得
-        if let Some(path) = self.lyrics_files.get(index) {
-            // LRCファイルを解析
-            match Lyrics::from_lrc(path) {
-                Ok(lyrics) => {
-                    // 解析成功：状態を更新
-                    self.loaded_lyrics = Some(lyrics);
-                    self.selected_lyrics_index = Some(index);
-                }
-                Err(err) => {
-                    // 解析失敗：エラーを出力（状態は変更しない）
-                    eprintln!("Unable to load lyrics file {}: {}", path.display(), err);
-                }
+        let Some(candidate) = self.lyrics_candidates.get(index) else {
+            return;
+        };
+        match &candidate.timeline {
+            Some(timeline) => {
+                let mut timeline = timeline.clone();
+                timeline.set_user_offset_ms(self.lyrics_offset_ms);
+                self.loaded_timeline = Some(timeline);
+                self.selected_lyrics_index = Some(index);
+                self.lyrics_revision += 1;
+            }
+            None => {
+                let message = candidate
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| format!("{}", candidate.path.display()));
+                tracing::warn!("{message}");
+                let tr = self.tr();
+                self.toast_warning(tr.f("toast.lyrics_load_failed", &[&message]));
             }
         }
     }
 
-    /// 再生トラックが変更された場合に歌詞オフセットをリセットします。
-    ///
-    /// 同じトラックを再度再生した場合はリセットしません。
-    pub(crate) fn reset_lyrics_offset_if_track_changed(&mut self, new_play_path: &str) {
-        if self.play_path != new_play_path {
-            self.lyrics_offset_ms = 0;
-            self.save_state();
+    /// Attaches a dropped `.lrc` to the current track (remembered per track).
+    pub(crate) fn attach_lrc(&mut self, lrc: &Path) {
+        let tr = self.tr();
+        if self.play_path.is_empty() {
+            self.toast_warning(tr.t("toast.lrc_no_track").to_string());
+            return;
         }
+        let mut ranked = Lyrics::rank_candidates([lrc.to_path_buf()]);
+        let Some(candidate) = ranked.pop() else { return };
+        if candidate.timeline.as_ref().is_none_or(LyricsTimeline::is_empty) {
+            let err = candidate.error.unwrap_or_else(|| tr.t("toast.lrc_empty").to_string());
+            self.toast_error(tr.f("toast.lyrics_load_failed", &[&err]));
+            return;
+        }
+        self.lyrics_overrides
+            .insert(self.play_path.clone(), lrc.to_string_lossy().into_owned());
+        self.lyrics_candidates.retain(|c| c.path != lrc);
+        self.lyrics_candidates.insert(0, candidate);
+        self.load_lyrics_file(0);
+        self.save_state();
+        let name = lrc.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.toast_success(tr.f("toast.lrc_attached", &[&name]));
     }
 
-    /// 選択中のLRCファイルへ現在の歌詞オフセットを恒久反映します。
-    ///
-    /// - `[]` と `<>` のタイムタグをすべて走査
-    /// - `lyrics_offset_ms` だけ時刻を加算/減算
-    /// - 反映後は `lyrics_offset_ms` を 0 に戻し、歌詞を再読み込み
-    pub(crate) fn save_lyrics_offset_to_selected_file(&mut self) {
-        let Some(index) = self.selected_lyrics_index else {
-            self.play_status = Some("No lyrics file selected.".to_string());
-            return;
-        };
-
-        let Some(path) = self.lyrics_files.get(index).cloned() else {
-            self.play_status = Some("Selected lyrics file was not found.".to_string());
-            return;
-        };
-
-        if self.lyrics_offset_ms == 0 {
-            self.play_status = Some("Lyrics offset is 0 ms; nothing to save.".to_string());
-            return;
+    /// Sets the user lyrics offset for the current track (positive = lyrics earlier).
+    pub(crate) fn set_lyrics_offset(&mut self, offset_ms: i64) {
+        let offset_ms = offset_ms.clamp(-MAX_LYRICS_OFFSET_MS, MAX_LYRICS_OFFSET_MS);
+        self.lyrics_offset_ms = offset_ms;
+        if let Some(timeline) = &mut self.loaded_timeline {
+            timeline.set_user_offset_ms(offset_ms);
         }
+        if !self.play_path.is_empty() {
+            if offset_ms == 0 {
+                self.lyrics_offsets.remove(&self.play_path);
+            } else {
+                self.lyrics_offsets.insert(self.play_path.clone(), offset_ms);
+            }
+        }
+        self.save_state();
+    }
 
-        let contents = match fs::read_to_string(&path) {
-            Ok(contents) => contents,
+    /// Bakes the current offset (plus any `[offset:]` tag) into the selected `.lrc`
+    /// (atomic replace, previous file kept as `.bak`) and resets the user offset to 0.
+    pub(crate) fn save_lyrics_offset_to_selected_file(&mut self) {
+        let tr = self.tr();
+        let Some(path) = self
+            .selected_lyrics_index
+            .and_then(|i| self.lyrics_candidates.get(i))
+            .map(|c| c.path.clone())
+        else {
+            self.toast_warning(tr.t("toast.no_lyrics_file").to_string());
+            return;
+        };
+        let index = self.selected_lyrics_index.unwrap_or(0);
+
+        let saved = match save_lrc_offset(&path, self.lyrics_offset_ms) {
+            Ok(saved) => saved,
             Err(err) => {
-                self.play_status = Some(format!(
-                    "Unable to read lyrics file {}: {}",
-                    path.display(),
-                    err
-                ));
+                self.toast_error(tr.f("toast.offset_save_failed", &[&format!("{err:#}")]));
                 return;
             }
         };
-
-        // Preview applies offset to playback time, so persisting requires shifting
-        // file timestamps in the opposite direction.
-        let file_shift_ms = self.lyrics_offset_ms.saturating_neg();
-        let (shifted, replaced_count) = shift_lrc_timestamps(&contents, file_shift_ms);
-        if replaced_count == 0 {
-            self.play_status = Some(format!(
-                "No timestamp tags found in {}.",
-                path.display()
-            ));
+        if saved.backup_path.is_none() {
+            self.toast_info(tr.t("toast.offset_zero").to_string());
             return;
         }
 
-        if let Err(err) = fs::write(&path, shifted) {
-            self.play_status = Some(format!(
-                "Unable to write lyrics file {}: {}",
-                path.display(),
-                err
-            ));
-            return;
-        }
-
-        self.lyrics_offset_ms = 0;
-        self.load_lyrics_file(index);
-        self.save_state();
-        self.play_status = Some(format!(
-            "Saved lyrics offset to {} (updated {} timestamp tags).",
-            path.display(),
-            replaced_count
-        ));
-    }
-}
-
-fn shift_lrc_timestamps(contents: &str, offset_ms: i64) -> (String, usize) {
-    let mut output = String::with_capacity(contents.len());
-    let mut replaced_count = 0usize;
-    let mut i = 0usize;
-
-    while i < contents.len() {
-        let remaining = &contents[i..];
-        let (open, close) = if remaining.starts_with('[') {
-            ('[', ']')
-        } else if remaining.starts_with('<') {
-            ('<', '>')
-        } else {
-            let ch = remaining
-                .chars()
-                .next()
-                .expect("remaining is non-empty while iterating");
-            output.push(ch);
-            i += ch.len_utf8();
-            continue;
-        };
-
-        let search_start = i + open.len_utf8();
-        let Some(end_rel) = contents[search_start..].find(close) else {
-            let ch = remaining
-                .chars()
-                .next()
-                .expect("remaining is non-empty while iterating");
-            output.push(ch);
-            i += ch.len_utf8();
-            continue;
-        };
-
-        let end = search_start + end_rel;
-        let tag = &contents[search_start..end];
-        if let Some(ms) = parse_lrc_timestamp(tag) {
-            let shifted_ms = apply_signed_offset(ms, offset_ms);
-            output.push(open);
-            output.push_str(&format_lrc_timestamp(shifted_ms));
-            output.push(close);
-            replaced_count += 1;
-            i = end + close.len_utf8();
-            continue;
-        }
-
-        output.push(open);
-        i = search_start;
-    }
-
-    (output, replaced_count)
-}
-
-fn parse_lrc_timestamp(tag: &str) -> Option<u64> {
-    let mut parts = tag.splitn(2, ':');
-    let minutes = parts.next()?.parse::<u64>().ok()?;
-    let seconds_part = parts.next()?;
-
-    let mut sec_parts = seconds_part.splitn(2, '.');
-    let seconds = sec_parts.next()?.parse::<u64>().ok()?;
-    if seconds >= 60 {
-        return None;
-    }
-
-    let millis = match sec_parts.next() {
-        Some(frac) => {
-            if frac.is_empty() || frac.len() > 3 || !frac.chars().all(|c| c.is_ascii_digit()) {
-                return None;
+        // Reload the rewritten file (single small file) with a zero user offset.
+        let reloaded = LyricsTimeline::from_lrc(&path);
+        self.set_lyrics_offset(0);
+        if let Ok(timeline) = reloaded {
+            if let Some(candidate) = self.lyrics_candidates.get_mut(index) {
+                candidate.timeline = Some(timeline);
+                candidate.error = None;
             }
-            let normalized = match frac.len() {
-                1 => format!("{}00", frac),
-                2 => format!("{}0", frac),
-                _ => frac.to_string(),
-            };
-            normalized.parse::<u64>().ok()?
+            self.load_lyrics_file(index);
         }
-        None => 0,
-    };
-
-    Some(minutes * 60_000 + seconds * 1_000 + millis)
-}
-
-fn apply_signed_offset(ms: u64, offset_ms: i64) -> u64 {
-    // どんな場合でも負の値にならないように、0でクランプする。
-    if offset_ms >= 0 {
-        ms.saturating_add(offset_ms as u64)
-    } else {
-        ms.saturating_sub(offset_ms.unsigned_abs())
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.toast_success(tr.f("toast.offset_saved", &[&name, &saved.shifted_tags]));
     }
-}
-
-fn format_lrc_timestamp(ms: u64) -> String {
-    let minutes = ms / 60_000;
-    let seconds = (ms / 1_000) % 60;
-    let millis = ms % 1_000;
-    format!("{:02}:{:02}.{:03}", minutes, seconds, millis)
 }
 
 #[cfg(test)]

@@ -4,8 +4,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use anyhow::Result;
-use lrc_player::application::dto::StateDto;
-use lrc_player::infrastructure::persistence::{MetaCache, StateFile};
+use lrc_player::config::Config;
+use lrc_player::infrastructure::persistence::MetaCache;
+use lrc_player::presentation::app::scan_status;
 use lrc_player::infrastructure::scan::{ScanCoordinator, ScanOptions};
 use lrc_player::infrastructure::scan::ScanHandle;
 use lrc_player::shared::ipc as ipc_mod;
@@ -13,6 +14,7 @@ use std::process;
 use std::thread;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
+use tracing::level_filters::LevelFilter;
 
 fn update_scan_status(
     status: &str,
@@ -20,41 +22,29 @@ fn update_scan_status(
     parsed: Option<u64>,
     registered: Option<u64>,
 ) -> anyhow::Result<()> {
-    // Persist scan progress in state.json so GUI tabs can restore status across restarts.
-    let mut state = StateFile::open()
-        .and_then(|store| store.load())
-        .unwrap_or(StateDto {
-            last_tab: Some("Scan".into()),
-            last_play_path: None,
-            last_play_position_ms: None,
-            last_scan_status: None,
-            scan_scanned: None,
-            scan_parsed: None,
-            scan_registered: None,
-            scan_targets: Vec::new(),
-            scan_lrc_targets: Vec::new(),
-            scan_excludes: Vec::new(),
-            queue_tracks: Vec::new(),
-            selected_queue_index: None,
-            queue_playback_mode: lrc_player::domain::model::PlaybackMode::Sequential,
-            artist_view_mode: lrc_player::presentation::app::ArtistViewMode::Artist,
-            lrc_overlay_enabled: false,
-            fft_overlay_enabled: false,
-            side_panel_expanded: true,
-            favorite_directories: Vec::new(),
-        });
-    state.last_scan_status = Some(status.to_string());
-    state.scan_scanned = scanned;
-    state.scan_parsed = parsed;
-    state.scan_registered = registered;
-    if let Ok(store) = StateFile::open() {
-        store.save(&state)?;
-    }
+    // Delivered in-process to the GUI (which persists the last status with its own state);
+    // no more read-modify-write of state.json racing with the GUI's saves.
+    scan_status::publish(status, scanned, parsed, registered);
     Ok(())
 }
 
+/// Log level: `RUST_LOG` (a plain level such as `debug`) wins, otherwise the configured one.
+fn init_logging() {
+    let configured = Config::load().log_level.as_filter_str().to_string();
+    let requested = std::env::var("RUST_LOG").ok().unwrap_or(configured);
+    let level = match requested.trim().to_ascii_lowercase().as_str() {
+        "error" => LevelFilter::ERROR,
+        "warn" => LevelFilter::WARN,
+        "debug" => LevelFilter::DEBUG,
+        "trace" => LevelFilter::TRACE,
+        "off" => LevelFilter::OFF,
+        _ => LevelFilter::INFO,
+    };
+    tracing_subscriber::fmt().with_max_level(level).init();
+}
+
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    init_logging();
 
     let socket = ipc_mod::default_socket_path();
     // Run the IPC receiver on a dedicated thread so the GUI event loop stays responsive.
@@ -120,7 +110,14 @@ fn main() -> Result<()> {
                             let _ = update_scan_status("Scan started", Some(0), Some(0), Some(0));
                             let mut progress_rx = coordinator.subscribe_progress(&handle);
                             tokio::spawn(async move {
-                                while let Ok(progress) = progress_rx.recv().await {
+                                // The channel closes when the job has finished and committed its
+                                // results. A lagging receiver only missed intermediate counts.
+                                loop {
+                                    let progress = match progress_rx.recv().await {
+                                        Ok(progress) => progress,
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                    };
                                     let status = format!(
                                         "Scan progress: scanned={} parsed={} registered={}",
                                         progress.scanned, progress.parsed, progress.registered
@@ -157,12 +154,38 @@ fn main() -> Result<()> {
     // Detach the server thread; it will run for the lifetime of the GUI.
     let _ = server_thread;
 
-    let options = eframe::NativeOptions::default();
-    let _ = eframe::run_native(
-        "LRC Player GUI",
+    // Restore the last window size / position / maximized state (saved in state.json).
+    // The minimum size keeps the sidebar's nav, playlists and bottom block from colliding
+    // (see `ui::shell::MIN_WINDOW_SIZE`).
+    let [min_w, min_h] = lrc_player::presentation::ui::shell::MIN_WINDOW_SIZE;
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("LRC Player")
+        .with_app_id("lrc_player")
+        .with_inner_size([1280.0, 820.0])
+        .with_min_inner_size([min_w, min_h])
+        .with_drag_and_drop(true);
+    if let Some(window) = lrc_player::presentation::app::initial_window() {
+        viewport = viewport
+            .with_inner_size([window.width.max(min_w), window.height.max(min_h)])
+            .with_maximized(window.maximized);
+        let on_screen = |v: f32| (-4_000.0..16_000.0).contains(&v);
+        if let (Some(x), Some(y)) = (window.x.filter(|v| on_screen(*v)), window.y.filter(|v| on_screen(*v))) {
+            viewport = viewport.with_position([x, y]);
+        }
+    }
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    if let Err(err) = eframe::run_native(
+        "LRC Player",
         options,
-        Box::new(|cc| Box::new(lrc_player::presentation::app::GuiApp::new(cc))),
-    );
+        Box::new(|cc| Ok(Box::new(lrc_player::presentation::app::GuiApp::new(cc)))),
+    ) {
+        tracing::error!("failed to start the GUI: {err}");
+        eprintln!("failed to start the GUI: {err}");
+        process::exit(1);
+    }
 
     Ok(())
 }

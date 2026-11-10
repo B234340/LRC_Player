@@ -7,8 +7,21 @@ edition = "2021"
 anyhow = "1.0"
 cpal = "0.15"
 ringbuf = "0.2"
-symphonia = "0.5"
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac"] }
+rtrb = "0.3"
+rubato = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net", "io-util"] }
 crossbeam-channel = "0.5"
 tracing = "0.1"
 lrc_player_ports = { path = "../ports" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Same crate/version cpal uses for its ALSA host: lets device names be listed from ALSA name
+# hints without opening every PCM (cpal's enumeration opens each device to build it).
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
+alsa = "0.9"

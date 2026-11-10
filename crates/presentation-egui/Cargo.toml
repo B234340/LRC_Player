@@ -24,18 +24,37 @@ ringbuf = "0.2"
 crossbeam-channel = "0.5"
 directories = "4"
 image = "0.24"
-eframe = "0.22"
+eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 fontdb = "0.10"
+# CJK font handling (`ui::text`, `ui::fonts`): Shift_JIS / GB2312 / Big5 membership for language
+# detection, and font metrics for vertical normalization (same skrifa version epaint uses).
+encoding_rs = "0.8"
+skrifa = { version = "0.42", default-features = false, features = ["std"] }
 rustfft = "6.2"
+# Native folder picker for `UiAction::AddFolder` (XDG portal on Linux, no GTK dev libs needed).
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# OS media keys / overlay (Windows SMTC, macOS Now Playing, Linux MPRIS). `use_zbus` is the
+# pure-Rust D-Bus backend, so Linux builds need no libdbus-1 development package.
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
+raw-window-handle = "0.6"
 lrc_player_domain = { path = "../domain" }
 lrc_player_ports = { path = "../ports" }
 lrc_player_application = { path = "../application" }
 lrc_player_shared = { path = "../../shared/contracts" }
 
+# eframe's `winit/default` feature (enabled only by eframe's default features, which we turn off to
+# keep the glow renderer instead of wgpu) is what provides runtime-loaded Wayland and client-side
+# window decorations. Re-enable those winit features directly so Linux behaves as with eframe 0.22.
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["wayland-dlopen", "wayland-csd-adwaita"] }
+
 [target.'cfg(windows)'.dependencies.winapi]
 version = "0.3.9"
-features = ["winuser"]
+# windef/minwindef: window procedure subclassing in app/window_scale.rs.
+features = ["winuser", "windef", "minwindef"]
 
 [dev-dependencies]
 tempfile = "3"
 criterion = "0.4"
+# Headless rendering of the `presentation::ui` component gallery (screenshots via wgpu/lavapipe).
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }

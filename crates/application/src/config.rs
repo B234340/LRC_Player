@@ -4,18 +4,20 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
+/// UI language. Japanese is the default (the primary users are Japanese).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
-    #[default]
     En,
+    #[default]
     Ja,
     Zh,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtistViewMode {
+    #[default]
     Artist,
     AlbumArtist,
     Composer,
@@ -39,12 +41,6 @@ impl ArtistViewMode {
     }
 }
 
-impl Default for ArtistViewMode {
-    fn default() -> Self {
-        ArtistViewMode::Artist
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
@@ -63,6 +59,30 @@ pub enum LogLevel {
     Warn,
     Debug,
     Trace,
+}
+
+impl LogLevel {
+    /// Filter directive understood by `tracing_subscriber::EnvFilter` / `LevelFilter`.
+    pub fn as_filter_str(self) -> &'static str {
+        match self {
+            LogLevel::Error => "error",
+            LogLevel::Warn => "warn",
+            LogLevel::Info => "info",
+            LogLevel::Debug => "debug",
+            LogLevel::Trace => "trace",
+        }
+    }
+}
+
+/// Resampler used by the audio engine when the file rate differs from the device rate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResamplerSetting {
+    /// Synchronous FFT resampler (best quality / CPU for fixed rate pairs).
+    #[default]
+    Fft,
+    /// Windowed-sinc resampler whose filter length is the "resampler taps" setting.
+    Sinc,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -88,6 +108,36 @@ pub struct Config {
     pub theme: Theme,
     #[serde(default)]
     pub log_level: LogLevel,
+    /// Engine resampler (applied when the engine starts).
+    #[serde(default)]
+    pub resampler: ResamplerSetting,
+    /// UI accent color key (`teal`, `blue`, `violet`, `rose`, `amber`, `green`).
+    #[serde(default = "default_accent")]
+    pub accent: String,
+    /// Point size of the active lyric line.
+    #[serde(default = "default_lyric_font_size")]
+    pub lyric_font_size: f32,
+    /// Karaoke (left-to-right) fill for lyrics with word/char timings.
+    #[serde(default = "default_true")]
+    pub karaoke: bool,
+    /// Slim live spectrum strip on the Now Playing page.
+    #[serde(default)]
+    pub show_spectrum: bool,
+}
+
+fn default_accent() -> String {
+    "teal".to_string()
+}
+
+/// Default size of the active lyric line (points).
+pub const DEFAULT_LYRIC_FONT_SIZE: f32 = 30.0;
+
+fn default_lyric_font_size() -> f32 {
+    DEFAULT_LYRIC_FONT_SIZE
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -99,6 +149,11 @@ impl Default for Config {
             language: Language::default(),
             theme: Theme::default(),
             log_level: LogLevel::default(),
+            resampler: ResamplerSetting::default(),
+            accent: default_accent(),
+            lyric_font_size: DEFAULT_LYRIC_FONT_SIZE,
+            karaoke: true,
+            show_spectrum: false,
         }
     }
 }
@@ -155,4 +210,19 @@ impl Config {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[test]
+    fn old_config_json_gets_ui_defaults() {
+        let cfg: Config = serde_json::from_str(r#"{"resampler_taps": 64, "preferred_output_device": null}"#).unwrap();
+        assert_eq!(cfg.language, Language::Ja);
+        assert_eq!(cfg.accent, "teal");
+        assert_eq!(cfg.lyric_font_size, DEFAULT_LYRIC_FONT_SIZE);
+        assert!(cfg.karaoke);
+        assert!(!cfg.show_spectrum);
+        let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.resampler_taps, 64);
+    }
+}

@@ -1,9 +1,42 @@
 use lrc_player_shared::dto::LibraryDirectoryDto;
 use anyhow::Context;
 use rusqlite::{params, Connection, OpenFlags};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::Duration;
+
+/// Bump when the DDL in `init_schema` changes. Opening a database whose
+/// `PRAGMA user_version` is already at this value skips the DDL batch and the
+/// `PRAGMA table_info` column checks, which makes `MetaCache::new` cheap.
+const SCHEMA_VERSION: i64 = 2;
+
+/// Busy timeout used by `MetaCache::new` (scanner / writer connections).
+const WRITER_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Busy timeout used for the shared, UI-facing handle (`MetaCache::shared`).
+/// In WAL mode readers practically never wait, so this only bounds the rare
+/// case (WAL recovery, a write from the UI racing the scanner's commit). A
+/// UI thread will never stall longer than this on a lock.
+pub const UI_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Prepared-statement cache size per connection (`prepare_cached`).
+const STATEMENT_CACHE_CAPACITY: usize = 64;
+
+/// SQLite's default host-parameter limit is 32766 on the bundled build; stay
+/// far below it so a batch lookup works on any build.
+const BATCH_LOOKUP_CHUNK: usize = 500;
+
+/// Display metadata for a track location, as returned by
+/// [`MetaCache::track_metadata_many`]. Missing values are empty strings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrackMetadataRow {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub composer: String,
+}
 
 pub struct MetaCache {
     conn: Connection,
@@ -27,15 +60,75 @@ impl MetaCache {
             .context("enable WAL journal_mode")?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .context("set synchronous to NORMAL")?;
-        conn.busy_timeout(Duration::from_secs(5))
+        conn.busy_timeout(WRITER_BUSY_TIMEOUT)
             .context("set sqlite busy timeout")?;
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
 
         let cache = MetaCache {
             conn,
             path: path.to_path_buf(),
         };
-        cache.init_schema()?;
+        // The DDL batch + 4x `PRAGMA table_info` used to run on every open.
+        // Only run it when the schema version is behind.
+        let user_version: i64 = cache
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .context("read schema user_version")?;
+        if user_version < SCHEMA_VERSION {
+            cache.init_schema()?;
+            cache
+                .conn
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .context("set schema user_version")?;
+        }
         Ok(cache)
+    }
+
+    /// Change the busy timeout of this connection. UI-thread connections should
+    /// use a short timeout (see [`UI_BUSY_TIMEOUT`]) so a scanner holding the
+    /// write lock can never freeze the UI for seconds.
+    pub fn set_busy_timeout(&self, timeout: Duration) -> anyhow::Result<()> {
+        self.conn
+            .busy_timeout(timeout)
+            .context("set sqlite busy timeout")?;
+        Ok(())
+    }
+
+    /// `PRAGMA data_version`: changes whenever *another* connection (e.g. the
+    /// scanner) commits to the database. Cheap (no table access); use it to
+    /// decide whether cached library data must be reloaded. Writes made through
+    /// this same connection do NOT change it.
+    pub fn data_version(&self) -> anyhow::Result<i64> {
+        let version = self
+            .conn
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .context("read data_version")?;
+        Ok(version)
+    }
+
+    /// Return a process-wide shared handle to the default meta cache database.
+    ///
+    /// The connection is opened once (on first call) with a short busy timeout
+    /// ([`UI_BUSY_TIMEOUT`]) and reused afterwards, so per-frame / per-row
+    /// callers no longer pay for opening SQLite and running PRAGMAs. If opening
+    /// fails, the error is returned and the next call retries.
+    ///
+    /// Recommended usage on the UI thread: keep the returned handle in the app
+    /// struct, call [`SharedMetaCache::try_with`] (never blocks; returns `None`
+    /// if a worker is using the connection) and keep showing the previous data
+    /// when it returns `None`. Long-running work (scans, bulk writes) should
+    /// open its own connection with [`MetaCache::new`] instead of holding the
+    /// shared one.
+    pub fn shared() -> anyhow::Result<SharedMetaCache> {
+        static SHARED: OnceLock<Mutex<Option<SharedMetaCache>>> = OnceLock::new();
+        let slot = SHARED.get_or_init(|| Mutex::new(None));
+        let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(handle) = guard.as_ref() {
+            return Ok(handle.clone());
+        }
+        let handle = SharedMetaCache::open(Self::default_path()?)?;
+        *guard = Some(handle.clone());
+        Ok(handle)
     }
 
     /// Initialize schema (DDL). Safe to call multiple times.
@@ -83,6 +176,7 @@ CREATE TABLE IF NOT EXISTS locations (
     available BOOLEAN DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_locations_content ON locations(content_id);
+CREATE INDEX IF NOT EXISTS idx_locations_available_last_seen ON locations(available, last_seen);
 
 CREATE TABLE IF NOT EXISTS hashes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,7 +329,7 @@ COMMIT;
     pub fn find_track_content_id_by_path(&self, file_path: &Path) -> anyhow::Result<Option<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT content_id FROM locations WHERE path = ?1 LIMIT 1")?;
+            .prepare_cached("SELECT content_id FROM locations WHERE path = ?1 LIMIT 1")?;
         let mut rows = stmt.query(params![file_path.to_string_lossy()])?;
         if let Some(row) = rows.next()? {
             Ok(row.get::<_, Option<String>>(0)?)
@@ -249,7 +343,7 @@ COMMIT;
         file_stem: &str,
         parent_name: &str,
     ) -> anyhow::Result<Option<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT l.content_id, l.path FROM locations l JOIN tracks t ON t.content_id = l.content_id",
         )?;
         let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
@@ -269,7 +363,7 @@ COMMIT;
 
     pub fn lyrics_for_track_path(&self, file_path: &Path) -> anyhow::Result<Vec<String>> {
         if let Some(content_id) = self.find_track_content_id_by_path(file_path)? {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = self.conn.prepare_cached(
                 "SELECT path FROM lyrics WHERE content_id = ?1 AND available = 1",
             )?;
             let rows = stmt.query_map(params![content_id], |row| row.get(0))?;
@@ -587,7 +681,7 @@ COMMIT;
     }
     /// Basic query: get file id by path
     pub fn get_file_id(&self, path: &str) -> anyhow::Result<Option<i64>> {
-        let mut stmt = self.conn.prepare("SELECT id FROM files WHERE path = ?1")?;
+        let mut stmt = self.conn.prepare_cached("SELECT id FROM files WHERE path = ?1")?;
         let mut rows = stmt.query(params![path])?;
         if let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
@@ -599,7 +693,7 @@ COMMIT;
 
     /// Return groups of duplicate files that share the same stable key.
     pub fn duplicate_groups(&self) -> anyhow::Result<Vec<(String, Vec<String>)>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT stable_key, path FROM files
              WHERE stable_key IS NOT NULL
                AND stable_key IN (
@@ -660,7 +754,7 @@ COMMIT;
     pub fn recent_locations(&self, limit: usize) -> anyhow::Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path FROM locations WHERE available = 1 ORDER BY last_seen DESC LIMIT ?1")?;
+            .prepare_cached("SELECT path FROM locations WHERE available = 1 ORDER BY last_seen DESC LIMIT ?1")?;
         let rows = stmt.query_map(params![limit as i64], |row| row.get(0))?;
         let mut paths = Vec::new();
         for path in rows {
@@ -673,7 +767,7 @@ COMMIT;
     pub fn recent_directories(&self, limit: usize) -> anyhow::Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path FROM locations WHERE available = 1 ORDER BY last_seen DESC")?;
+            .prepare_cached("SELECT path FROM locations WHERE available = 1 ORDER BY last_seen DESC")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut dirs = Vec::new();
         let mut seen = HashSet::new();
@@ -717,7 +811,7 @@ COMMIT;
 
     /// Return distinct album names in the library.
     pub fn library_albums(&self) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT t.album
              FROM tracks t
              JOIN locations l ON l.content_id = t.content_id
@@ -750,7 +844,7 @@ COMMIT;
         let sql = format!(
             "SELECT DISTINCT t.{col} FROM tracks t JOIN locations l ON l.content_id = t.content_id WHERE l.available = 1 AND t.{col} IS NOT NULL AND t.{col} <> '' ORDER BY t.{col} COLLATE NOCASE"
         );
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             &sql,
         )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
@@ -763,7 +857,7 @@ COMMIT;
 
     /// Return track titles grouped by album.
     pub fn library_tracks_by_album(&self, album: &str) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT COALESCE(t.title, '')
              FROM tracks t
              JOIN locations l ON l.content_id = t.content_id
@@ -783,7 +877,7 @@ COMMIT;
     pub fn library_tracks_by_album_id(&self, album_id: &str) -> anyhow::Result<Vec<String>> {
         let (album, album_owner) = Self::decode_album_identifier(album_id);
         if album_owner.is_empty() {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = self.conn.prepare_cached(
                 "SELECT l.path
                  FROM tracks t
                  JOIN locations l ON l.content_id = t.content_id
@@ -799,7 +893,7 @@ COMMIT;
             return Ok(paths);
         }
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT l.path
              FROM tracks t
              JOIN locations l ON l.content_id = t.content_id
@@ -843,7 +937,7 @@ COMMIT;
              WHERE l.available = 1
                AND t.{col} = ?1"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![artist_name], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -877,7 +971,7 @@ COMMIT;
 
     /// Return track titles grouped by artist.
     pub fn library_track_titles_by_artist(&self, artist: &str) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT COALESCE(t.title, '')
              FROM tracks t
              JOIN locations l ON l.content_id = t.content_id
@@ -898,7 +992,7 @@ COMMIT;
         &self,
         location_path: &str,
     ) -> anyhow::Result<Option<(String, String, String)>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT COALESCE(t.title, ''), COALESCE(t.artist, ''), COALESCE(t.album, '')
              FROM locations l
              JOIN tracks t ON t.content_id = l.content_id
@@ -915,7 +1009,7 @@ COMMIT;
 
     /// Return one representative location path for the given album.
     pub fn album_representation_path(&self, album: &str) -> anyhow::Result<Option<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT l.path
              FROM locations l
              JOIN tracks t ON t.content_id = l.content_id
@@ -933,7 +1027,7 @@ COMMIT;
 
     /// Return candidate location paths for an album ordered by availability/recency.
     pub fn album_location_paths(&self, album: &str, limit: usize) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT l.path
              FROM locations l
              JOIN tracks t ON t.content_id = l.content_id
@@ -971,7 +1065,7 @@ COMMIT;
     pub fn library_directories(&self, limit: usize) -> anyhow::Result<Vec<LibraryDirectoryDto>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT DISTINCT path FROM locations WHERE available = 1")?;
+            .prepare_cached("SELECT DISTINCT path FROM locations WHERE available = 1")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut dirs = HashSet::new();
 
@@ -1040,7 +1134,7 @@ COMMIT;
         }
         pattern.push('%');
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT l.path FROM tracks t JOIN locations l ON l.content_id = t.content_id WHERE l.available = 1 AND (l.path = ?1 OR l.path LIKE ?2)",
         )?;
         let rows = stmt.query_map(params![directory, pattern], |row| row.get::<_, String>(0))?;
@@ -1066,9 +1160,236 @@ COMMIT;
         Ok(paths)
     }
 
+    /// Batch version of [`MetaCache::track_metadata_by_location`]: resolve
+    /// display metadata for many location paths with one query per 500 paths
+    /// (instead of one query per row). Paths that are not in the library are
+    /// simply absent from the returned map.
+    ///
+    /// Intended use: call once when a track list changes (not per frame) and
+    /// keep the map next to the list.
+    pub fn track_metadata_many<S: AsRef<str>>(
+        &self,
+        location_paths: &[S],
+    ) -> anyhow::Result<HashMap<String, TrackMetadataRow>> {
+        let mut result = HashMap::with_capacity(location_paths.len());
+        for chunk in location_paths.chunks(BATCH_LOOKUP_CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT l.path, COALESCE(t.title, ''), COALESCE(t.artist, ''), COALESCE(t.album, ''),
+                        COALESCE(t.album_artist, ''), COALESCE(t.composer, '')
+                 FROM locations l
+                 JOIN tracks t ON t.content_id = l.content_id
+                 WHERE l.path IN ({placeholders})"
+            );
+            // Full chunks share one cached statement; only the final partial
+            // chunk prepares a statement of a new size.
+            let mut stmt = self.conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(chunk.iter().map(|p| p.as_ref())),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        TrackMetadataRow {
+                            title: row.get(1)?,
+                            artist: row.get(2)?,
+                            album: row.get(3)?,
+                            album_artist: row.get(4)?,
+                            composer: row.get(5)?,
+                        },
+                    ))
+                },
+            )?;
+            for row in rows {
+                let (path, meta) = row?;
+                // A path is UNIQUE in `locations`; keep the first row anyway.
+                result.entry(path).or_insert(meta);
+            }
+        }
+        Ok(result)
+    }
+
     /// Expose a raw connection reference for advanced ops (use carefully)
     pub fn connection(&self) -> &Connection {
         &self.conn
+    }
+}
+
+/// A cloneable, thread-safe handle to one long-lived [`MetaCache`] connection.
+///
+/// `rusqlite::Connection` is `Send` but not `Sync`, so the connection lives
+/// behind a mutex. Obtain the process-wide default handle with
+/// [`MetaCache::shared`], or wrap a specific database with
+/// [`SharedMetaCache::open`] / [`SharedMetaCache::new`].
+///
+/// Do not call `with`/`try_with` re-entrantly from inside the closure (the
+/// mutex is not re-entrant; `with` would deadlock, `try_with` returns `None`).
+#[derive(Clone)]
+pub struct SharedMetaCache {
+    inner: Arc<Mutex<MetaCache>>,
+    path: Arc<PathBuf>,
+}
+
+impl SharedMetaCache {
+    /// Wrap an already-open cache. Its busy timeout is left unchanged.
+    pub fn new(cache: MetaCache) -> Self {
+        let path = Arc::new(cache.path().to_path_buf());
+        Self {
+            inner: Arc::new(Mutex::new(cache)),
+            path,
+        }
+    }
+
+    /// Open (or create) the database at `path` with [`UI_BUSY_TIMEOUT`].
+    pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+        let cache = MetaCache::new(path)?;
+        cache.set_busy_timeout(UI_BUSY_TIMEOUT)?;
+        Ok(Self::new(cache))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Run `f` with the connection, waiting for other users of this handle.
+    pub fn with<R>(&self, f: impl FnOnce(&MetaCache) -> R) -> R {
+        let guard = self.lock();
+        f(&guard)
+    }
+
+    /// Run `f` only if the connection is free right now; never blocks.
+    /// Returns `None` when another thread is currently using the handle.
+    pub fn try_with<R>(&self, f: impl FnOnce(&MetaCache) -> R) -> Option<R> {
+        match self.inner.try_lock() {
+            Ok(guard) => Some(f(&guard)),
+            Err(TryLockError::Poisoned(poisoned)) => Some(f(&poisoned.into_inner())),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// Lock the connection for several calls in a row.
+    pub fn lock(&self) -> MutexGuard<'_, MetaCache> {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// True when both handles share the same underlying connection.
+    pub fn ptr_eq(&self, other: &SharedMetaCache) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl std::fmt::Debug for SharedMetaCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedMetaCache").field("path", &self.path).finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed(cache: &MetaCache, n: usize) {
+        let conn = cache.connection();
+        conn.execute_batch("BEGIN").unwrap();
+        for i in 0..n {
+            let cid = format!("c{i}");
+            conn.execute(
+                "INSERT INTO tracks (content_id, title, artist, album, album_artist, composer) VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+                params![cid, format!("Title {i}"), format!("Artist {}", i % 7), format!("Album {}", i % 13), "AA"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO locations (content_id, path, last_seen, available) VALUES (?1, ?2, ?3, 1)",
+                params![cid, format!("/music/d{}/t{i}.flac", i % 10), i as i64],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("COMMIT").unwrap();
+    }
+
+    #[test]
+    fn track_metadata_many_matches_single_lookups_across_chunks() {
+        let cache = MetaCache::new(":memory:").unwrap();
+        seed(&cache, 1_234);
+        let mut paths: Vec<String> = (0..1_234).map(|i| format!("/music/d{}/t{i}.flac", i % 10)).collect();
+        paths.push("/not/in/library.mp3".to_string());
+
+        let map = cache.track_metadata_many(&paths).unwrap();
+        assert_eq!(map.len(), 1_234);
+        assert!(!map.contains_key("/not/in/library.mp3"));
+        for path in paths.iter().take(1_234).step_by(97) {
+            let (title, artist, album) = cache.track_metadata_by_location(path).unwrap().unwrap();
+            let row = &map[path];
+            assert_eq!((row.title.as_str(), row.artist.as_str(), row.album.as_str()), (title.as_str(), artist.as_str(), album.as_str()));
+            assert_eq!(row.album_artist, "AA");
+            assert_eq!(row.composer, "");
+        }
+        let empty: [&str; 0] = [];
+        assert!(cache.track_metadata_many(&empty).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reopening_skips_schema_ddl_and_keeps_data() {
+        let dir = std::env::temp_dir().join(format!("lrc_meta_cache_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("reopen.db");
+        let _ = std::fs::remove_file(&db);
+        {
+            let cache = MetaCache::new(&db).unwrap();
+            seed(&cache, 3);
+            let v: i64 = cache.connection().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(v, SCHEMA_VERSION);
+        }
+        let start = std::time::Instant::now();
+        let cache = MetaCache::new(&db).unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(cache.library_counts().unwrap().1, 3);
+        // Index from schema v2 exists.
+        let idx: i64 = cache
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_locations_available_last_seen'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1);
+        assert!(elapsed < Duration::from_secs(1), "reopen took {elapsed:?}");
+        drop(cache);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn data_version_changes_only_for_other_connections() {
+        let dir = std::env::temp_dir().join(format!("lrc_meta_cache_dv_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("dv.db");
+        let _ = std::fs::remove_file(&db);
+        let reader = MetaCache::new(&db).unwrap();
+        let writer = MetaCache::new(&db).unwrap();
+        let v0 = reader.data_version().unwrap();
+        seed(&reader, 1); // own write
+        assert_eq!(reader.data_version().unwrap(), v0);
+        writer.connection().execute("UPDATE locations SET last_seen = 99", []).unwrap();
+        assert_ne!(reader.data_version().unwrap(), v0);
+        drop((reader, writer));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_handle_is_reused_and_try_with_never_blocks() {
+        let a = MetaCache::shared().unwrap();
+        let b = MetaCache::shared().unwrap();
+        assert!(a.ptr_eq(&b));
+
+        let mem = SharedMetaCache::new(MetaCache::new(":memory:").unwrap());
+        let guard = mem.lock();
+        let other = mem.clone();
+        let blocked = std::thread::spawn(move || other.try_with(|_| ()).is_none())
+            .join()
+            .unwrap();
+        assert!(blocked, "try_with must return None while locked");
+        drop(guard);
+        assert_eq!(mem.try_with(|c| c.library_counts().unwrap()), Some((0, 0)));
     }
 }
 

@@ -1,63 +1,46 @@
+//! Legacy decode helpers (kept for API compatibility with the pre-engine GUI path).
+//!
+//! Both functions now sit on the engine's `TrackSource`, so they get: container seeking
+//! (`start_ms` no longer decodes from the start of the file), packet filtering by track id,
+//! format taken from each decoded buffer, and gapless trimming.
+//!
+//! Stop handling (F2): a disconnected stop channel counts as "stop" (dropping the sender is a
+//! broadcast), sends to the producer use timeouts so a stop is noticed even when the consumer
+//! side is stalled, and a stop during the start-offset skip ends the thread instead of falling
+//! through into playback.
+
 use anyhow::Result;
-use crossbeam_channel::{Receiver, Sender};
-use std::path::{Path, PathBuf};
+use crossbeam_channel::{Receiver, SendTimeoutError, Sender, TryRecvError};
+use std::path::PathBuf;
 use std::sync::Arc;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::default::get_probe;
+use std::time::Duration;
 
-fn open_audio_source(
-    path: &Path,
-) -> Result<(
-    Box<dyn symphonia::core::formats::FormatReader>,
-    u32,
-    u16,
-    Box<dyn symphonia::core::codecs::Decoder>,
-)> {
-    let src = std::fs::File::open(path)?;
-    let mss = symphonia::core::io::MediaSourceStream::new(Box::new(src), Default::default());
-    let probe = get_probe().format(
-        &Default::default(),
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    )?;
-    let format = probe.format;
+use super::engine::source::TrackSource;
+use super::stream_adapter::StreamConverter;
 
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.sample_rate.is_some())
-        .ok_or_else(|| anyhow::anyhow!("no audio track found"))?;
-    let codec_params = &track.codec_params;
-    let sample_rate = codec_params
-        .sample_rate
-        .ok_or_else(|| anyhow::anyhow!("sample rate unknown"))?
-        as u32;
-    let channels = codec_params
-        .channels
-        .as_ref()
-        .map(|c| c.count() as u16)
-        .unwrap_or(2);
-
-    let decoder = symphonia::default::get_codecs().make(codec_params, &DecoderOptions::default())?;
-    Ok((format, sample_rate, channels, decoder))
+fn stop_requested(stop_rx: &Receiver<()>) -> bool {
+    !matches!(stop_rx.try_recv(), Err(TryRecvError::Empty))
 }
 
-fn decode_packet_to_samples(
-    packet: &symphonia::core::formats::Packet,
-    decoder: &mut dyn symphonia::core::codecs::Decoder,
-) -> std::result::Result<Vec<f32>, symphonia::core::errors::Error> {
-    let audio_buf = decoder.decode(packet)?;
-    let frames = audio_buf.frames();
-    let mut sb = SampleBuffer::<f32>::new(
-        frames as symphonia::core::units::Duration,
-        *audio_buf.spec(),
-    );
-    sb.copy_interleaved_ref(audio_buf);
-    Ok(sb.samples().to_vec())
+/// Sends `buf`, waiting for space but giving up when a stop is requested or the receiver is
+/// gone. Returns false if the caller should stop.
+fn send_or_stop(
+    tx: &Sender<Arc<Vec<f32>>>,
+    mut buf: Arc<Vec<f32>>,
+    stop_rx: &Receiver<()>,
+) -> bool {
+    loop {
+        match tx.send_timeout(buf, Duration::from_millis(50)) {
+            Ok(()) => return true,
+            Err(SendTimeoutError::Disconnected(_)) => return false,
+            Err(SendTimeoutError::Timeout(b)) => {
+                if stop_requested(stop_rx) {
+                    return false;
+                }
+                buf = b;
+            }
+        }
+    }
 }
 
 /// Spawn a decoder thread that decodes `path`, converts/resamples to the target format,
@@ -75,121 +58,90 @@ pub fn spawn_decode_to_producer(
     start_ms: Option<u64>,
     stop_rx: Receiver<()>,
 ) -> std::thread::JoinHandle<anyhow::Result<()>> {
-    std::thread::spawn(move || {
-        let res: Result<()> = (|| {
-            let (mut format, sample_rate, channels, mut decoder) =
-                open_audio_source(&path)?;
-
-            // converter from src -> target
-            let mut conv = crate::infrastructure::audio::stream_adapter::StreamConverter::new(
-                sample_rate,
-                channels,
-                target_sample_rate,
-                target_channels,
-                taps,
-            );
-
-            // accumulator for interleaved samples at source format
+    std::thread::Builder::new()
+        .name("lrc-legacy-decoder".into())
+        .spawn(move || -> Result<()> {
+            let mut src = TrackSource::open(&path)?;
+            if let Some(ms) = start_ms.filter(|&ms| ms > 0) {
+                src.seek_ms(ms)?;
+            }
+            if stop_requested(&stop_rx) {
+                return Ok(());
+            }
+            let chunk_frames = chunk_frames.max(64);
+            let mut conv: Option<(StreamConverter, usize, u32)> = None;
             let mut acc: Vec<f32> = Vec::new();
-            let mut read_idx: usize = 0;
-            let src_target_len = chunk_frames.saturating_mul(channels as usize);
+            let get_buf = |n: usize| match &pool {
+                Some(p) => p.get(n),
+                None => Vec::with_capacity(n),
+            };
+            let out_cap = |frames: usize| (frames * target_channels as usize * 2).max(1024);
 
-            let mut samples_skipped = 0usize;
-            if let Some(start_ms) = start_ms {
-                let target_frames = start_ms.saturating_mul(sample_rate as u64) / 1000;
-                let target_samples = target_frames.saturating_mul(channels as u64) as usize;
-                while samples_skipped < target_samples {
-                    if stop_rx.try_recv().is_ok() {
-                        break;
-                    }
-                    match format.next_packet() {
-                        Ok(packet) => match decode_packet_to_samples(&packet, decoder.as_mut()) {
-                            Ok(samples) => {
-                                let to_skip = (target_samples - samples_skipped).min(samples.len());
-                                samples_skipped += to_skip;
-                                if samples_skipped >= target_samples {
-                                    break;
-                                }
-                            }
-                            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-                            Err(e) => return Err(anyhow::anyhow!(e.to_string())),
-                        },
-                        Err(symphonia::core::errors::Error::IoError(_)) => break,
-                        Err(e) => return Err(anyhow::anyhow!(e.to_string())),
-                    }
-                }
-                acc.clear();
-                read_idx = 0;
-            }
-
-            let mut stop_requested = false;
             loop {
-                if stop_rx.try_recv().is_ok() {
-                    stop_requested = true;
-                    break;
+                if stop_requested(&stop_rx) {
+                    return Ok(());
                 }
-                match format.next_packet() {
-                    Ok(packet) => match decode_packet_to_samples(&packet, decoder.as_mut()) {
-                        Ok(samples) => {
-                            acc.extend_from_slice(&samples);
-
-                            while acc.len().saturating_sub(read_idx) >= src_target_len {
-                                let chunk_end = read_idx + src_target_len;
-                                let chunk = &acc[read_idx..chunk_end];
-                                read_idx = chunk_end;
-
-                                // get output buffer from pool or new
-                                let mut out_buf = if let Some(p) = &pool {
-                                    p.get((chunk_frames * target_channels as usize).max(1024))
-                                } else {
-                                    Vec::with_capacity(chunk_frames * target_channels as usize)
-                                };
-
-                                // convert in-place: stream_adapter writes into out_buf
-                                conv.process(chunk, channels, sample_rate, &mut out_buf);
-
-                                // send to producer (blocking send to apply backpressure)
-                                if producer_tx.send(Arc::new(out_buf)).is_err() {
-                                    stop_requested = true;
-                                    break;
-                                }
-                            }
-
-                            if stop_requested {
-                                break;
-                            }
-
-                            // Compact periodically to avoid O(n) drain for every chunk.
-                            if read_idx > 0 && read_idx >= acc.len() / 2 {
-                                acc.copy_within(read_idx.., 0);
-                                acc.truncate(acc.len() - read_idx);
-                                read_idx = 0;
-                            }
-                        }
-                        Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-                        Err(e) => return Err(anyhow::anyhow!(e.to_string())),
-                    },
-                    Err(symphonia::core::errors::Error::IoError(_)) => break,
-                    Err(e) => return Err(anyhow::anyhow!(e.to_string())),
-                }
-            }
-
-            // send remaining samples only when finishing naturally.
-            if !stop_requested && read_idx < acc.len() {
-                let chunk = &acc[read_idx..];
-                let mut out_buf = if let Some(p) = &pool {
-                    p.get((chunk.len() / channels as usize) * target_channels as usize)
-                } else {
-                    Vec::with_capacity((chunk.len() / channels as usize) * target_channels as usize)
+                let fmt = match src.decode_next()? {
+                    Some(f) => f,
+                    None => break,
                 };
-                conv.process(chunk, channels, sample_rate, &mut out_buf);
-                let _ = producer_tx.send(Arc::new(out_buf));
+                let changed = conv
+                    .as_ref()
+                    .is_none_or(|(_, ch, rate)| *ch != fmt.channels || *rate != fmt.rate);
+                if changed {
+                    // Flush what is buffered with the old format first.
+                    if let Some((mut c, ch, rate)) = conv.take() {
+                        let mut out = get_buf(out_cap(acc.len() / ch.max(1)));
+                        c.process(&acc, ch as u16, rate, &mut out);
+                        let mut tail = Vec::new();
+                        c.flush(&mut tail);
+                        out.extend_from_slice(&tail);
+                        acc.clear();
+                        if !out.is_empty() && !send_or_stop(&producer_tx, Arc::new(out), &stop_rx) {
+                            return Ok(());
+                        }
+                    }
+                    conv = Some((
+                        StreamConverter::new(
+                            fmt.rate,
+                            fmt.channels as u16,
+                            target_sample_rate,
+                            target_channels,
+                            taps,
+                        ),
+                        fmt.channels,
+                        fmt.rate,
+                    ));
+                }
+                let (c, ch, rate) = conv.as_mut().expect("converter");
+                acc.extend_from_slice(src.block());
+                let chunk_len = chunk_frames * *ch;
+                let mut start = 0;
+                while acc.len() - start >= chunk_len {
+                    let mut out = get_buf(out_cap(chunk_frames));
+                    c.process(&acc[start..start + chunk_len], *ch as u16, *rate, &mut out);
+                    start += chunk_len;
+                    if !send_or_stop(&producer_tx, Arc::new(out), &stop_rx) {
+                        return Ok(());
+                    }
+                }
+                acc.drain(..start);
             }
 
+            // Natural end: send the remainder and the converter tail.
+            if let Some((mut c, ch, rate)) = conv {
+                let mut out = get_buf(out_cap(acc.len() / ch.max(1) + 16));
+                c.process(&acc, ch as u16, rate, &mut out);
+                let mut tail = Vec::new();
+                c.flush(&mut tail);
+                out.extend_from_slice(&tail);
+                if !out.is_empty() {
+                    let _ = send_or_stop(&producer_tx, Arc::new(out), &stop_rx);
+                }
+            }
             Ok(())
-        })();
-        res
-    })
+        })
+        .expect("spawn decoder thread")
 }
 
 /// Chunk of decoded interleaved f32 samples.
@@ -202,7 +154,7 @@ pub struct DecodedChunk {
 /// Spawn a streaming decoder for `path` that sends interleaved f32 chunks of approximately
 /// `chunk_frames` frames (per channel) over an unbounded `tokio` receiver. The returned
 /// receiver yields `Result<DecodedChunk, anyhow::Error>` asynchronously until the stream ends
-/// or an error occurs.
+/// or an error occurs. The thread exits early when the receiver is dropped.
 pub fn spawn_decode_stream(
     path: PathBuf,
     chunk_frames: usize,
@@ -210,67 +162,48 @@ pub fn spawn_decode_stream(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
     std::thread::spawn(move || {
-        // All symphonia calls are done on this blocking thread; send chunks via the unbounded sender.
         let res: Result<()> = (|| {
-            let (mut format, sample_rate, channels, mut decoder) = open_audio_source(&path)?;
-
-            // accumulator for interleaved samples
+            let mut src = TrackSource::open(&path)?;
             let mut acc: Vec<f32> = Vec::new();
-            let mut read_idx: usize = 0;
-            let target_len = chunk_frames.saturating_mul(channels as usize);
-
+            let mut cur: Option<(u32, usize)> = None;
+            let chunk_frames = chunk_frames.max(1);
             loop {
-                match format.next_packet() {
-                    Ok(packet) => match decode_packet_to_samples(&packet, decoder.as_mut()) {
-                        Ok(samples) => {
-                            acc.extend_from_slice(&samples);
-
-                            while acc.len().saturating_sub(read_idx) >= target_len {
-                                let chunk_end = read_idx + target_len;
-                                let chunk = acc[read_idx..chunk_end].to_vec();
-                                read_idx = chunk_end;
-                                let dc = DecodedChunk {
-                                    samples: chunk,
-                                    sample_rate,
-                                    channels,
-                                };
-                                // ignore send error (receiver closed)
-                                let _ = tx.send(Ok(dc));
-                            }
-
-                            // Compact periodically to avoid O(n) drain for every chunk.
-                            if read_idx > 0 && read_idx >= acc.len() / 2 {
-                                acc.copy_within(read_idx.., 0);
-                                acc.truncate(acc.len() - read_idx);
-                                read_idx = 0;
-                            }
+                let fmt = src.decode_next()?;
+                let flush_all = match (&fmt, cur) {
+                    (None, _) => true,
+                    (Some(f), Some((r, c))) => f.rate != r || f.channels != c,
+                    (Some(_), None) => false,
+                };
+                if let Some((rate, ch)) = cur {
+                    let target = chunk_frames * ch;
+                    let mut start = 0;
+                    while acc.len() - start >= target || (flush_all && start < acc.len()) {
+                        let end = (start + target).min(acc.len());
+                        let dc = DecodedChunk {
+                            samples: acc[start..end].to_vec(),
+                            sample_rate: rate,
+                            channels: ch as u16,
+                        };
+                        if tx.send(Ok(dc)).is_err() {
+                            return Ok(());
                         }
-                        Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-                        Err(e) => return Err(anyhow::anyhow!(e.to_string())),
-                    },
-                    Err(symphonia::core::errors::Error::IoError(_)) => break,
-                    Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+                        start = end;
+                    }
+                    acc.drain(..start);
+                }
+                match fmt {
+                    Some(f) => {
+                        cur = Some((f.rate, f.channels));
+                        acc.extend_from_slice(src.block());
+                    }
+                    None => break,
                 }
             }
-
-            // send remaining samples if any
-            if read_idx < acc.len() {
-                let dc = DecodedChunk {
-                    samples: acc[read_idx..].to_vec(),
-                    sample_rate,
-                    channels,
-                };
-                let _ = tx.send(Ok(dc));
-            }
-
             Ok(())
         })();
-
         if let Err(e) = res {
             let _ = tx.send(Err(e));
         }
-
-        // drop tx to close channel
     });
 
     rx

@@ -13,3 +13,12 @@ members = [
     "apps/gui",
     "apps/cli",
 ]
+
+# Audio decoding/resampling is far too slow unoptimized (symphonia + rubato run
+# near realtime in debug), which causes dropouts in `cargo run` builds.
+# Optimize all dependencies and the audio adapter even in dev builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.lrc_player_adapters_audio]
+opt-level = 3

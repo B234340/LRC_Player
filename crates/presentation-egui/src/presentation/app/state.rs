@@ -1,581 +1,497 @@
-//! アプリケーション状態の永続化と基本操作を担当
-//! 
-//! このモジュールは以下の責務を持ちます：
-//! - アプリケーション状態の保存と読み込み
-//! - プレイリスト操作の委譲
-//! - キュー操作の委譲
-//! - ライブラリ操作の委譲
-//! - 再生制御操作の委譲
-//! - スキャン操作の委譲
-//! - アプリケーションの初期化（`new`）
+//! アプリケーション状態の永続化と構築を担当
+//!
+//! - State persistence goes through a debounced background [`StateSaver`]: hot paths only set
+//!   a dirty flag ([`GuiApp::save_state`]); the frame loop hands a snapshot to the saver at
+//!   most once per second, and `on_exit` flushes synchronously.
+//! - Construction of the app (`new` / `with_options`): fonts (built on a worker), theme,
+//!   audio engine, shared DB handle, library index.
+//! - Window geometry (restored by `apps/gui` through [`initial_window`]).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::time::Instant;
 
-use cpal::traits::{DeviceTrait, HostTrait};
-use eframe::CreationContext;
-use lrc_player_application::config::Config;
-use lrc_player_application::dto::{LibraryDto, PlaylistDto, StateDto};
-use lrc_player_application::infrastructure::audio;
-use lrc_player_application::infrastructure::persistence::{MetaCache, PlaylistsFile, StateFile};
-use lrc_player_application::view_model::QueueVm;
-use lrc_player_domain::model::{PlaybackMode, PlaybackState};
+use eframe::{egui, CreationContext};
+use lrc_player_application::config::{Config, Theme};
+use lrc_player_application::dto::{legacy_playback_mode, PlaylistDto, StateDto, WindowStateDto};
+use lrc_player_application::infrastructure::audio::engine::AudioEngine;
+use lrc_player_application::infrastructure::persistence::{
+    MetaCache, SharedMetaCache, StateFile, StateSaver,
+};
+use lrc_player_application::usecases::queue_navigation::QueueNavigator;
+use lrc_player_domain::model::PlaybackState;
 
-use crate::presentation::actions::{library, play, playlist, queue, scan};
-use crate::presentation::app::{ArtistViewMode, GuiApp, Tab};
+use crate::presentation::app::playback::{create_engine, eq_from_dto, eq_to_dto};
+use crate::presentation::app::{
+    library_index::LibraryIndex, media_controls::MediaControlsBridge, playlists, scan_status,
+    spectrum::FftAnalyzer, track_info, ArtworkLoader, GuiApp, UiShell,
+};
+use crate::presentation::ui::views::album_grid::{ALBUM_CARD_DEFAULT, ALBUM_CARD_MAX, ALBUM_CARD_MIN};
+use crate::presentation::ui::{
+    shell::SidebarState, views::{Column, NowPlayingState}, widgets::Toasts, Accent, Page, RightPanel, ThemeMode,
+};
+
+/// How a [`GuiApp`] is built. [`AppOptions::default`] is the real application.
+#[derive(Debug, Clone)]
+pub struct AppOptions {
+    /// Read and write `state.json` / `config.json` / `playlists.json` next to the executable.
+    pub persist: bool,
+    /// Start the audio engine.
+    pub engine: bool,
+    /// Library database (default: the shared database next to the executable).
+    pub meta_path: Option<PathBuf>,
+    /// Use this state instead of loading `state.json`.
+    pub state: Option<StateDto>,
+    /// Use this config instead of loading `config.json`.
+    pub config: Option<Config>,
+    /// Use these playlists instead of loading `playlists.json`.
+    pub playlists: Option<Vec<PlaylistDto>>,
+    /// Build system fonts on a worker thread.
+    pub load_fonts: bool,
+    /// Register OS media controls (media keys / overlay).
+    pub media_controls: bool,
+}
+
+impl Default for AppOptions {
+    fn default() -> Self {
+        Self {
+            persist: true,
+            engine: true,
+            meta_path: None,
+            state: None,
+            config: None,
+            playlists: None,
+            load_fonts: true,
+            media_controls: true,
+        }
+    }
+}
+
+pub(crate) fn theme_mode(theme: Theme) -> ThemeMode {
+    match theme {
+        Theme::System => ThemeMode::System,
+        Theme::Light => ThemeMode::Light,
+        Theme::Dark => ThemeMode::Dark,
+    }
+}
+
+pub(crate) fn config_theme(mode: ThemeMode) -> Theme {
+    match mode {
+        ThemeMode::System => Theme::System,
+        ThemeMode::Light => Theme::Light,
+        ThemeMode::Dark => Theme::Dark,
+    }
+}
+
+fn page_key(page: Page) -> &'static str {
+    match page {
+        Page::NowPlaying => "now_playing",
+        Page::Library => "library",
+        Page::Albums => "albums",
+        Page::Artists => "artists",
+        Page::Playlists => "playlists",
+        Page::Folders => "folders",
+        Page::Queue => "queue",
+        Page::Settings => "settings",
+    }
+}
+
+/// Page from the persisted `last_tab` (also understands the old tab labels).
+pub(crate) fn page_from_key(key: &str) -> Option<Page> {
+    Some(match key {
+        "now_playing" | "Play" => Page::NowPlaying,
+        "library" | "Library" | "Queue" => Page::Library,
+        "albums" | "Albums" => Page::Albums,
+        "artists" | "Artists" => Page::Artists,
+        "playlists" | "Playlists" => Page::Playlists,
+        "folders" | "Scan" => Page::Folders,
+        "queue" => Page::Queue,
+        "settings" | "Settings" => Page::Settings,
+        _ => return None,
+    })
+}
+
+/// Optional library columns and their persisted keys.
+fn column_key(c: Column) -> Option<&'static str> {
+    match c {
+        Column::Year => Some("year"),
+        Column::Genre => Some("genre"),
+        _ => None,
+    }
+}
+
+fn column_from_key(key: &str) -> Option<Column> {
+    match key {
+        "year" => Some(Column::Year),
+        "genre" => Some(Column::Genre),
+        _ => None,
+    }
+}
+
+fn right_panel_key(panel: Option<RightPanel>) -> Option<String> {
+    panel.map(|p| match p {
+        RightPanel::Queue => "queue".to_string(),
+        RightPanel::Lyrics => "lyrics".to_string(),
+    })
+}
+
+fn right_panel_from_key(key: Option<&str>) -> Option<RightPanel> {
+    match key? {
+        "queue" => Some(RightPanel::Queue),
+        "lyrics" => Some(RightPanel::Lyrics),
+        _ => None,
+    }
+}
+
+/// Saved window geometry for the native options (`apps/gui`): `None` on first start.
+pub fn initial_window() -> Option<WindowStateDto> {
+    let state = StateFile::open().and_then(|f| f.load()).ok()?;
+    let [min_w, min_h] = crate::presentation::ui::shell::MIN_WINDOW_SIZE;
+    state.window.filter(|w| w.width >= 200.0 && w.height >= 150.0).map(|mut w| {
+        // Never restore below the minimum size (older versions allowed smaller windows).
+        w.width = w.width.max(min_w);
+        w.height = w.height.max(min_h);
+        w
+    })
+}
 
 impl GuiApp {
-    /// 保存されたアプリケーション状態をファイルから読み込みます。
-    /// 
-    /// 状態ファイル（`StateFile`）から前回終了時の状態を復元します。
-    /// ファイルが存在しないか読み込みに失敗した場合は、デフォルト値で
-    /// 初期化された`StateDto`を返します。
-    /// 
-    /// 復元される情報：
-    /// - 最後に開いていたタブ
-    /// - 最後に再生していたファイルパスと再生位置
-    /// - スキャン設定（対象パス、除外パターン）
-    /// - キュー状態（トラックリスト、選択インデックス）
-    /// - 再生モード
-    /// - アーティスト表示モード
-    /// - UI設定（LRCオーバーレイ、サイドパネル展開状態）
-    /// - お気に入りディレクトリ
-    /// 
-    /// # 戻り値
-    /// 読み込まれた状態、またはデフォルト状態
-    pub(crate) fn load_state() -> StateDto {
-        StateFile::open()
-            .and_then(|store| store.load())
-            .unwrap_or(StateDto {
-                last_tab: None,
-                last_play_path: None,
-                last_scan_status: None,
-                scan_scanned: None,
-                scan_parsed: None,
-                scan_registered: None,
-                scan_targets: Vec::new(),
-                scan_lrc_targets: Vec::new(),
-                scan_excludes: Vec::new(),
-                queue_tracks: Vec::new(),
-                selected_queue_index: None,
-                queue_playback_mode: PlaybackMode::Sequential,
-                artist_view_mode: ArtistViewMode::Artist,
-                lrc_overlay_enabled: false,
-                fft_overlay_enabled: false,
-                side_panel_expanded: true,
-                last_play_position_ms: None,
-                favorite_directories: Vec::new(),
-            })
-    }
-
-    /// 現在のアプリケーション状態をファイルに保存します。
-    /// 
-    /// この関数は、状態が変更されるたびに呼び出され、以下の情報を永続化します：
-    /// - 現在アクティブなタブ
-    /// - 現在再生中のファイルパスと再生位置
-    /// - 最後のスキャンステータス
-    /// - スキャン設定（対象パス、LRC対象パス、除外パターン）
-    /// - キュー内のトラックリストと選択状態
-    /// - 再生モード
-    /// - アーティスト表示モード
-    /// - UI設定
-    /// - お気に入りディレクトリ
-    /// 
-    /// 保存に失敗した場合は、エラーは無視されます（サイレント失敗）。
-    pub(crate) fn save_state(&self) {
-        // 現在の状態をStateDtoに変換
-        let state = StateDto {
-            last_tab: Some(self.active_tab.label().to_string()),
-            last_play_path: if self.play_path.is_empty() {
-                None
-            } else {
-                Some(self.play_path.clone())
-            },
-            last_play_position_ms: Some(self.play_position_ms),
-            last_scan_status: self.last_scan_status.clone(),
-            scan_scanned: None,
-            scan_parsed: None,
-            scan_registered: None,
-            scan_targets: self.scan_targets.clone(),
-            scan_lrc_targets: self.scan_lrc_targets.clone(),
-            scan_excludes: self.scan_excludes.clone(),
-            queue_tracks: self.queue.tracks.clone(),
-            selected_queue_index: self.selected_queue_index,
-            queue_playback_mode: self.playback_mode,
-            artist_view_mode: self.artist_view_mode,
-            lrc_overlay_enabled: self.lrc_overlay_enabled,
-            fft_overlay_enabled: self.fft_overlay_enabled,
-            side_panel_expanded: self.side_panel_expanded,
-            favorite_directories: self.favorite_directories.clone(),
-        };
-
-        // 状態ファイルに保存
-        if let Ok(store) = StateFile::open() {
-            let _ = store.save(&state);
-        }
-    }
-
-    /// スキャンステータスをファイルから再読み込みして更新します。
-    /// 
-    /// バックエンドのスキャンプロセスは、進行状況を状態ファイルに書き込みます。
-    /// この関数はそのファイルを読み込み、UIに表示されるスキャンステータスを
-    /// 最新の状態に更新します。
-    /// 
-    /// 主にスキャンタブ表示中に定期的に呼び出されます。
-    pub(crate) fn refresh_scan_status(&mut self) {
-        if let Ok(store) = StateFile::open() {
-            if let Ok(state) = store.load() {
-                let next_status = state.last_scan_status.clone();
-                let status_changed = self.last_scan_status != next_status;
-
-                self.last_scan_status = next_status.clone();
-                self.app_vm.scan.last_scan_status = next_status.clone();
-
-                if status_changed && next_status.as_deref() == Some("Scan completed") {
-                    self.discover_lyrics_for_current_play_path();
-                }
-            }
-        }
-    }
-
-    /// 保存されたプレイリストをファイルから読み込み、正規化します。
-    /// 
-    /// プレイリストファイルが存在しない場合は空のリストを返します。
-    /// 読み込み後、`normalize_playlists`を呼び出して：
-    /// - 複数の"favorite"プレイリストを1つに統合
-    /// - favoriteプレイリスト内の重複トラックを除去
-    /// - favoriteプレイリストをリストの先頭に配置
-    /// 
-    /// # 戻り値
-    /// 正規化されたプレイリストのリスト
-    pub(crate) fn load_playlists() -> Vec<PlaylistDto> {
-        if let Ok(file) = PlaylistsFile::open() {
-            let playlists = file.load().unwrap_or_default();
-            Self::normalize_playlists(playlists)
-        } else {
-            Self::normalize_playlists(Vec::new())
-        }
-    }
-
-    /// プレイリスト一覧を正規化します。
-    /// 
-    /// `playlist`モジュールの同名関数に処理を委譲します。
-    pub(crate) fn normalize_playlists(playlists: Vec<PlaylistDto>) -> Vec<PlaylistDto> {
-        playlist::normalize_playlists(playlists)
-    }
-
-    /// プレイリストをファイルに保存します。
-    /// 
-    /// `playlist`モジュールの同名関数に処理を委譲します。
-    pub(crate) fn save_playlists(&self) {
-        playlist::save_playlists(self);
-    }
-
-    /// 新しいプレイリストを追加します。
-    pub(crate) fn add_playlist(&mut self) {
-        playlist::add_playlist(self);
-    }
-
-    /// 指定されたインデックスのプレイリストを削除します。
-    pub(crate) fn remove_playlist(&mut self, index: usize) {
-        playlist::remove_playlist(self, index);
-    }
-
-    /// プレイリストを一つ上に移動します。
-    pub(crate) fn move_playlist_up(&mut self, index: usize) {
-        playlist::move_playlist_up(self, index);
-    }
-
-    /// プレイリストを一つ下に移動します。
-    pub(crate) fn move_playlist_down(&mut self, index: usize) {
-        playlist::move_playlist_down(self, index);
-    }
-
-    /// キューにアイテムを追加します。
-    pub(crate) fn add_queue_item(&mut self) {
-        queue::add_queue_item(self);
-    }
-
-    /// キュー内の選択状態をクリアします。
-    pub(crate) fn clear_queue_selection(&mut self) {
-        queue::clear_queue_selection(self);
-    }
-
-    /// ライブラリをクリアします。
-    pub(crate) fn clear_library(&mut self) {
-        library::clear_library(self);
-    }
-
-    /// キューアイテムを単一選択します。
-    pub(crate) fn select_queue_item_single(&mut self, index: usize) {
-        queue::select_queue_item_single(self, index);
-    }
-
-    /// キューアイテムの選択状態をトグルします。
-    pub(crate) fn toggle_queue_item_selection(&mut self, index: usize) {
-        queue::toggle_queue_item_selection(self, index);
-    }
-
-    /// アンカーから指定インデックスまでの範囲を選択します。
-    pub(crate) fn select_queue_item_range_to(&mut self, index: usize) {
-        queue::select_queue_item_range_to(self, index);
-    }
-
-    /// 選択中のキューアイテムを削除します。
-    pub(crate) fn remove_selected_queue_items(&mut self) {
-        queue::remove_selected_queue_items(self);
-    }
-
-    /// キューハンドルのホールド状態をクリアします。
-    pub(crate) fn clear_queue_handle_hold(&mut self) {
-        queue::clear_queue_handle_hold(self);
-    }
-
-    /// キュー内のドラッグ操作をキャンセルします。
-    pub(crate) fn cancel_queue_drag(&mut self) {
-        queue::cancel_queue_drag(self);
-    }
-
-    /// キューアイテムを指定位置に移動します。
-    pub(crate) fn move_queue_item_to(&mut self, from: usize, to: usize) {
-        queue::move_queue_item_to(self, from, to);
-    }
-
-    /// キューアイテムを1件削除します。
-    pub(crate) fn remove_queue_item(&mut self, index: usize) {
-        queue::remove_queue_item(self, index);
-    }
-
-    /// キューアイテムを一つ上に移動します。
-    pub(crate) fn move_queue_item_up(&mut self, index: usize) {
-        queue::move_queue_item_up(self, index);
-    }
-
-    /// キューアイテムを一つ下に移動します。
-    pub(crate) fn move_queue_item_down(&mut self, index: usize) {
-        queue::move_queue_item_down(self, index);
-    }
-
-    /// キューをクリアします。
-    pub(crate) fn clear_queue(&mut self) {
-        queue::clear_queue(self);
-    }
-
-    /// アルバムを選択します。
-    pub(crate) fn select_album(&mut self, album: Option<String>) {
-        library::select_album(self, album);
-    }
-
-    /// アーティストを選択します。
-    pub(crate) fn select_artist(&mut self, artist: Option<String>) {
-        library::select_artist(self, artist);
-    }
-
-    /// アーティストビューの表示モードを設定します。
-    pub(crate) fn set_artist_view_mode(&mut self, mode: ArtistViewMode) {
-        library::set_artist_view_mode(self, mode);
-    }
-
-    /// ディレクトリを選択します。
-    pub(crate) fn select_directory(&mut self, directory: Option<String>) {
-        library::select_directory(self, directory);
-    }
-
-    /// ライブラリディレクトリの展開状態をトグルします。
-    pub(crate) fn toggle_library_directory_expanded(&mut self, path: &str) {
-        library::toggle_library_directory_expanded(self, path);
-    }
-
-    /// ライブラリディレクトリが展開状態かどうかを返します。
-    pub(crate) fn is_library_directory_expanded(&self, path: &str) -> bool {
-        library::is_library_directory_expanded(self, path)
-    }
-
-    /// お気に入りディレクトリを追加します。
-    pub(crate) fn add_favorite_directory(&mut self) {
-        library::add_favorite_directory(self);
-    }
-
-    /// お気に入りディレクトリを削除します。
-    pub(crate) fn remove_favorite_directory(&mut self, index: usize) {
-        library::remove_favorite_directory(self, index);
-    }
-
-    /// 選択中のキューアイテムを再生します。
-    pub(crate) fn play_selected_queue_item(&mut self) {
-        play::play_selected_queue_item(self);
-    }
-
-    /// 現在の再生位置へシークします。
-    pub(crate) fn seek_to_position(&mut self) {
-        play::seek_to_position(self);
-    }
-
-    /// 次のトラックを再生します。
-    pub(crate) fn play_next(&mut self) {
-        play::play_next(self);
-    }
-
-    /// 前のトラックを再生します。
-    pub(crate) fn play_previous(&mut self) {
-        play::play_previous(self);
-    }
-
-    /// 再生/一時停止をトグルします。
-    pub(crate) fn toggle_play_pause(&mut self) {
-        play::toggle_play_pause(self);
-    }
-
-    /// スキャン要求を送信します。
-    pub(crate) fn request_scan(&mut self) {
-        scan::request_scan(self);
-    }
-
-    /// スキャンキャンセル要求を送信します。
-    pub(crate) fn request_cancel(&mut self) {
-        scan::request_cancel(self);
-    }
-
-    /// スキャン対象を追加します。
-    pub(crate) fn add_scan_target(&mut self) {
-        scan::add_scan_target(self);
-    }
-
-    /// スキャン対象を削除します。
-    pub(crate) fn remove_scan_target(&mut self, index: usize) {
-        scan::remove_scan_target(self, index);
-    }
-
-    /// LRCスキャン対象を追加します。
-    pub(crate) fn add_scan_lrc_target(&mut self) {
-        scan::add_scan_lrc_target(self);
-    }
-
-    /// LRCスキャン対象を削除します。
-    pub(crate) fn remove_scan_lrc_target(&mut self, index: usize) {
-        scan::remove_scan_lrc_target(self, index);
-    }
-
-    /// スキャン除外パターンを追加します。
-    pub(crate) fn add_scan_exclude(&mut self) {
-        scan::add_scan_exclude(self);
-    }
-
-    /// スキャン除外パターンを削除します。
-    pub(crate) fn remove_scan_exclude(&mut self, index: usize) {
-        scan::remove_scan_exclude(self, index);
-    }
-
-    /// `GuiApp`の新しいインスタンスを構築します。
-    /// 
-    /// この関数はeframeによってアプリケーション起動時に呼び出されます。
-    /// 以下の初期化処理を行います：
-    /// 
-    /// 1. フォントのセットアップ（CJKフォールバックフォントの検出と設定）
-    /// 2. 利用可能なオーディオ出力デバイスの列挙
-    /// 3. 設定ファイルの読み込み
-    /// 4. 保存された状態の復元
-    /// 5. プレイリストの読み込みと正規化
-    /// 6. キュー状態の復元
-    /// 7. 各フィールドの初期化
-    /// 8. 歌詞ファイルの検索
-    /// 9. 再生メタデータの更新
-    /// 10. ViewModelの構築
-    /// 
-    /// # 引数
-    /// * `cc` - eframeの作成コンテキスト（フォント設定用）
-    /// 
-    /// # 戻り値
-    /// 初期化された`GuiApp`インスタンス
+    /// The real application (persistent state, audio engine, system fonts).
     pub fn new(cc: &CreationContext<'_>) -> Self {
-        // 1. フォントのセットアップ
-        Self::setup_fonts(cc);
+        Self::with_options(&cc.egui_ctx, AppOptions::default())
+    }
 
-        // 2. 利用可能なオーディオ出力デバイスを列挙
-        let mut device_names = Vec::new();
-        if let Ok(devs) = cpal::default_host().output_devices() {
-            for d in devs {
-                if let Ok(name) = d.name() {
-                    device_names.push(name);
+    /// Builds the app with explicit options (tests and screenshots use temp data).
+    pub fn with_options(ctx: &egui::Context, opts: AppOptions) -> Self {
+        let ctx = ctx.clone();
+        let cfg = match opts.config.clone() {
+            Some(cfg) => cfg,
+            None if opts.persist => Config::load(),
+            None => Config::default(),
+        };
+        let state = match opts.state.clone() {
+            Some(state) => state,
+            None if opts.persist => StateFile::open().and_then(|s| s.load()).unwrap_or_default(),
+            None => StateDto::default(),
+        };
+        let theme = theme_mode(cfg.theme);
+        let accent = Accent::from_key(&cfg.accent).unwrap_or_default();
+        crate::presentation::ui::theme::apply(&ctx, theme, accent);
+
+        let fonts_rx = opts.load_fonts.then(|| {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let wake = ctx.clone();
+            let _ = std::thread::Builder::new().name("font-loader".into()).spawn(move || {
+                let extra: Vec<PathBuf> = if cfg!(target_os = "linux") {
+                    vec![PathBuf::from("/mnt/c/Windows/Fonts")]
+                } else {
+                    Vec::new()
+                };
+                let dirs: Vec<&std::path::Path> = extra.iter().map(PathBuf::as_path).collect();
+                let (defs, report) = crate::presentation::ui::fonts::build_definitions(&dirs);
+                tracing::info!("fonts: {report:?}");
+                let _ = tx.send(defs);
+                wake.request_repaint();
+            });
+            rx
+        });
+
+        let playlists = match opts.playlists.clone() {
+            Some(p) => playlists::normalize_playlists(p),
+            None if opts.persist => playlists::load_playlists(),
+            None => playlists::normalize_playlists(Vec::new()),
+        };
+        let queue = state.queue_tracks.clone();
+        let selected_queue_index = state.selected_queue_index.filter(|&i| i < queue.len());
+        let (shuffle, repeat) = state.shuffle_repeat();
+        let mut navigator = QueueNavigator::new(false, repeat);
+        navigator.set_shuffle(shuffle, selected_queue_index, queue.len());
+
+        let volume = state.volume.clamp(0.0, 1.0);
+        let eq = eq_from_dto(&state.eq);
+        let engine = if opts.engine { create_engine(&ctx, &cfg, volume, state.muted, eq) } else { None };
+        let device_names = if opts.engine { AudioEngine::output_device_names() } else { Vec::new() };
+
+        let meta = match &opts.meta_path {
+            Some(path) => SharedMetaCache::open(path),
+            None => MetaCache::shared(),
+        };
+        let meta = match meta {
+            Ok(meta) => Some(meta),
+            Err(err) => {
+                tracing::warn!("opening the library database failed: {err:#}");
+                None
+            }
+        };
+        let state_saver = if opts.persist {
+            match StateSaver::open_default() {
+                Ok(saver) => Some(saver),
+                Err(err) => {
+                    tracing::warn!("state saver unavailable, saving synchronously: {err:#}");
+                    None
                 }
             }
+        } else {
+            None
+        };
+        scan_status::set_repaint_context(ctx.clone());
+
+        let play_path = state.last_play_path.clone().unwrap_or_default();
+        let lyrics_offset_ms = state.lyrics_offsets.get(&play_path).copied().unwrap_or(0);
+        let page = state.last_tab.as_deref().and_then(page_from_key).unwrap_or(Page::Library);
+        let mut library = LibraryIndex::new(ctx.clone(), opts.persist);
+        if let Some(meta) = &meta {
+            library.reload(meta.path());
         }
 
-        // 3. 設定ファイルの読み込み
-        let cfg = Config::load();
-        
-        // 4. 優先デバイスの選択インデックスを特定
-        let selected = cfg
-            .preferred_output_device
-            .as_ref()
-            .and_then(|n| device_names.iter().position(|s| s == n));
-
-        // 5. 保存された状態の復元
-        let state = Self::load_state();
-        
-        // 6. 最後に開いていたタブを復元（デフォルトはライブラリ）
-        let active_tab = state
-            .last_tab
-            .as_deref()
-            .and_then(Tab::from_label)
-            .unwrap_or(Tab::Library);
-
-        // 7. プレイリストの読み込みと正規化
-        let playlists = Self::load_playlists();
-        
-        // 8. キュー状態の復元
-        let queue = QueueVm::new(state.queue_tracks.clone());
-        let selected_queue_index = state.selected_queue_index.filter(|&i| i < queue.tracks.len());
-
-        // 9. GuiAppインスタンスの構築
+        let artwork = ArtworkLoader::new(ctx.clone(), meta.as_ref().map(|m| m.path().to_path_buf()));
         let mut gui = GuiApp {
-            // ViewModel（表示用データモデル）
-            app_vm: Self::default_app_vm(
-                active_tab,
-                &cfg,
-                state.last_scan_status.clone(),
-                state.scan_targets.clone(),
-                state.scan_lrc_targets.clone(),
-                state.scan_excludes.clone(),
-                LibraryDto {
-                    album_count: 0,
-                    track_count: 0,
-                    recent_locations: Vec::new(),
-                    recent_directories: Vec::new(),
-                    directory_tree: Vec::new(),
-                    favorite_directories: state.favorite_directories.clone(),
-                    albums: Vec::new(),
-                    selected_album: None,
-                    selected_album_tracks: Vec::new(),
-                    artists: Vec::new(),
-                    selected_artist: None,
-                    selected_artist_tracks: Vec::new(),
-                    selected_directory: None,
-                    selected_directory_tracks: Vec::new(),
-                },
-                &playlists,
-                queue.clone(),
-            ),
-            
-            // タブ状態
-            active_tab,
-            
-            // オーディオ出力デバイス
+            engine,
+            engine_snapshot: None,
             device_names,
-            selected,
-            device_filter: String::new(),
-            
-            // 再生状態
-            play_path: state.last_play_path.clone().unwrap_or_default(),
-            lyrics_files: Vec::new(),
-            selected_lyrics_index: None,
-            loaded_lyrics: None,
+            no_output_device: false,
+            preferred_output_device: cfg.preferred_output_device.clone(),
+            active_output_device: None,
+
+            play_path,
+            playback_state: PlaybackState::Stopped,
+            navigator,
+            current_queue_index: selected_queue_index,
+            pending_next: None,
+            consecutive_errors: 0,
+            pending_error_skip: false,
+            volume,
+            muted: state.muted,
+            eq,
+
+            pending_seek_ms: None,
+            seek_last_change_at: None,
+            seek_display_hold: None,
+
             play_position_ms: state.last_play_position_ms.unwrap_or(0),
             play_duration_ms: None,
             play_title: None,
             play_artist: None,
             play_album: None,
+            track_info: track_info::TrackInfoLoader::new(ctx.clone()),
+
             play_artwork_handle: None,
-            play_artwork_source: None,
-            lyrics_offset_ms: 0,
-            play_status: None,
-            playback_state: PlaybackState::Stopped,
-            playback_mode: state.queue_playback_mode,
-            current_queue_index: selected_queue_index,
-            
-            // 再生バックエンドスレッド管理
-            playback_status_receiver: None,
-            playback_cancel_sender: None,
-            playback_thread_handle: None,
-            playback_start_instant: None,
-            playback_start_ms: state.last_play_position_ms.unwrap_or(0),
-            pending_play_request: false,
-            active_output_device_name: None,
-            last_seen_default_output_device_name: audio::cpal_output::default_device_name(),
-            last_default_device_poll_at: None,
-            playback_state_before_seek: None,
-            
-            // シーク操作
-            pending_seek_ms: None,
-            seek_last_change_at: None,
-            seek_interacting: false,
-            seek_long_press_start: None,
-            seek_key_hold_direction: 0,
-            seek_key_hold_started_at: None,
-            seek_key_last_step_at: None,
-            
-            // キューUI
-            queue_scroll_to_playing: active_tab == Tab::Queue,
-            
-            // アーティスト表示
+            play_backdrop_handle: None,
+            play_artwork_requested_for: None,
+            play_cover_path: None,
+
+            lyrics_candidates: Vec::new(),
+            selected_lyrics_index: None,
+            loaded_timeline: None,
+            lyrics_revision: 1,
+            lyrics_offset_ms,
+            lyrics_offsets: state.lyrics_offsets.clone(),
+            lyrics_overrides: state.lyrics_overrides.clone(),
+            spectrum: FftAnalyzer::default(),
+
+            scan_targets: state.scan_targets.clone(),
+            scan_lrc_targets: state.scan_lrc_targets.clone(),
+            scan_excludes: state.scan_excludes.clone(),
+            last_scan_status: state.last_scan_status.clone(),
+            scan_counts: (state.scan_scanned, state.scan_parsed, state.scan_registered),
+            scanning: false,
+            favorite_directories: state.favorite_directories.clone(),
             artist_view_mode: state.artist_view_mode,
-            
-            // UI設定
-            side_panel_expanded: state.side_panel_expanded,
-            
-            // スキャン設定
-            scan_target_input: String::new(),
-            scan_lrc_target_input: String::new(),
-            scan_exclude_input: String::new(),
-            scan_targets: state.scan_targets,
-            scan_lrc_targets: state.scan_lrc_targets,
-            scan_excludes: state.scan_excludes,
-            
-            // ライブラリ選択状態
-            selected_album: None,
-            selected_artist: None,
-            selected_directory: None,
-            favorite_directories: state.favorite_directories,
-            favorite_directory_input: String::new(),
-            library_expanded_directories: HashSet::new(),
-            
-            // プレイリスト
+
+            favorites: playlists::favorite_set(&playlists),
             playlists,
-            new_playlist_name: String::new(),
-            selected_playlist: None,
-            playlist_track_input: String::new(),
-            
-            // キュー
             queue,
-            queue_item_input: String::new(),
-            selected_queue_index,
-            selected_queue_indices: selected_queue_index.into_iter().collect(),
-            queue_selection_anchor: selected_queue_index,
-            queue_handle_hold_index: None,
-            queue_handle_hold_started_at: None,
-            queue_drag_source_index: None,
-            
-            // オーディオ処理
-            taps: cfg.taps_for_device(cfg.preferred_output_device.as_ref()),
-            
-            // アプリケーション設定
-            theme: cfg.theme,
-            log_level: cfg.log_level,
-            language: cfg.language,
-            last_scan_status: state.last_scan_status,
-            
-            // アートワーク
-            play_artwork_blur_handle: None,
-            play_artwork_blur_source: None,
-            lrc_overlay_enabled: state.lrc_overlay_enabled,
-            fft_overlay_enabled: state.fft_overlay_enabled,
-            
-            // アルバムアートワークキャッシュ
-            album_meta_cache: MetaCache::open_default().ok(),
-            album_artwork_path_cache: HashMap::new(),
-            album_artwork_texture_cache: HashMap::new(),
-            album_artwork_pending: VecDeque::new(),
-            album_artwork_queued: HashSet::new(),
-            album_artwork_album_titles: Vec::new(),
-            
-            // トラック詳細ダイアログ
-            track_details_dialog: None,
+            queue_rows: Default::default(),
+
+            meta,
+            library,
+            artwork,
+
+            ui: UiShell {
+                page,
+                album_detail: None,
+                artist_detail: None,
+                playlist_detail: None,
+                right_panel: right_panel_from_key(state.right_panel.as_deref()),
+                sidebar: SidebarState { collapsed: state.sidebar_collapsed },
+                eq_open: false,
+                toasts: Toasts::new(),
+                library_table: Default::default(),
+                library_query: String::new(),
+                library_columns: state.library_columns.iter().filter_map(|k| column_from_key(k)).collect(),
+                history: Vec::new(),
+                album_card_size: state.album_card_size.filter(|s| s.is_finite()).unwrap_or(ALBUM_CARD_DEFAULT).clamp(ALBUM_CARD_MIN, ALBUM_CARD_MAX),
+                detail_table: Default::default(),
+                detail_query: String::new(),
+                artist_query: String::new(),
+                focus_search: false,
+                now: NowPlayingState::default(),
+                side_lyrics: Default::default(),
+                theme,
+                accent,
+                modal: None,
+                details: None,
+                folder_picker: None,
+                fonts_rx,
+                drop_rx: None,
+                exclude_input: String::new(),
+                last_toast: None,
+                window: state.window,
+                detail_rows: Default::default(),
+            },
+            media: MediaControlsBridge::new(opts.media_controls),
+            config: cfg,
+
+            persist: opts.persist,
+            state_saver,
+            state_dirty: false,
+            state_last_submit: None,
         };
 
-        // 10. 追加の初期化処理
-        gui.discover_lyrics_for_current_play_path();  // 歌詞ファイルを検索
-        gui.refresh_play_metadata();                   // 再生メタデータを更新
-        gui.update_app_vm();                           // ViewModelを構築
-        
+        if !gui.play_path.is_empty() {
+            // Duration / tags / lyrics for the restored track, off the UI thread.
+            gui.request_track_info();
+        }
         gui
+    }
+
+    /// Builds the persisted state from the in-memory app state.
+    pub(crate) fn build_state_dto(&self) -> StateDto {
+        let shuffle = self.navigator.shuffle();
+        let repeat = self.navigator.repeat();
+        StateDto {
+            last_tab: Some(page_key(self.ui.page).to_string()),
+            last_play_path: (!self.play_path.is_empty()).then(|| self.play_path.clone()),
+            last_play_position_ms: Some(self.play_position_ms),
+            last_scan_status: self.last_scan_status.clone(),
+            scan_scanned: self.scan_counts.0,
+            scan_parsed: self.scan_counts.1,
+            scan_registered: self.scan_counts.2,
+            scan_targets: self.scan_targets.clone(),
+            scan_lrc_targets: self.scan_lrc_targets.clone(),
+            scan_excludes: self.scan_excludes.clone(),
+            queue_tracks: self.queue.clone(),
+            selected_queue_index: self.current_queue_index,
+            queue_playback_mode: legacy_playback_mode(shuffle, repeat),
+            artist_view_mode: self.artist_view_mode,
+            lrc_overlay_enabled: true,
+            fft_overlay_enabled: self.config.show_spectrum,
+            side_panel_expanded: !self.ui.sidebar.collapsed,
+            favorite_directories: self.favorite_directories.clone(),
+            volume: self.volume,
+            muted: self.muted,
+            eq: eq_to_dto(&self.eq),
+            shuffle: Some(shuffle),
+            repeat: Some(repeat),
+            lyrics_offsets: self.lyrics_offsets.clone(),
+            lyrics_overrides: self.lyrics_overrides.clone(),
+            right_panel: right_panel_key(self.ui.right_panel),
+            sidebar_collapsed: self.ui.sidebar.collapsed,
+            window: self.ui.window,
+            library_columns: self.ui.library_columns.iter().filter_map(|c| column_key(*c)).map(str::to_string).collect(),
+            album_card_size: Some(self.ui.album_card_size),
+        }
+    }
+
+    /// Marks the state as changed. Cheap: the frame loop hands it to the background saver
+    /// (at most once per second); nothing is serialized or written here.
+    pub(crate) fn save_state(&mut self) {
+        self.state_dirty = true;
+    }
+
+    /// Serializes the state now and queues it on the background saver (no disk I/O here).
+    pub(crate) fn submit_state_now(&mut self) {
+        self.state_dirty = false;
+        self.state_last_submit = Some(Instant::now());
+        if !self.persist {
+            return;
+        }
+        let state = self.build_state_dto();
+        match &self.state_saver {
+            Some(saver) => {
+                if let Err(err) = saver.save(&state) {
+                    tracing::warn!("state save failed: {err:#}");
+                }
+            }
+            None => {
+                if let Ok(store) = StateFile::open() {
+                    let _ = store.save(&state);
+                }
+            }
+        }
+    }
+
+    /// Submits the current state and blocks until it is on disk (exit path).
+    pub(crate) fn flush_state(&mut self) {
+        self.submit_state_now();
+        if let Some(saver) = &self.state_saver {
+            if let Err(err) = saver.flush() {
+                tracing::warn!("state flush failed: {err:#}");
+            }
+        }
+    }
+
+    /// Writes `config.json` (no-op without persistence).
+    pub(crate) fn save_config(&mut self) {
+        if !self.persist {
+            return;
+        }
+        if let Err(err) = self.config.save() {
+            tracing::warn!("saving config failed: {err:#}");
+            let tr = self.tr();
+            self.toast_error(tr.f("toast.config_save_failed", &[&format!("{err:#}")]));
+        }
+    }
+
+    /// Installs the fonts built on the worker (once).
+    pub(crate) fn poll_fonts(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.ui.fonts_rx else { return };
+        match rx.try_recv() {
+            Ok(defs) => {
+                crate::presentation::ui::fonts::install_definitions(ctx, defs);
+                self.ui.fonts_rx = None;
+                // The bold family becomes active next pass; `theme::sync` re-applies then.
+                ctx.request_repaint();
+            }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => self.ui.fonts_rx = None,
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Remembers the window geometry (persisted with the state when it changes).
+    pub(crate) fn track_window_geometry(&mut self, ctx: &egui::Context) {
+        let (inner, outer, maximized, minimized) = ctx.input(|i| {
+            let vp = i.viewport();
+            (vp.inner_rect, vp.outer_rect, vp.maximized.unwrap_or(false), vp.minimized.unwrap_or(false))
+        });
+        if minimized {
+            return;
+        }
+        // Wayland reports no window position, so `inner_rect` is unknown there; the size
+        // still comes from the content area.
+        let inner = inner.unwrap_or_else(|| ctx.content_rect());
+        if inner.width() < 50.0 || inner.height() < 50.0 {
+            return;
+        }
+        let prev = self.ui.window;
+        let mut next = WindowStateDto {
+            width: inner.width().round(),
+            height: inner.height().round(),
+            x: outer.map(|r| r.min.x.round()),
+            y: outer.map(|r| r.min.y.round()),
+            maximized,
+        };
+        if maximized {
+            // Keep the restored (non-maximized) size/position for the next start.
+            if let Some(p) = prev {
+                next.width = p.width;
+                next.height = p.height;
+                next.x = p.x;
+                next.y = p.y;
+            }
+        }
+        if prev != Some(next) {
+            self.ui.window = Some(next);
+            self.save_state();
+        }
     }
 }
