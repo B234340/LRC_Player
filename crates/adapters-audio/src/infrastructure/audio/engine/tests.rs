@@ -391,6 +391,56 @@ fn seek_far_into_long_file_is_fast_and_sample_accurate() {
     assert_eq!(snap.underruns, 0);
 }
 
+/// Regression: seeking back to 0 while playing (seek bar to the start, "previous" within the
+/// first seconds) must restart the audio, not just the reported position.
+#[test]
+fn seek_to_start_while_playing_restarts_the_audio() {
+    let dir = TempDir::new("seek0");
+    let path = dir.file("ramp.wav");
+    let rate = 8_000u32;
+    let frames = rate as usize * 10;
+    let s: Vec<i16> = (0..frames).map(index_ramp_value).collect();
+    write_wav(&path, rate, 1, &s);
+
+    let engine = manual_engine(rate, 1);
+    engine.load(path.clone(), 0, true);
+    // Play ~2 s so the decoder is well past the start.
+    let mut played = Vec::new();
+    for _ in 0..40 {
+        played.extend(render(&engine, 1, 400));
+    }
+    assert!(engine.snapshot().position_ms >= 1_500);
+
+    engine.seek(0);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while engine.snapshot().position_ms > 100 {
+        assert!(Instant::now() < deadline, "snapshot never showed position 0");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let mut out = Vec::new();
+    for _ in 0..8 {
+        out.extend(render(&engine, 1, 400));
+    }
+    // After the fade-out (exact zeros) the restarted audio must be frame 0, 1, 2, ...
+    let fade = rate as usize * 5 / 1000;
+    let mut padded = vec![0.0f32];
+    padded.extend_from_slice(&out);
+    let restart = padded
+        .windows(2)
+        .rposition(|w| w[0] == 0.0 && w[1] != 0.0)
+        .expect("no restart after seek(0)");
+    for k in fade..fade + 1000 {
+        let expected = index_ramp_value(k) as f32 / 32768.0;
+        let got = out[restart + k];
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "frame {k}: {got} vs {expected} (audio did not restart from the beginning)"
+        );
+    }
+    let pos = engine.snapshot().position_ms;
+    assert!(pos < 1_000, "position after seek(0): {pos}");
+}
+
 #[test]
 fn pause_resume_seek_and_volume_changes_are_ramped() {
     let dir = TempDir::new("ramps");
