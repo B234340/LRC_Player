@@ -394,9 +394,12 @@ impl EngineThread {
         let Some(mut front) = self.entries.front().cloned() else {
             return;
         };
+        // A reused source (seek within the playing track) sits wherever decoding got to, so it
+        // must be repositioned even for 0. Restarting from the beginning reopens the file
+        // instead: exactly the state of a first play (including encoder-delay trimming).
         let mut src = match src {
-            Some(s) => s,
-            None => match TrackSource::open(&front.path) {
+            Some(s) if front.base_ms > 0 => s,
+            _ => match TrackSource::open(&front.path) {
                 Ok(s) => s,
                 Err(e) => {
                     self.emit(EngineEvent::Error {
