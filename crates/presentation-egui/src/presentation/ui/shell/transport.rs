@@ -38,6 +38,8 @@ pub struct TransportProps<'a> {
     pub queue_len: usize,
     /// No audio output device is available: the volume area shows a quiet indicator.
     pub no_output: bool,
+    /// Favorite state of the playing track (`None` hides the heart).
+    pub favorite: Option<bool>,
     pub tr: Tr,
 }
 
@@ -158,7 +160,30 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
             actions.push(UiAction::Navigate(Page::NowPlaying));
         }
         if left_w > 120.0 {
-            let text_rect = Rect::from_min_max(pos2(art.right() + 12.0, left.top()), left.max);
+            let mut text_rect = Rect::from_min_max(pos2(art.right() + 12.0, left.top()), left.max);
+            // Heart toggle after the title / artist (its slot is always reserved, so the text
+            // does not re-truncate when the favorite state changes).
+            if let (true, Some(favorite)) = (props.has_track, props.favorite) {
+                const HEART: f32 = 30.0;
+                text_rect.max.x -= HEART;
+                // Right after the wider of title / artist (as truncated to the text area).
+                let measure = |s: &str, size: f32, bold: bool| {
+                    ui.fonts_mut(|f| f.layout_no_wrap(s.to_owned(), text::font_id(s, size, bold), pal.text).size().x)
+                };
+                let text_w = measure(props.title, theme::size::BODY, true)
+                    .max(measure(props.artist, 12.5, false))
+                    .min(text_rect.width());
+                let heart = Rect::from_center_size(
+                    pos2(text_rect.left() + text_w + HEART / 2.0 + 2.0, left.center().y),
+                    Vec2::splat(28.0),
+                );
+                let colors = crate::presentation::ui::widgets::FavoriteColors::from_palette(&pal);
+                if crate::presentation::ui::widgets::favorite_button(ui, heart, Id::new("transport_favorite"), favorite, colors, &tr)
+                    .clicked()
+                {
+                    actions.push(UiAction::ToggleFavoriteCurrent);
+                }
+            }
             let mut tui = ui.new_child(UiBuilder::new().max_rect(text_rect).layout(Layout::top_down(Align::Min)));
             tui.spacing_mut().item_spacing.y = 1.0;
             tui.add_space((text_rect.height() - 38.0) / 2.0);

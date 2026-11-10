@@ -18,6 +18,19 @@ pub(crate) fn is_favorite(p: &PlaylistDto) -> bool {
     p.name.eq_ignore_ascii_case(FAVORITE_NAME)
 }
 
+/// Paths in the favorites list.
+pub(crate) fn favorite_set(playlists: &[PlaylistDto]) -> std::collections::HashSet<String> {
+    playlists.iter().filter(|p| is_favorite(p)).flat_map(|p| p.tracks.iter().cloned()).collect()
+}
+
+/// `Path -> is favorite` lookup for track tables.
+pub(crate) fn favorite_lookup(set: &std::collections::HashSet<String>) -> impl Fn(&std::path::Path) -> bool + '_ {
+    move |path| match path.to_str() {
+        Some(s) => set.contains(s),
+        None => set.contains(path.to_string_lossy().as_ref()),
+    }
+}
+
 /// Name shown in the UI (the favorite list is localized).
 pub(crate) fn display_name<'a>(p: &'a PlaylistDto, tr: &Tr) -> &'a str {
     if is_favorite(p) {
@@ -113,6 +126,7 @@ pub(crate) fn validate_name(playlists: &[PlaylistDto], name: &str, except: Optio
 
 impl GuiApp {
     pub(crate) fn save_playlists(&mut self) {
+        self.favorites = favorite_set(&self.playlists);
         if !self.persist {
             return;
         }
@@ -209,6 +223,50 @@ impl GuiApp {
         let Some(i) = self.playlist_index(id) else { return };
         apply_reorder(&mut self.playlists[i].tracks, from, to);
         self.save_playlists();
+    }
+
+    /// Whether `path` is in the favorites list.
+    pub(crate) fn is_favorite_path(&self, path: &str) -> bool {
+        self.favorites.contains(path)
+    }
+
+    /// Adds the tracks to (or removes them from) the favorites list. A single track toggles
+    /// silently (the heart is the feedback); several tracks show a toast.
+    pub(crate) fn set_favorite(&mut self, paths: Vec<String>, favorite: bool) {
+        let Some(i) = self.playlists.iter().position(is_favorite) else { return };
+        let list = &mut self.playlists[i].tracks;
+        let mut changed = 0usize;
+        if favorite {
+            for p in &paths {
+                if !list.contains(p) {
+                    list.push(p.clone());
+                    changed += 1;
+                }
+            }
+        } else {
+            let before = list.len();
+            list.retain(|t| !paths.contains(t));
+            changed = before - list.len();
+        }
+        if changed == 0 {
+            return;
+        }
+        self.save_playlists();
+        if paths.len() > 1 {
+            let tr = self.tr();
+            let key = if favorite { "toast.favorites_added" } else { "toast.favorites_removed" };
+            self.toast_success(tr.f(key, &[&changed]));
+        }
+    }
+
+    /// Toggles the favorite state of the playing track.
+    pub(crate) fn toggle_favorite_current(&mut self) {
+        if self.play_path.is_empty() {
+            return;
+        }
+        let path = self.play_path.clone();
+        let favorite = !self.is_favorite_path(&path);
+        self.set_favorite(vec![path], favorite);
     }
 
     /// A unique default name for a new playlist ("プレイリスト 3").

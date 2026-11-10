@@ -231,6 +231,8 @@ pub struct GuiApp {
     pub(crate) artist_view_mode: ArtistViewMode,
 
     pub(crate) playlists: Vec<PlaylistDto>,
+    /// Paths in the favorites list (rebuilt whenever the playlists are saved).
+    pub(crate) favorites: std::collections::HashSet<String>,
     pub(crate) queue: Vec<String>,
     pub(crate) queue_rows: shell::QueueRowsCache,
 

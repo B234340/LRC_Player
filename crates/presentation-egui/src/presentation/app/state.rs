@@ -297,6 +297,7 @@ impl GuiApp {
             favorite_directories: state.favorite_directories.clone(),
             artist_view_mode: state.artist_view_mode,
 
+            favorites: playlists::favorite_set(&playlists),
             playlists,
             queue,
             queue_rows: Default::default(),
