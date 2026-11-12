@@ -51,6 +51,11 @@ pub struct LyricsProps<'a> {
     pub show_controls: bool,
     /// Enable the "Save to file" button.
     pub can_save_offset: bool,
+    /// Current text shift (lines, karaoke characters); shown in the shift popover.
+    pub line_shift: i32,
+    pub char_shift: i32,
+    /// The lyrics have per-character (karaoke) timing, so a character shift is possible.
+    pub can_char_shift: bool,
     pub tr: Tr,
 }
 
@@ -351,6 +356,53 @@ fn paint_karaoke(painter: &egui::Painter, pos: egui::Pos2, galley: &Arc<Galley>,
     }
 }
 
+/// Popover with the line / character text shift.
+fn shift_popover(ui: &mut Ui, props: &LyricsProps<'_>, actions: &mut Vec<UiAction>) {
+    let tr = props.tr;
+    let pal = theme::palette(ui);
+    ui.set_min_width(250.0);
+    ui.spacing_mut().item_spacing.y = 6.0;
+    ui.add(egui::Label::new(theme::caption(ui, tr.t("lyrics.shift_hint_text"))).wrap());
+    let row = |ui: &mut Ui, label: &str, value: i32, enabled: bool, earlier: Icon, later: Icon| -> i32 {
+        let mut delta = 0;
+        ui.horizontal(|ui| {
+            ui.set_min_height(28.0);
+            ui.add_sized(vec2(84.0, 24.0), egui::Label::new(egui::RichText::new(label).color(if enabled { pal.text } else { pal.text_faint })));
+            let style = IconButtonStyle { enabled, padding: Some(6.0), ..Default::default() };
+            if icon_button_ex(ui, earlier, 14.0, style, tr.t("lyrics.shift_earlier")).clicked() {
+                delta = -1;
+            }
+            let text = if value > 0 { format!("+{value}") } else { value.to_string() };
+            let color = if value != 0 { pal.accent_fg } else if enabled { pal.text_muted } else { pal.text_faint };
+            ui.add_sized(vec2(40.0, 24.0), egui::Label::new(egui::RichText::new(text).color(color).monospace()));
+            if icon_button_ex(ui, later, 14.0, style, tr.t("lyrics.shift_later")).clicked() {
+                delta = 1;
+            }
+        });
+        delta
+    };
+    let d = row(ui, tr.t("lyrics.shift_lines"), props.line_shift, true, Icon::ChevronUp, Icon::ChevronDown);
+    if d != 0 {
+        actions.push(UiAction::LyricShiftLines(d));
+    }
+    let d = row(ui, tr.t("lyrics.shift_chars"), props.char_shift, props.can_char_shift, Icon::ChevronLeft, Icon::ChevronRight);
+    if d != 0 {
+        actions.push(UiAction::LyricShiftChars(d));
+    }
+    if !props.can_char_shift {
+        ui.label(theme::caption(ui, tr.t("lyrics.shift_chars_unavailable")));
+    }
+    ui.separator();
+    let any = props.line_shift != 0 || props.char_shift != 0;
+    ui.horizontal(|ui| {
+        let style = IconButtonStyle { enabled: any, padding: Some(6.0), ..Default::default() };
+        if icon_button_ex(ui, Icon::Undo, 14.0, style, tr.t("lyrics.shift_reset")).clicked() {
+            actions.push(UiAction::LyricShiftReset);
+        }
+        ui.label(theme::caption(ui, tr.t("lyrics.shift_save_hint")));
+    });
+}
+
 fn controls(ui: &mut Ui, props: &LyricsProps<'_>, bar: Rect, actions: &mut Vec<UiAction>) {
     let pal = theme::palette(ui);
     let tr = props.tr;
@@ -381,7 +433,20 @@ fn controls(ui: &mut Ui, props: &LyricsProps<'_>, bar: Rect, actions: &mut Vec<U
     if icon_button_ex(&mut cui, Icon::Undo, 14.0, IconButtonStyle { enabled, ..style }, tr.t("lyrics.offset_reset")).clicked() {
         actions.push(UiAction::LyricOffsetReset);
     }
-    if icon_button_ex(&mut cui, Icon::Save, 14.0, IconButtonStyle { enabled: props.can_save_offset && enabled, ..style }, tr.t("lyrics.offset_save")).clicked() {
+    // Text shift (line / character) in a popover.
+    let shifted = props.line_shift != 0 || props.char_shift != 0;
+    let shift_btn = icon_button_ex(
+        &mut cui,
+        Icon::MoreVertical,
+        14.0,
+        IconButtonStyle { active: shifted, active_dot: shifted, ..style },
+        tr.t("lyrics.shift"),
+    );
+    egui::Popup::menu(&shift_btn)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| shift_popover(ui, props, actions));
+    let can_save = props.can_save_offset && (enabled || shifted);
+    if icon_button_ex(&mut cui, Icon::Save, 14.0, IconButtonStyle { enabled: can_save, ..style }, tr.t("lyrics.offset_save")).clicked() {
         actions.push(UiAction::SaveLyricOffset);
     }
     // font size group, right-aligned

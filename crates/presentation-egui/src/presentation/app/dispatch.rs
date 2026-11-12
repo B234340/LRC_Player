@@ -335,6 +335,9 @@ impl GuiApp {
             UiAction::LyricOffsetDelta(delta) => self.set_lyrics_offset(self.lyrics_offset_ms + delta),
             UiAction::LyricOffsetReset => self.set_lyrics_offset(0),
             UiAction::SaveLyricOffset => self.save_lyrics_offset_to_selected_file(),
+            UiAction::LyricShiftLines(d) => self.set_lyrics_shift(self.lyrics_shift.lines + d, self.lyrics_shift.chars),
+            UiAction::LyricShiftChars(d) => self.set_lyrics_shift(self.lyrics_shift.lines, self.lyrics_shift.chars + d),
+            UiAction::LyricShiftReset => self.set_lyrics_shift(0, 0),
             UiAction::SetLyricFontSize(size) => {
                 self.config.lyric_font_size = size.clamp(14.0, 56.0);
                 self.save_config();

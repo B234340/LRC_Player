@@ -47,6 +47,9 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
         on_backdrop: true,
         show_controls: true,
         can_save_offset: app.selected_lyrics_index.is_some(),
+        line_shift: app.lyrics_shift.lines,
+        char_shift: app.lyrics_shift.chars,
+        can_char_shift: app.loaded_timeline.as_ref().is_some_and(|t| t.karaoke_char_count() > 1),
         tr,
     });
     let show_spectrum = app.config.show_spectrum && has_track;

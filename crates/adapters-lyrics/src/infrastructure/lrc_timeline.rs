@@ -548,6 +548,9 @@ fn progress(t: u64, start: u64, end: u64) -> f32 {
     ((t.saturating_sub(start)) as f64 / (end - start) as f64).clamp(0.0, 1.0) as f32
 }
 
+#[path = "lrc_shift.rs"]
+mod lrc_shift;
+
 #[cfg(test)]
 mod tests {
     use super::*;

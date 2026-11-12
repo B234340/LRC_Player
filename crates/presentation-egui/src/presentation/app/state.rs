@@ -237,6 +237,7 @@ impl GuiApp {
 
         let play_path = state.last_play_path.clone().unwrap_or_default();
         let lyrics_offset_ms = state.lyrics_offsets.get(&play_path).copied().unwrap_or(0);
+        let lyrics_shift = state.lyrics_shifts.get(&play_path).copied().unwrap_or_default();
         let page = state.last_tab.as_deref().and_then(page_from_key).unwrap_or(Page::Library);
         let mut library = LibraryIndex::new(ctx.clone(), opts.persist);
         if let Some(meta) = &meta {
@@ -284,6 +285,8 @@ impl GuiApp {
             loaded_timeline: None,
             lyrics_revision: 1,
             lyrics_offset_ms,
+            lyrics_shift,
+            lyrics_shifts: state.lyrics_shifts.clone(),
             lyrics_offsets: state.lyrics_offsets.clone(),
             lyrics_overrides: state.lyrics_overrides.clone(),
             spectrum: FftAnalyzer::default(),
@@ -383,6 +386,7 @@ impl GuiApp {
             shuffle: Some(shuffle),
             repeat: Some(repeat),
             lyrics_offsets: self.lyrics_offsets.clone(),
+            lyrics_shifts: self.lyrics_shifts.clone(),
             lyrics_overrides: self.lyrics_overrides.clone(),
             right_panel: right_panel_key(self.ui.right_panel),
             sidebar_collapsed: self.ui.sidebar.collapsed,

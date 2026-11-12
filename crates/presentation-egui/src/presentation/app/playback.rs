@@ -360,6 +360,7 @@ impl GuiApp {
         if changed {
             self.play_duration_ms = None;
             self.lyrics_offset_ms = self.lyrics_offsets.get(&self.play_path).copied().unwrap_or(0);
+            self.lyrics_shift = self.lyrics_shifts.get(&self.play_path).copied().unwrap_or_default();
             match self.library.row_index(std::path::Path::new(&self.play_path)) {
                 Some(i) => {
                     let row = &self.library.rows[i];
@@ -689,6 +690,7 @@ impl GuiApp {
         self.lyrics_revision += 1;
         self.selected_lyrics_index = None;
         self.lyrics_offset_ms = 0;
+        self.lyrics_shift = Default::default();
         self.save_state();
     }
 

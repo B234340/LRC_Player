@@ -159,6 +159,12 @@ pub enum UiAction {
     LyricOffsetDelta(i64),
     LyricOffsetReset,
     SaveLyricOffset,
+    /// Shift the lyric text by this many lines (relative; positive = later).
+    LyricShiftLines(i32),
+    /// Shift the karaoke text by this many characters (relative; positive = later).
+    LyricShiftChars(i32),
+    /// Undo the text shift.
+    LyricShiftReset,
     /// New lyric font size (points of the *active* line).
     SetLyricFontSize(f32),
 

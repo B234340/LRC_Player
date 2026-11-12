@@ -793,3 +793,28 @@ fn real_app_mixed_cjk() {
         shoot(&mut h, &format!("cjk_library_queue_panel_{suffix}"));
     }
 }
+
+/// The lyric text-shift popover on Now Playing (`APP_SCREENS_DIR` as above).
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn real_app_lyrics_shift_popover() {
+    for dark in [true, false] {
+        let fx = fixture();
+        let suffix = if dark { "dark" } else { "light" };
+        let mut h = start(&fx, dark, Language::Ja);
+        with_app(&mut h, |a| {
+            a.navigate(Page::NowPlaying);
+            a.ui.right_panel = None;
+        });
+        h.run_steps(2);
+        with_app(&mut h, |a| a.set_lyrics_shift(-1, 0));
+        h.run_steps(2);
+        let pos = std::env::var("SHIFT_BTN")
+            .ok()
+            .and_then(|v| v.split_once(',').map(|(x, y)| egui::pos2(x.parse().unwrap(), y.parse().unwrap())))
+            .unwrap_or(egui::pos2(968.0, 656.0));
+        click_at(&mut h, pos, egui::PointerButton::Primary);
+        h.run_steps(2);
+        shoot(&mut h, &format!("lyrics_shift_popover_{suffix}"));
+    }
+}

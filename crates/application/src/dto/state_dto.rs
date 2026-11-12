@@ -91,6 +91,22 @@ pub fn legacy_playback_mode(shuffle: bool, repeat: RepeatMode) -> PlaybackMode {
     }
 }
 
+/// Lyric text shift for one track: the text slides over fixed timestamps by `lines` lines and
+/// `chars` karaoke characters (positive = later).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LyricsShiftDto {
+    #[serde(default)]
+    pub lines: i32,
+    #[serde(default)]
+    pub chars: i32,
+}
+
+impl LyricsShiftDto {
+    pub fn is_zero(&self) -> bool {
+        self.lines == 0 && self.chars == 0
+    }
+}
+
 /// Last window geometry in logical points (position is `None` where the platform does
 /// not report it, e.g. Wayland).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -177,6 +193,9 @@ pub struct StateDto {
     /// Per-track lyrics offsets (track path -> ms, positive = lyrics earlier).
     #[serde(default)]
     pub lyrics_offsets: std::collections::HashMap<String, i64>,
+    /// Per-track lyric text shifts (track path -> shift).
+    #[serde(default)]
+    pub lyrics_shifts: std::collections::HashMap<String, LyricsShiftDto>,
     /// `.lrc` files attached to tracks by drag & drop (track path -> lyrics path).
     #[serde(default)]
     pub lyrics_overrides: std::collections::HashMap<String, String>,
@@ -223,6 +242,7 @@ impl Default for StateDto {
             shuffle: None,
             repeat: None,
             lyrics_offsets: std::collections::HashMap::new(),
+            lyrics_shifts: std::collections::HashMap::new(),
             lyrics_overrides: std::collections::HashMap::new(),
             right_panel: None,
             sidebar_collapsed: false,
@@ -300,6 +320,7 @@ mod tests {
         assert_eq!(state.shuffle, None);
         assert_eq!(state.shuffle_repeat(), (true, RepeatMode::Off));
         assert!(state.lyrics_offsets.is_empty());
+        assert!(state.lyrics_shifts.is_empty());
         assert!(state.lyrics_overrides.is_empty());
         assert_eq!(state.right_panel, None);
         assert!(!state.sidebar_collapsed);
