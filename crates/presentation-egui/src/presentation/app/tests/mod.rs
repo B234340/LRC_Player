@@ -258,3 +258,60 @@ fn favorite_toggles_edit_the_favorites_list() {
     app.dispatch(&ctx, UiAction::ToggleFavoriteCurrent);
     assert_eq!(fav_tracks(&app), vec![b]);
 }
+
+#[test]
+fn lyric_text_shift_is_applied_persisted_and_saved() {
+    use lrc_player_application::infrastructure::lyrics::{lrc_backup_path, Lyrics, LyricsTimeline};
+
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = test_app(&ctx, dir.path(), false);
+    app.play_path = dir.path().join("song.flac").to_string_lossy().into_owned();
+    let lrc = dir.path().join("song.lrc");
+    // Text one line late: the first timestamp is empty, every line sits one slot too late.
+    std::fs::write(
+        &lrc,
+        "[00:01.00]\n[00:03.00]<00:03.00>あ<00:04.00>い<00:05.00>\n[00:06.00]<00:06.00>う<00:07.00>え<00:08.00>\n[00:09.00]end\n",
+    )
+    .unwrap();
+    app.set_lyrics_candidates(Lyrics::rank_candidates([lrc.clone()]));
+    let texts = |app: &GuiApp| -> Vec<String> {
+        app.loaded_timeline.as_ref().unwrap().lines().iter().map(|l| l.text.clone()).collect()
+    };
+    let original = texts(&app);
+    assert_eq!(original, vec!["", "あい", "うえ", "end"]);
+
+    // Line shift: text moves one line earlier, timestamps stay.
+    let rev = app.lyrics_revision;
+    app.dispatch(&ctx, UiAction::LyricShiftLines(-1));
+    assert_eq!(texts(&app), vec!["あい", "うえ", "end", ""]);
+    assert_eq!(app.loaded_timeline.as_ref().unwrap().lines()[0].start_ms, 1_000);
+    assert!(app.lyrics_revision > rev, "views re-layout the shifted text");
+    assert_eq!(app.lyrics_shifts.get(&app.play_path).map(|s| s.lines), Some(-1));
+
+    // Clamped to the number of lines; reset restores the original.
+    app.dispatch(&ctx, UiAction::LyricShiftLines(-100));
+    assert_eq!(app.lyrics_shift.lines, -3);
+    app.dispatch(&ctx, UiAction::LyricShiftReset);
+    assert_eq!(texts(&app), original);
+    assert!(app.lyrics_shifts.is_empty());
+
+    // Character shift over the karaoke characters (across lines).
+    app.dispatch(&ctx, UiAction::LyricShiftChars(1));
+    assert_eq!(texts(&app), vec!["", "あ", "いうえ", "end"]);
+    app.dispatch(&ctx, UiAction::LyricShiftChars(-1));
+    assert_eq!(texts(&app), original);
+
+    // Saving writes the shifted lyrics, keeps a .bak, and resets the shift.
+    app.dispatch(&ctx, UiAction::LyricShiftLines(-1));
+    let shown = texts(&app);
+    app.dispatch(&ctx, UiAction::SaveLyricOffset);
+    assert!(lrc_backup_path(&lrc).is_file());
+    assert_eq!(app.lyrics_shift, Default::default());
+    assert!(app.lyrics_shifts.is_empty());
+    assert_eq!(texts(&app), shown, "same display after saving");
+    let reread = LyricsTimeline::from_lrc(&lrc).unwrap();
+    let file_texts: Vec<String> = reread.lines().iter().map(|l| l.text.clone()).collect();
+    assert_eq!(file_texts, shown);
+    assert!(reread.lines()[0].is_karaoke(), "karaoke timing survives the rewrite");
+}

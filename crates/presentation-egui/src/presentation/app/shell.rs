@@ -249,6 +249,9 @@ impl GuiApp {
             on_backdrop: false,
             show_controls: true,
             can_save_offset: self.selected_lyrics_index.is_some(),
+            line_shift: self.lyrics_shift.lines,
+            char_shift: self.lyrics_shift.chars,
+            can_char_shift: self.loaded_timeline.as_ref().is_some_and(|t| t.karaoke_char_count() > 1),
             tr,
         };
         lyrics_view(ui, &props, &mut self.ui.side_lyrics)

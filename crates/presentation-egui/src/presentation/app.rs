@@ -213,6 +213,10 @@ pub struct GuiApp {
     /// Bumped when `loaded_timeline` is replaced (lyrics view galley cache key).
     pub(crate) lyrics_revision: u64,
     pub(crate) lyrics_offset_ms: i64,
+    /// Lyric text shift of the current track.
+    pub(crate) lyrics_shift: lrc_player_application::dto::LyricsShiftDto,
+    /// Per-track lyric text shifts (persisted).
+    pub(crate) lyrics_shifts: HashMap<String, lrc_player_application::dto::LyricsShiftDto>,
     /// Per-track user lyrics offsets (persisted).
     pub(crate) lyrics_offsets: HashMap<String, i64>,
     /// `.lrc` files attached by drag & drop (track -> lyrics file, persisted).

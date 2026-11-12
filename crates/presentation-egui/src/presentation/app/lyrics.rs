@@ -2,11 +2,15 @@
 //! - 歌詞候補（ワーカーで 1 回だけ解析・ランク付け済み）の選択
 //! - オフセット（ユーザー調整 + `[offset:]` タグ）は `LyricsTimeline` が 1 回だけ適用
 //! - オフセットの LRC への保存（アトミック置換 + `.bak`）
+//! - 歌詞テキストの行ずらし / 文字ずらし（タイムスタンプは固定、曲ごとに永続化）
 //! - ドロップされた `.lrc` を再生中の曲に割り当てる（永続化）
 
 use std::path::Path;
 
-use lrc_player_application::infrastructure::lyrics::{save_lrc_offset, Lyrics, LyricsCandidate, LyricsTimeline};
+use lrc_player_application::dto::LyricsShiftDto;
+use lrc_player_application::infrastructure::lyrics::{
+    replace_file_with_backup, save_lrc_offset, Lyrics, LyricsCandidate, LyricsTimeline,
+};
 
 use crate::presentation::app::GuiApp;
 use crate::presentation::ui::views::LyricLine;
@@ -67,7 +71,12 @@ impl GuiApp {
         };
         match &candidate.timeline {
             Some(timeline) => {
-                let mut timeline = timeline.clone();
+                let shift = self.lyrics_shift;
+                let mut timeline = if shift.is_zero() {
+                    timeline.clone()
+                } else {
+                    timeline.with_text_shift(shift.lines, shift.chars)
+                };
                 timeline.set_user_offset_ms(self.lyrics_offset_ms);
                 self.loaded_timeline = Some(timeline);
                 self.selected_lyrics_index = Some(index);
@@ -126,8 +135,62 @@ impl GuiApp {
         self.save_state();
     }
 
+    /// Sets the lyric text shift for the current track (clamped to what the lyrics allow) and
+    /// rebuilds the displayed timeline from the original.
+    pub(crate) fn set_lyrics_shift(&mut self, lines: i32, chars: i32) {
+        let base = self
+            .selected_lyrics_index
+            .and_then(|i| self.lyrics_candidates.get(i))
+            .and_then(|c| c.timeline.as_ref());
+        let (max_lines, max_chars) = base.map_or((0, 0), |t| {
+            (t.len().saturating_sub(1) as i32, t.karaoke_char_count().saturating_sub(1) as i32)
+        });
+        let shift = LyricsShiftDto { lines: lines.clamp(-max_lines, max_lines), chars: chars.clamp(-max_chars, max_chars) };
+        if shift == self.lyrics_shift {
+            return;
+        }
+        self.lyrics_shift = shift;
+        if !self.play_path.is_empty() {
+            if shift.is_zero() {
+                self.lyrics_shifts.remove(&self.play_path);
+            } else {
+                self.lyrics_shifts.insert(self.play_path.clone(), shift);
+            }
+        }
+        if let Some(index) = self.selected_lyrics_index {
+            self.load_lyrics_file(index);
+        }
+        self.save_state();
+    }
+
+    /// Writes the displayed lyrics (text shift and offset applied) to the selected `.lrc`
+    /// (atomic replace, previous file kept as `.bak`), then resets shift and offset to 0.
+    fn save_lyrics_shift_to_selected_file(&mut self, path: std::path::PathBuf, index: usize) {
+        let tr = self.tr();
+        let Some(timeline) = &self.loaded_timeline else { return };
+        let contents = timeline.to_lrc_string();
+        if let Err(err) = replace_file_with_backup(&path, contents.as_bytes()) {
+            self.toast_error(tr.f("toast.offset_save_failed", &[&format!("{err:#}")]));
+            return;
+        }
+        let reloaded = LyricsTimeline::from_lrc(&path);
+        self.lyrics_shift = LyricsShiftDto::default();
+        self.lyrics_shifts.remove(&self.play_path);
+        self.set_lyrics_offset(0);
+        if let Ok(timeline) = reloaded {
+            if let Some(candidate) = self.lyrics_candidates.get_mut(index) {
+                candidate.timeline = Some(timeline);
+                candidate.error = None;
+            }
+            self.load_lyrics_file(index);
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.toast_success(tr.f("toast.lyrics_saved", &[&name]));
+    }
+
     /// Bakes the current offset (plus any `[offset:]` tag) into the selected `.lrc`
     /// (atomic replace, previous file kept as `.bak`) and resets the user offset to 0.
+    /// With a text shift, the whole file is rewritten from the shifted lyrics instead.
     pub(crate) fn save_lyrics_offset_to_selected_file(&mut self) {
         let tr = self.tr();
         let Some(path) = self
@@ -139,6 +202,10 @@ impl GuiApp {
             return;
         };
         let index = self.selected_lyrics_index.unwrap_or(0);
+        if !self.lyrics_shift.is_zero() {
+            self.save_lyrics_shift_to_selected_file(path, index);
+            return;
+        }
 
         let saved = match save_lrc_offset(&path, self.lyrics_offset_ms) {
             Ok(saved) => saved,
