@@ -172,7 +172,16 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
             settings_row(ui, true, tr.t("settings.karaoke"), Some(tr.t("settings.karaoke_hint")), |ui| {
                 if toggle_switch(ui, &mut app.config.karaoke).changed() {
                     app.save_config();
+                    app.reload_lyrics_display();
                 }
+            });
+            settings_row(ui, false, tr.t("settings.estimate_karaoke"), Some(tr.t("settings.estimate_karaoke_hint")), |ui| {
+                ui.add_enabled_ui(app.config.karaoke, |ui| {
+                    if toggle_switch(ui, &mut app.config.estimate_karaoke).changed() {
+                        app.save_config();
+                        app.reload_lyrics_display();
+                    }
+                });
             });
             settings_row(ui, false, tr.t("settings.spectrum"), Some(tr.t("settings.spectrum_hint")), |ui| {
                 if toggle_switch(ui, &mut app.config.show_spectrum).changed() {

@@ -120,6 +120,10 @@ pub struct Config {
     /// Karaoke (left-to-right) fill for lyrics with word/char timings.
     #[serde(default = "default_true")]
     pub karaoke: bool,
+    /// Estimate a karaoke fill for line-based lyrics (spread over the line, weighted by
+    /// syllables). Display only; never written to the `.lrc`.
+    #[serde(default = "default_true")]
+    pub estimate_karaoke: bool,
     /// Slim live spectrum strip on the Now Playing page.
     #[serde(default)]
     pub show_spectrum: bool,
@@ -153,6 +157,7 @@ impl Default for Config {
             accent: default_accent(),
             lyric_font_size: DEFAULT_LYRIC_FONT_SIZE,
             karaoke: true,
+            estimate_karaoke: true,
             show_spectrum: false,
         }
     }
@@ -221,6 +226,7 @@ mod tests {
         assert_eq!(cfg.accent, "teal");
         assert_eq!(cfg.lyric_font_size, DEFAULT_LYRIC_FONT_SIZE);
         assert!(cfg.karaoke);
+        assert!(cfg.estimate_karaoke);
         assert!(!cfg.show_spectrum);
         let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.resampler_taps, 64);

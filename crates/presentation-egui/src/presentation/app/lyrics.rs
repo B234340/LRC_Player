@@ -77,6 +77,10 @@ impl GuiApp {
                 } else {
                     timeline.with_text_shift(shift.lines, shift.chars)
                 };
+                // Pseudo karaoke for line-based lines (display only; marked as estimated).
+                if self.config.karaoke && self.config.estimate_karaoke {
+                    timeline = timeline.with_estimated_karaoke();
+                }
                 timeline.set_user_offset_ms(self.lyrics_offset_ms);
                 self.loaded_timeline = Some(timeline);
                 self.selected_lyrics_index = Some(index);
@@ -133,6 +137,13 @@ impl GuiApp {
             }
         }
         self.save_state();
+    }
+
+    /// Rebuilds the displayed lyrics after a display setting changed (karaoke / estimate).
+    pub(crate) fn reload_lyrics_display(&mut self) {
+        if let Some(index) = self.selected_lyrics_index {
+            self.load_lyrics_file(index);
+        }
     }
 
     /// Sets the lyric text shift for the current track (clamped to what the lyrics allow) and

@@ -315,3 +315,43 @@ fn lyric_text_shift_is_applied_persisted_and_saved() {
     assert_eq!(file_texts, shown);
     assert!(reread.lines()[0].is_karaoke(), "karaoke timing survives the rewrite");
 }
+
+#[test]
+fn estimated_karaoke_is_display_only() {
+    use lrc_player_application::infrastructure::lyrics::{Lyrics, LyricsTimeline};
+
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = test_app(&ctx, dir.path(), false);
+    app.play_path = dir.path().join("song.flac").to_string_lossy().into_owned();
+    let lrc = dir.path().join("song.lrc");
+    std::fs::write(&lrc, "[00:01.00]夜に駆ける\n[00:05.00]沈むように\n[00:09.00]end\n").unwrap();
+    app.set_lyrics_candidates(Lyrics::rank_candidates([lrc.clone()]));
+    let estimated = |app: &GuiApp| app.loaded_timeline.as_ref().unwrap().lines().iter().filter(|l| l.estimated).count();
+
+    // On by default: line-based lines get an estimated wipe.
+    assert!(app.config.estimate_karaoke);
+    assert_eq!(estimated(&app), 3);
+    let pos = app.loaded_timeline.as_ref().unwrap().position_at(1_500).unwrap();
+    assert!(pos.highlighted_chars > 0.0 && pos.highlighted_chars < 5.0, "{}", pos.highlighted_chars);
+    // No character shift on estimated timing.
+    assert_eq!(app.loaded_timeline.as_ref().unwrap().karaoke_char_count(), 0);
+
+    // Turning it off (or karaoke off) shows plain lines again.
+    app.config.estimate_karaoke = false;
+    app.reload_lyrics_display();
+    assert_eq!(estimated(&app), 0);
+    app.config.estimate_karaoke = true;
+    app.config.karaoke = false;
+    app.reload_lyrics_display();
+    assert_eq!(estimated(&app), 0);
+    app.config.karaoke = true;
+    app.reload_lyrics_display();
+
+    // Saving (with a shift) never writes the estimated timing.
+    app.dispatch(&ctx, UiAction::LyricShiftLines(-1));
+    app.dispatch(&ctx, UiAction::SaveLyricOffset);
+    let saved = std::fs::read_to_string(&lrc).unwrap();
+    assert!(!saved.contains('<'), "{saved}");
+    assert!(LyricsTimeline::parse(&saved).lines().iter().all(|l| !l.is_karaoke()));
+}
