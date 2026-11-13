@@ -201,6 +201,8 @@ fn harness<'a>(dark: bool) -> H<'a> {
             |ui, app: &mut Option<GuiApp>| {
                 if let Some(app) = app.as_mut() {
                     let mut frame = eframe::Frame::_new_kittest();
+                    let ctx = ui.ctx().clone();
+                    eframe::App::logic(app, &ctx, &mut frame);
                     eframe::App::ui(app, ui, &mut frame);
                 }
             },
@@ -567,6 +569,8 @@ fn real_app_now_playing_hires_2x() {
             |ui, app: &mut Option<GuiApp>| {
                 if let Some(app) = app.as_mut() {
                     let mut frame = eframe::Frame::_new_kittest();
+                    let ctx = ui.ctx().clone();
+                    eframe::App::logic(app, &ctx, &mut frame);
                     eframe::App::ui(app, ui, &mut frame);
                 }
             },

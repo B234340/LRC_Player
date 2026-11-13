@@ -64,7 +64,17 @@ fn write_wav(path: &Path, seconds: f32) {
 
 fn run_frame(ctx: &egui::Context, app: &mut GuiApp, frame: &mut eframe::Frame) {
     let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        eframe::App::logic(app, ui.ctx(), frame);
         eframe::App::ui(app, ui, frame);
+    });
+}
+
+/// A frame while the window is minimized: eframe only calls `logic` then.
+fn run_hidden_frame(ctx: &egui::Context, app: &mut GuiApp, frame: &mut eframe::Frame) {
+    let mut input = egui::RawInput::default();
+    input.viewports.entry(egui::ViewportId::ROOT).or_default().minimized = Some(true);
+    let _ = ctx.run_ui(input, |ui| {
+        eframe::App::logic(app, ui.ctx(), frame);
     });
 }
 
@@ -354,4 +364,42 @@ fn estimated_karaoke_is_display_only() {
     let saved = std::fs::read_to_string(&lrc).unwrap();
     assert!(!saved.contains('<'), "{saved}");
     assert!(LyricsTimeline::parse(&saved).lines().iter().all(|l| !l.is_karaoke()));
+}
+
+/// Regression: while the window is minimized eframe only calls `logic`. Engine events and
+/// worker results must still be processed there (before, everything ran in `ui`, so a track
+/// ending in the background only advanced once the window was shown again).
+#[test]
+fn minimized_window_still_processes_engine_and_workers() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.wav");
+    let b = dir.path().join("b.wav");
+    write_wav(&a, 1.0);
+    write_wav(&b, 1.0);
+    std::fs::write(dir.path().join("a.lrc"), "[00:00.10]line one\n").unwrap();
+    let (a, b) = (a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned());
+
+    let ctx = egui::Context::default();
+    let mut app = test_app(&ctx, dir.path(), true);
+    let mut frame = eframe::Frame::_new_kittest();
+    app.dispatch(&ctx, UiAction::PlayTracks { paths: vec![a.clone().into(), b.clone().into()], start: 0 });
+
+    // Only hidden frames from here on.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && (app.play_duration_ms.is_none() || app.loaded_timeline.is_none() || app.engine_snapshot.is_none()) {
+        run_hidden_frame(&ctx, &mut app, &mut frame);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(app.engine_snapshot.is_some(), "engine polled in the background");
+    assert_eq!(app.play_duration_ms, Some(1000), "worker result applied in the background");
+    assert!(app.loaded_timeline.is_some(), "lyrics loaded in the background");
+
+    // With an engine that accepted the track, the gapless successor is queued from the
+    // background too, so the engine moves on by itself at the end of the track. (Actually
+    // hearing it advance needs an audio output device, which CI does not have.)
+    let active = app.engine_snapshot.as_ref().is_some_and(|s| s.state != lrc_player_application::infrastructure::audio::engine::EngineState::Stopped);
+    if active {
+        assert_eq!(app.pending_next, Some((1, b.clone())), "next track queued while minimized");
+    }
+    let _ = a;
 }

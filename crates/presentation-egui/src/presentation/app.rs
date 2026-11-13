@@ -78,6 +78,8 @@ use crate::presentation::ui::{
 const REPAINT_TIME_BASED: Duration = Duration::from_millis(33);
 /// Repaint interval while playing elsewhere (enough for the transport time label).
 const REPAINT_IDLE_PLAYING: Duration = Duration::from_millis(250);
+/// Wake-up while minimized and playing (logic only: media overlay position, state saving).
+const REPAINT_BACKGROUND_PLAYING: Duration = Duration::from_secs(1);
 /// How long a hot-path state change may stay unsaved before it is handed to the saver.
 const STATE_SUBMIT_INTERVAL: Duration = Duration::from_millis(1000);
 /// While playing, the position is persisted this often so a crash resumes nearby.
@@ -284,13 +286,30 @@ impl GuiApp {
     }
 
     /// Repaint policy: event-driven with a low-rate tick only while audio plays.
+    /// Media overlay sync, state saving and the next wake-up (after logic and after ui).
+    fn after_frame(&mut self, ctx: &egui::Context) {
+        if self.media.is_active() {
+            let view = self.playback_view();
+            self.media.sync(&view, self.play_cover_path.as_deref());
+        }
+        self.maybe_submit_state();
+        self.schedule_repaint(ctx);
+    }
+
     fn schedule_repaint(&self, ctx: &egui::Context) {
         let minimized = ctx.input(|i| {
             let vp = i.viewport();
             vp.minimized.unwrap_or(false) || vp.occluded.unwrap_or(false)
         });
         if minimized {
-            // Engine events still wake the UI through the waker.
+            // Only `logic` runs. Engine events, workers and media keys wake it; a pending seek
+            // (media keys) needs its debounce, and while playing a slow tick keeps the OS media
+            // overlay position and the saved state current.
+            if self.pending_seek_ms.is_some() {
+                ctx.request_repaint_after(seek::SEEK_DEBOUNCE);
+            } else if self.playback_state == PlaybackState::Playing {
+                ctx.request_repaint_after(REPAINT_BACKGROUND_PLAYING);
+            }
             return;
         }
         if self.pending_seek_ms.is_some() {
@@ -338,35 +357,37 @@ impl GuiApp {
 }
 
 impl App for GuiApp {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-
-        self.poll_fonts(&ctx);
-        crate::presentation::ui::theme::sync(&ctx, self.ui.theme, self.ui.accent);
+    /// Everything that is not drawing. eframe calls this before every `ui`, and also while the
+    /// window is minimized / hidden (then `ui` is skipped) whenever a repaint was requested
+    /// (engine events, workers and media keys request one). So playback keeps advancing,
+    /// the gapless successor is queued and the OS media overlay stays current in the
+    /// background.
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.poll_fonts(ctx);
+        crate::presentation::ui::theme::sync(ctx, self.ui.theme, self.ui.accent);
         self.poll_scan_status();
         self.poll_engine();
         self.poll_track_info();
         self.poll_library();
         self.poll_folder_picker();
-        self.poll_lyric_alignment(&ctx);
-        self.poll_lyrics_fetch(&ctx);
+        self.poll_lyric_alignment(ctx);
+        self.poll_lyrics_fetch(ctx);
         self.poll_dropped();
-        self.artwork.poll(&ctx);
+        self.artwork.poll(ctx);
         self.ensure_play_artwork();
-        self.media.ensure_attached(frame, &ctx);
+        self.media.ensure_attached(frame, ctx);
         self.poll_media_controls();
         window_scale::install(frame);
-        self.track_window_geometry(&ctx);
+        self.track_window_geometry(ctx);
+        self.after_frame(ctx);
+    }
 
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.draw_shell(ui);
-
-        if self.media.is_active() {
-            let view = self.playback_view();
-            self.media.sync(&view, self.play_cover_path.as_deref());
-        }
+        // Again after drawing, so actions from this frame's UI are reflected right away.
+        self.after_frame(&ctx);
         self.artwork.end_frame();
-        self.maybe_submit_state();
-        self.schedule_repaint(&ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
