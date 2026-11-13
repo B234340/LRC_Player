@@ -62,6 +62,14 @@ fn write_wav(path: &Path, seconds: f32) {
     std::fs::write(path, out).unwrap();
 }
 
+/// The engine accepted a track but its `TrackStarted` (which queues the gapless successor)
+/// has not been handled yet: `poll_engine` drains events before it takes the snapshot, so a
+/// snapshot can already show the new state one frame before the event is processed.
+fn successor_pending(app: &GuiApp) -> bool {
+    let active = app.engine_snapshot.as_ref().is_some_and(|s| s.state != lrc_player_application::infrastructure::audio::engine::EngineState::Stopped);
+    active && app.pending_next.is_none()
+}
+
 fn run_frame(ctx: &egui::Context, app: &mut GuiApp, frame: &mut eframe::Frame) {
     let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
         eframe::App::logic(app, ui.ctx(), frame);
@@ -116,7 +124,7 @@ fn gui_app_smoke_transport_and_pages() {
 
     // Pump frames until the engine accepted the track and the worker found lyrics/duration.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && (app.play_duration_ms.is_none() || app.loaded_timeline.is_none()) {
+    while Instant::now() < deadline && (app.play_duration_ms.is_none() || app.loaded_timeline.is_none() || successor_pending(&app)) {
         run_frame(&ctx, &mut app, &mut frame);
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -386,7 +394,7 @@ fn minimized_window_still_processes_engine_and_workers() {
 
     // Only hidden frames from here on.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && (app.play_duration_ms.is_none() || app.loaded_timeline.is_none() || app.engine_snapshot.is_none()) {
+    while Instant::now() < deadline && (app.play_duration_ms.is_none() || app.loaded_timeline.is_none() || app.engine_snapshot.is_none() || successor_pending(&app)) {
         run_hidden_frame(&ctx, &mut app, &mut frame);
         std::thread::sleep(Duration::from_millis(20));
     }

@@ -23,6 +23,7 @@ mod artwork_loader;
 mod dispatch;
 mod drop;
 pub(crate) mod library_index;
+mod loudness;
 mod lyric_align;
 mod lyric_fetch;
 mod lyrics;
@@ -209,6 +210,8 @@ pub struct GuiApp {
     pub(crate) play_album: Option<String>,
     /// Background probe + lyrics discovery for the current track.
     pub(crate) track_info: track_info::TrackInfoLoader,
+    /// EBU R128 measurement of untagged files -> engine loudness hints (`app/loudness.rs`).
+    pub(crate) loudness: loudness::LoudnessAnalyzer,
 
     pub(crate) play_artwork_handle: Option<egui::TextureHandle>,
     pub(crate) play_backdrop_handle: Option<egui::TextureHandle>,
@@ -371,6 +374,7 @@ impl App for GuiApp {
         self.poll_engine();
         self.poll_track_info();
         self.poll_library();
+        self.poll_loudness();
         self.poll_folder_picker();
         self.poll_lyric_alignment(ctx);
         self.poll_lyrics_fetch(ctx);

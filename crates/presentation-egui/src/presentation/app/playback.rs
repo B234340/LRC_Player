@@ -130,6 +130,7 @@ pub(crate) fn create_engine(
     };
     engine.set_muted(muted);
     engine.set_eq(eq);
+    engine.set_normalization(super::loudness::normalization_from_config(cfg));
     let waker_ctx = ctx.clone();
     engine.set_waker(Arc::new(move || waker_ctx.request_repaint()));
     Some(engine)
@@ -320,6 +321,9 @@ impl GuiApp {
             EngineEvent::StateChanged { state } => {
                 self.playback_state = map_engine_state(state);
             }
+            EngineEvent::ExclusiveUnavailable { reason } => {
+                tracing::warn!("exclusive output unavailable: {reason}");
+            }
         }
     }
 
@@ -342,6 +346,9 @@ impl GuiApp {
             None
         };
         if next != self.pending_next {
+            if let Some((_, p)) = &next {
+                self.prepare_loudness(p, super::loudness::Priority::Next);
+            }
             engine.set_next(next.as_ref().map(|(_, p)| PathBuf::from(p)));
             self.pending_next = next;
         }
@@ -410,6 +417,7 @@ impl GuiApp {
             self.toast_error(tr.t("toast.no_engine").to_string());
             return;
         };
+        self.prepare_loudness(&self.play_path, super::loudness::Priority::Current);
         engine.load(PathBuf::from(&self.play_path), self.play_position_ms, autoplay);
         if autoplay {
             self.warn_if_no_output_device();

@@ -22,7 +22,7 @@ use lrc_player_domain::model::PlaybackState;
 
 use crate::presentation::app::playback::{create_engine, eq_from_dto, eq_to_dto};
 use crate::presentation::app::{
-    library_index::LibraryIndex, media_controls::MediaControlsBridge, playlists, scan_status,
+    library_index::LibraryIndex, loudness, media_controls::MediaControlsBridge, playlists, scan_status,
     spectrum::FftAnalyzer, track_info, ArtworkLoader, GuiApp, UiShell,
 };
 use crate::presentation::ui::views::album_grid::{ALBUM_CARD_DEFAULT, ALBUM_CARD_MAX, ALBUM_CARD_MIN};
@@ -274,6 +274,7 @@ impl GuiApp {
             play_artist: None,
             play_album: None,
             track_info: track_info::TrackInfoLoader::new(ctx.clone()),
+            loudness: loudness::LoudnessAnalyzer::new(ctx.clone(), opts.persist.then(loudness::default_cache_path).flatten()),
 
             play_artwork_handle: None,
             play_backdrop_handle: None,

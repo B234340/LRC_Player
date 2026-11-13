@@ -85,6 +85,22 @@ pub enum ResamplerSetting {
     Sinc,
 }
 
+/// Loudness normalization source (ReplayGain tags, or EBU R128 measurements for untagged
+/// files).
+///
+/// Default `Track`: in a shuffled or mixed queue every track plays at the same loudness, which
+/// is what ReplayGain-aware players (foobar2000, Plexamp, Spotify-style "normalize volume")
+/// default to. `Album` keeps the level differences inside an album and needs album data
+/// (tags, or every track of the album measured); it falls back to the track gain otherwise.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NormalizationModeSetting {
+    Off,
+    #[default]
+    Track,
+    Album,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceSettings {
     pub resampler_taps: usize,
@@ -135,6 +151,17 @@ pub struct Config {
     /// album and duration). Off by default.
     #[serde(default)]
     pub fetch_lyrics_online: bool,
+    /// Loudness normalization (`"off"` | `"track"` | `"album"`).
+    #[serde(default)]
+    pub normalization_mode: NormalizationModeSetting,
+    /// Gain added on top of the normalization gain (dB). 0 = the ReplayGain 2.0 reference
+    /// (-18 LUFS).
+    #[serde(default)]
+    pub normalization_preamp_db: f32,
+    /// Limit the normalization gain so that the track (or album) peak stays at or below
+    /// full scale.
+    #[serde(default = "default_true")]
+    pub prevent_clipping: bool,
 }
 
 fn default_accent() -> String {
@@ -169,6 +196,9 @@ impl Default for Config {
             show_spectrum: false,
             align_command: String::new(),
             fetch_lyrics_online: false,
+            normalization_mode: NormalizationModeSetting::default(),
+            normalization_preamp_db: 0.0,
+            prevent_clipping: true,
         }
     }
 }
@@ -239,7 +269,32 @@ mod tests {
         assert!(cfg.estimate_karaoke);
         assert!(!cfg.fetch_lyrics_online, "online lookups are opt-in");
         assert!(!cfg.show_spectrum);
+        assert_eq!(cfg.normalization_mode, NormalizationModeSetting::Track);
+        assert_eq!(cfg.normalization_preamp_db, 0.0);
+        assert!(cfg.prevent_clipping);
         let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.resampler_taps, 64);
+    }
+
+    #[test]
+    fn normalization_settings_round_trip() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"resampler_taps": 32, "preferred_output_device": null,
+                "normalization_mode": "album", "normalization_preamp_db": -3.5, "prevent_clipping": false}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.normalization_mode, NormalizationModeSetting::Album);
+        assert_eq!(cfg.normalization_preamp_db, -3.5);
+        assert!(!cfg.prevent_clipping);
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json["normalization_mode"], "album");
+        let back: Config = serde_json::from_value(json).unwrap();
+        assert_eq!(back.normalization_mode, NormalizationModeSetting::Album);
+        assert_eq!(back.normalization_preamp_db, -3.5);
+        for (text, mode) in [("off", NormalizationModeSetting::Off), ("track", NormalizationModeSetting::Track)] {
+            let v: NormalizationModeSetting = serde_json::from_str(&format!("\"{text}\"")).unwrap();
+            assert_eq!(v, mode);
+        }
+        assert_eq!(Config::default().normalization_mode, NormalizationModeSetting::Track);
     }
 }
