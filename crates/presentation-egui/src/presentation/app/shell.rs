@@ -233,7 +233,13 @@ impl GuiApp {
         ui.add_space(6.0);
         let Some(timeline) = self.loaded_timeline.as_ref().filter(|t| !t.is_empty()) else {
             let hint = if self.play_path.is_empty() { tr.t("now.no_track") } else { tr.t("now.no_lyrics_hint") };
-            empty_state(ui, Icon::Lyrics, tr.t("now.no_lyrics"), hint, None);
+            let search = (!self.play_path.is_empty() && self.lyrics_candidates.is_empty()).then(|| {
+                if self.lyrics_fetch_running() { tr.t("lyrics.searching_online") } else { tr.t("lyrics.search_online") }
+            });
+            let clicked = empty_state(ui, Icon::Lyrics, tr.t("now.no_lyrics"), hint, search.map(|l| (Icon::Search, l)));
+            if clicked && !self.lyrics_fetch_running() {
+                return vec![UiAction::FetchLyricsOnline];
+            }
             return Vec::new();
         };
         let lines = lyric_lines(timeline, self.config.karaoke);

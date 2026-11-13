@@ -409,6 +409,7 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                         tr,
                     }),
                     favorite: Some(true),
+                    lyrics_search: None,
                     tr,
                 },
                 &mut s.now,

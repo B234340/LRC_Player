@@ -131,6 +131,10 @@ pub struct Config {
     /// audio and `.lrc` paths are appended. Empty = feature off.
     #[serde(default)]
     pub align_command: String,
+    /// Look up lyrics on LRCLIB (lrclib.net) for tracks without any (sends title, artist,
+    /// album and duration). Off by default.
+    #[serde(default)]
+    pub fetch_lyrics_online: bool,
 }
 
 fn default_accent() -> String {
@@ -164,6 +168,7 @@ impl Default for Config {
             estimate_karaoke: true,
             show_spectrum: false,
             align_command: String::new(),
+            fetch_lyrics_online: false,
         }
     }
 }
@@ -232,6 +237,7 @@ mod tests {
         assert_eq!(cfg.lyric_font_size, DEFAULT_LYRIC_FONT_SIZE);
         assert!(cfg.karaoke);
         assert!(cfg.estimate_karaoke);
+        assert!(!cfg.fetch_lyrics_online, "online lookups are opt-in");
         assert!(!cfg.show_spectrum);
         let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.resampler_taps, 64);

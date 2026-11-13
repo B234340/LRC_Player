@@ -24,6 +24,7 @@ mod dispatch;
 mod drop;
 pub(crate) mod library_index;
 mod lyric_align;
+mod lyric_fetch;
 mod lyrics;
 mod media_controls;
 mod pages;
@@ -143,6 +144,10 @@ pub(crate) struct UiShell {
     pub(crate) fonts_rx: Option<Receiver<egui::FontDefinitions>>,
     /// Pending folder expansion of dropped files (play now?, result channel).
     pub(crate) drop_rx: Option<(bool, Receiver<Vec<String>>)>,
+    /// Running online lyrics lookup (see `app/lyric_fetch.rs`).
+    pub(crate) fetch_job: Option<lyric_fetch::FetchJob>,
+    /// Tracks already looked up automatically this session.
+    pub(crate) fetch_tried: std::collections::HashSet<String>,
     /// Running external lyric-timing job (see `app/lyric_align.rs`).
     pub(crate) align_job: Option<lyric_align::AlignJob>,
     pub(crate) exclude_input: String,
@@ -216,6 +221,8 @@ pub struct GuiApp {
     /// Bumped when `loaded_timeline` is replaced (lyrics view galley cache key).
     pub(crate) lyrics_revision: u64,
     pub(crate) lyrics_offset_ms: i64,
+    /// Track whose lyrics discovery (worker) has finished.
+    pub(crate) lyrics_discovered_for: String,
     /// Lyric text shift of the current track.
     pub(crate) lyrics_shift: lrc_player_application::dto::LyricsShiftDto,
     /// Per-track lyric text shifts (persisted).
@@ -342,6 +349,7 @@ impl App for GuiApp {
         self.poll_library();
         self.poll_folder_picker();
         self.poll_lyric_alignment(&ctx);
+        self.poll_lyrics_fetch(&ctx);
         self.poll_dropped();
         self.artwork.poll(&ctx);
         self.ensure_play_artwork();

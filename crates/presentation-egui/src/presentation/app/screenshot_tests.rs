@@ -816,5 +816,19 @@ fn real_app_lyrics_shift_popover() {
         click_at(&mut h, pos, egui::PointerButton::Primary);
         h.run_steps(2);
         shoot(&mut h, &format!("lyrics_shift_popover_{suffix}"));
+        h.key_press(egui::Key::Escape);
+        // A track without lyrics: the "search online" button.
+        with_app(&mut h, |a| {
+            a.lyrics_candidates.clear();
+            a.selected_lyrics_index = None;
+            a.loaded_timeline = None;
+            a.lyrics_revision += 1;
+        });
+        h.run_steps(2);
+        shoot(&mut h, &format!("lyrics_search_online_{suffix}"));
+        with_app(&mut h, |a| a.ui.right_panel = Some(crate::presentation::ui::RightPanel::Lyrics));
+        with_app(&mut h, |a| a.navigate(Page::Library));
+        h.run_steps(2);
+        shoot(&mut h, &format!("lyrics_panel_search_online_{suffix}"));
     }
 }

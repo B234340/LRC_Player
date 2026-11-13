@@ -72,6 +72,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
         seed: &seed,
         lyrics,
         favorite: has_track.then(|| app.is_favorite_path(&app.play_path)),
+        lyrics_search: (has_track && app.lyrics_candidates.is_empty()).then(|| app.lyrics_fetch_running()),
         tr,
     };
     let actions = now_playing(&mut child, &props, &mut app.ui.now);

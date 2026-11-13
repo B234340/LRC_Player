@@ -183,6 +183,11 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
                     }
                 });
             });
+            settings_row(ui, false, tr.t("settings.fetch_lyrics"), Some(tr.t("settings.fetch_lyrics_hint")), |ui| {
+                if toggle_switch(ui, &mut app.config.fetch_lyrics_online).changed() {
+                    app.save_config();
+                }
+            });
             settings_row(ui, false, tr.t("settings.align_command"), Some(tr.t("settings.align_command_hint")), |ui| {
                 let edit = egui::TextEdit::singleline(&mut app.config.align_command)
                     .hint_text("lrc-align")

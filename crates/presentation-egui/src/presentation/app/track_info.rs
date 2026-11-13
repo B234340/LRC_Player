@@ -207,6 +207,7 @@ impl GuiApp {
                 }
             }
             self.play_cover_path = result.cover;
+            self.lyrics_discovered_for = self.play_path.clone();
             self.set_lyrics_candidates(result.candidates);
         }
     }
