@@ -183,6 +183,14 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
                     }
                 });
             });
+            settings_row(ui, false, tr.t("settings.align_command"), Some(tr.t("settings.align_command_hint")), |ui| {
+                let edit = egui::TextEdit::singleline(&mut app.config.align_command)
+                    .hint_text("lrc-align")
+                    .desired_width(ui.available_width().min(260.0));
+                if ui.add(edit).lost_focus() {
+                    app.save_config();
+                }
+            });
             settings_row(ui, false, tr.t("settings.spectrum"), Some(tr.t("settings.spectrum_hint")), |ui| {
                 if toggle_switch(ui, &mut app.config.show_spectrum).changed() {
                     app.save_config();

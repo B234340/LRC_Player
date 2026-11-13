@@ -23,6 +23,7 @@ mod artwork_loader;
 mod dispatch;
 mod drop;
 pub(crate) mod library_index;
+mod lyric_align;
 mod lyrics;
 mod media_controls;
 mod pages;
@@ -142,6 +143,8 @@ pub(crate) struct UiShell {
     pub(crate) fonts_rx: Option<Receiver<egui::FontDefinitions>>,
     /// Pending folder expansion of dropped files (play now?, result channel).
     pub(crate) drop_rx: Option<(bool, Receiver<Vec<String>>)>,
+    /// Running external lyric-timing job (see `app/lyric_align.rs`).
+    pub(crate) align_job: Option<lyric_align::AlignJob>,
     pub(crate) exclude_input: String,
     /// Last (message, time) toast, to drop identical repeats.
     pub(crate) last_toast: Option<(String, Instant)>,
@@ -338,6 +341,7 @@ impl App for GuiApp {
         self.poll_track_info();
         self.poll_library();
         self.poll_folder_picker();
+        self.poll_lyric_alignment(&ctx);
         self.poll_dropped();
         self.artwork.poll(&ctx);
         self.ensure_play_artwork();

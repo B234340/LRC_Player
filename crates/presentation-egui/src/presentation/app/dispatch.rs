@@ -338,6 +338,7 @@ impl GuiApp {
             UiAction::LyricShiftLines(d) => self.set_lyrics_shift(self.lyrics_shift.lines + d, self.lyrics_shift.chars),
             UiAction::LyricShiftChars(d) => self.set_lyrics_shift(self.lyrics_shift.lines, self.lyrics_shift.chars + d),
             UiAction::LyricShiftReset => self.set_lyrics_shift(0, 0),
+            UiAction::GenerateLyricTiming => self.start_lyric_alignment(ctx),
             UiAction::SetLyricFontSize(size) => {
                 self.config.lyric_font_size = size.clamp(14.0, 56.0);
                 self.save_config();

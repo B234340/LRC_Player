@@ -180,6 +180,8 @@ fn lyrics_shot(ppp: f32, name: &str) {
                 line_shift: 0,
                 char_shift: 0,
                 can_char_shift: true,
+                can_generate_timing: false,
+                generating_timing: false,
                 tr: Tr::JA,
             },
             &mut state,

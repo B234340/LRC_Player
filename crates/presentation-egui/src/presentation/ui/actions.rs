@@ -165,6 +165,8 @@ pub enum UiAction {
     LyricShiftChars(i32),
     /// Undo the text shift.
     LyricShiftReset,
+    /// Generate per-character timing with the external command (settings).
+    GenerateLyricTiming,
     /// New lyric font size (points of the *active* line).
     SetLyricFontSize(f32),
 

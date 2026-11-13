@@ -127,6 +127,10 @@ pub struct Config {
     /// Slim live spectrum strip on the Now Playing page.
     #[serde(default)]
     pub show_spectrum: bool,
+    /// External command that adds per-character timing to an `.lrc` (e.g. `lrc-align`); the
+    /// audio and `.lrc` paths are appended. Empty = feature off.
+    #[serde(default)]
+    pub align_command: String,
 }
 
 fn default_accent() -> String {
@@ -159,6 +163,7 @@ impl Default for Config {
             karaoke: true,
             estimate_karaoke: true,
             show_spectrum: false,
+            align_command: String::new(),
         }
     }
 }

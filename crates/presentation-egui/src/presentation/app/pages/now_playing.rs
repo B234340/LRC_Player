@@ -50,6 +50,8 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
         line_shift: app.lyrics_shift.lines,
         char_shift: app.lyrics_shift.chars,
         can_char_shift: app.loaded_timeline.as_ref().is_some_and(|t| t.karaoke_char_count() > 1),
+        can_generate_timing: !app.config.align_command.trim().is_empty() && app.selected_lyrics_index.is_some(),
+        generating_timing: app.lyric_alignment_running(),
         tr,
     });
     let show_spectrum = app.config.show_spectrum && has_track;

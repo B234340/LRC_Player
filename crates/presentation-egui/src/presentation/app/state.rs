@@ -336,6 +336,7 @@ impl GuiApp {
                 folder_picker: None,
                 fonts_rx,
                 drop_rx: None,
+                align_job: None,
                 exclude_input: String::new(),
                 last_toast: None,
                 window: state.window,

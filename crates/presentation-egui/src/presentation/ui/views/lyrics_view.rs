@@ -56,6 +56,10 @@ pub struct LyricsProps<'a> {
     pub char_shift: i32,
     /// The lyrics have per-character (karaoke) timing, so a character shift is possible.
     pub can_char_shift: bool,
+    /// The external timing command is configured and an `.lrc` is selected.
+    pub can_generate_timing: bool,
+    /// The external timing command is running for this track.
+    pub generating_timing: bool,
     pub tr: Tr,
 }
 
@@ -391,6 +395,19 @@ fn shift_popover(ui: &mut Ui, props: &LyricsProps<'_>, actions: &mut Vec<UiActio
     }
     if !props.can_char_shift {
         ui.label(theme::caption(ui, tr.t("lyrics.shift_chars_unavailable")));
+    }
+    ui.separator();
+    // Real per-character timing from the audio (external tool, see settings).
+    let label = if props.generating_timing { tr.t("lyrics.generating_timing") } else { tr.t("lyrics.generate_timing") };
+    let gen = ui.add_enabled(
+        props.can_generate_timing && !props.generating_timing,
+        egui::Button::new(label).min_size(vec2(ui.available_width(), 28.0)),
+    );
+    if gen.clicked() {
+        actions.push(UiAction::GenerateLyricTiming);
+    }
+    if !props.can_generate_timing {
+        ui.add(egui::Label::new(theme::caption(ui, tr.t("lyrics.generate_timing_setup"))).wrap());
     }
     ui.separator();
     let any = props.line_shift != 0 || props.char_shift != 0;

@@ -252,6 +252,8 @@ impl GuiApp {
             line_shift: self.lyrics_shift.lines,
             char_shift: self.lyrics_shift.chars,
             can_char_shift: self.loaded_timeline.as_ref().is_some_and(|t| t.karaoke_char_count() > 1),
+            can_generate_timing: !self.config.align_command.trim().is_empty() && self.selected_lyrics_index.is_some(),
+            generating_timing: self.lyric_alignment_running(),
             tr,
         };
         lyrics_view(ui, &props, &mut self.ui.side_lyrics)
