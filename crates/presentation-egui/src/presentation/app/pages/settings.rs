@@ -189,12 +189,23 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
                 }
             });
             settings_row(ui, false, tr.t("settings.align_command"), Some(tr.t("settings.align_command_hint")), |ui| {
-                let edit = egui::TextEdit::singleline(&mut app.config.align_command)
-                    .hint_text("lrc-align")
-                    .desired_width(ui.available_width().min(260.0));
-                if ui.add(edit).lost_focus() {
-                    app.save_config();
-                }
+                ui.horizontal(|ui| {
+                    let checking = app.align_check_running();
+                    let label = if checking { tr.t("settings.align_checking") } else { tr.t("settings.align_check") };
+                    let button_w = 72.0;
+                    let edit = egui::TextEdit::singleline(&mut app.config.align_command)
+                        .hint_text("lrc-align")
+                        .desired_width((ui.available_width() - button_w - 8.0).clamp(80.0, 220.0));
+                    if ui.add(edit).lost_focus() {
+                        app.save_config();
+                    }
+                    let check = ui.add_enabled(!checking, egui::Button::new(label).min_size(vec2(button_w, 0.0)));
+                    if check.on_hover_text(tr.t("settings.align_check_hint")).clicked() {
+                        app.save_config();
+                        let ctx = ui.ctx().clone();
+                        app.start_align_check(&ctx);
+                    }
+                });
             });
             settings_row(ui, false, tr.t("settings.spectrum"), Some(tr.t("settings.spectrum_hint")), |ui| {
                 if toggle_switch(ui, &mut app.config.show_spectrum).changed() {

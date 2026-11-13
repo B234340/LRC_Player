@@ -152,6 +152,8 @@ pub(crate) struct UiShell {
     pub(crate) fetch_tried: std::collections::HashSet<String>,
     /// Running external lyric-timing job (see `app/lyric_align.rs`).
     pub(crate) align_job: Option<lyric_align::AlignJob>,
+    /// Settings "Check" for the timing command.
+    pub(crate) align_check: Option<Receiver<Result<String, lyric_align::AlignError>>>,
     pub(crate) exclude_input: String,
     /// Last (message, time) toast, to drop identical repeats.
     pub(crate) last_toast: Option<(String, Instant)>,

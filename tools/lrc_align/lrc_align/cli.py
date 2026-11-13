@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 
+from . import __version__
 from .core import estimate_line, is_japanese, parse_lrc, write_lrc
 
 
@@ -39,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Add per-character (karaoke) timing to a line-based LRC by aligning the "
         "lyrics to the vocals of the song.",
     )
+    p.add_argument("--version", action="version", version=f"lrc-align {__version__}")
     p.add_argument("audio", help="audio file (wav/flac/ogg/mp3; other formats need ffmpeg)")
     p.add_argument("lrc", help="line-based .lrc to time")
     p.add_argument("-o", "--output", help="write here instead of replacing LRC (LRC is kept as LRC.bak)")

@@ -86,3 +86,12 @@ def test_cli_reads_shift_jis(tmp_path):
     out = tmp_path / "out.lrc"
     assert main(["x.wav", str(lrc), "--estimate-only", "-o", str(out), "-q"]) == 0
     assert "夜" in out.read_text(encoding="utf-8")
+
+
+def test_version_flag(capsys):
+    import pytest
+
+    with pytest.raises(SystemExit) as e:
+        main(["--version"])
+    assert e.value.code == 0
+    assert capsys.readouterr().out.startswith("lrc-align ")

@@ -338,6 +338,7 @@ impl GuiApp {
                 fonts_rx,
                 drop_rx: None,
                 align_job: None,
+                align_check: None,
                 fetch_job: None,
                 fetch_tried: Default::default(),
                 exclude_input: String::new(),

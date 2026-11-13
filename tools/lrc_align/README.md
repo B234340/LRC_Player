@@ -65,6 +65,29 @@ lrc-align 曲.mp3 曲.lrc --estimate-only   # 音声解析なし（推定のみ�
 再生中の曲で、歌詞コントロールの「⋮」→「音声から文字タイミングを生成」を押します。
 曲と `.lrc` のパスが末尾に付けて実行され、終わると歌詞が読み込み直されます。
 
+## 「lrc-align が見つかりません」と出るとき
+
+`pip install` したのに見つからないのは、多くの場合 **`lrc-align.exe` のあるフォルダーが PATH に入っていない**ためです
+（`pip install --user` や Microsoft Store 版 Python で起きやすい）。
+
+1. 設定 → 歌詞 →「文字タイミング生成コマンド」の **「確認」** を押します。
+   LRC Player は次の順に探し、使えたコマンドを表示します。
+   - 設定したコマンド
+   - Python の Scripts フォルダー（`%APPDATA%\Python\Python3xx\Scripts`、
+     `%LOCALAPPDATA%\Programs\Python\Python3xx\Scripts`、Microsoft Store 版の場所。
+     Linux / macOS では `~/.local/bin`、`~/Library/Python/3.x/bin`）
+   - `py -3 -m lrc_align` → `python -m lrc_align` → `python3 -m lrc_align`
+2. それでも見つからない場合は、インストール済みか確認します。
+   ```sh
+   py -m pip show lrc-align        # 表示されなければ未インストール
+   py -m lrc_align --version       # これが動けば、設定に「py -m lrc_align」と書く
+   where lrc-align                 # PATH 上にあればその場所が表示される
+   ```
+3. 確実な方法は、設定に **`lrc-align.exe` のフルパス**を書くことです
+   （例: `C:\Users\<名前>\AppData\Roaming\Python\Python312\Scripts\lrc-align.exe`。
+   パスに空白があるときは `"` で囲みます）。
+4. PATH を変更した場合は、LRC Player を再起動してください（起動時の PATH が使われます）。
+
 ## テスト
 
 ```sh

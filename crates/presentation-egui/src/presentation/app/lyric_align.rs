@@ -19,7 +19,7 @@ pub(crate) struct AlignJob {
     /// Track the job was started for (the result is ignored if another track plays).
     track: String,
     lrc: PathBuf,
-    rx: Receiver<Result<String, String>>,
+    rx: Receiver<Result<String, AlignError>>,
 }
 
 impl AlignJob {
@@ -70,24 +70,169 @@ fn tail(text: &str, lines: usize) -> String {
     v[v.len().saturating_sub(lines)..].join("\n")
 }
 
-fn run(command: &[String], audio: &Path, lrc: &Path) -> Result<String, String> {
-    let (program, args) = command.split_first().ok_or_else(|| "empty command".to_string())?;
+/// Why the timing command could not be used.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AlignError {
+    /// Neither the configured command nor any fallback could be started (each one tried).
+    NotFound { tried: Vec<String> },
+    /// The tool ran and failed (last lines of its error output).
+    Failed(String),
+}
+
+impl AlignError {
+    fn describe(&self) -> String {
+        match self {
+            AlignError::NotFound { tried } => tried.join(", "),
+            AlignError::Failed(detail) => detail.clone(),
+        }
+    }
+}
+
+/// The configured program is the lrc-align tool itself (so its fallbacks apply).
+fn is_tool_name(program: &str) -> bool {
+    // Either separator, so Windows paths are recognised everywhere.
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    matches!(name.as_str(), "lrc-align" | "lrc-align.exe" | "lrc_align" | "lrc_align.exe")
+}
+
+/// Folders where `pip install` puts console scripts but that are often not on PATH
+/// (user installs, Microsoft Store Python, `~/.local/bin`).
+fn script_dirs(env: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    // Every `<base>/<prefix>*/<suffix>` that exists, newest Python first.
+    let glob = |base: Option<String>, prefix: &str, suffix: &[&str]| -> Vec<PathBuf> {
+        let Some(base) = base else { return Vec::new() };
+        let Ok(entries) = std::fs::read_dir(&base) else { return Vec::new() };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with(prefix))
+            .map(|e| suffix.iter().fold(e.path(), |p, s| p.join(s)))
+            .filter(|p| p.is_dir())
+            .collect();
+        found.sort();
+        found.reverse();
+        found
+    };
+    if cfg!(windows) {
+        dirs.extend(glob(env("APPDATA").map(|a| format!("{a}\\Python")), "python3", &["Scripts"]));
+        dirs.extend(glob(env("LOCALAPPDATA").map(|a| format!("{a}\\Programs\\Python")), "python3", &["Scripts"]));
+        // Microsoft Store Python: ...\Packages\PythonSoftwareFoundation.Python.3.x_*\LocalCache\local-packages\Python3x\Scripts
+        if let Some(local) = env("LOCALAPPDATA") {
+            let packages = format!("{local}\\Packages");
+            if let Ok(entries) = std::fs::read_dir(&packages) {
+                for e in entries.flatten() {
+                    if e.file_name().to_string_lossy().starts_with("PythonSoftwareFoundation.Python.3") {
+                        let base = e.path().join("LocalCache").join("local-packages");
+                        dirs.extend(glob(Some(base.to_string_lossy().into_owned()), "python3", &["Scripts"]));
+                    }
+                }
+            }
+        }
+    } else {
+        if let Some(home) = env("HOME") {
+            let local_bin = PathBuf::from(&home).join(".local").join("bin");
+            if local_bin.is_dir() {
+                dirs.push(local_bin);
+            }
+            dirs.extend(glob(Some(format!("{home}/Library/Python")), "3", &["bin"])); // macOS user installs
+        }
+    }
+    dirs
+}
+
+/// Commands to try in order: the configured one; for the lrc-align tool also the script
+/// folders that are often missing from PATH, then running it as a Python module.
+pub(crate) fn candidates(command: &[String], env: &dyn Fn(&str) -> Option<String>) -> Vec<Vec<String>> {
+    let Some((program, args)) = command.split_first() else { return Vec::new() };
+    let mut out = vec![command.to_vec()];
+    if !is_tool_name(program) {
+        return out;
+    }
+    let exe = if cfg!(windows) { "lrc-align.exe" } else { "lrc-align" };
+    for dir in script_dirs(env) {
+        let path = dir.join(exe);
+        if path.is_file() {
+            out.push(std::iter::once(path.to_string_lossy().into_owned()).chain(args.iter().cloned()).collect());
+        }
+    }
+    let launchers: &[&[&str]] = if cfg!(windows) {
+        &[&["py", "-3"], &["python"], &["python3"]]
+    } else {
+        &[&["python3"], &["python"]]
+    };
+    for launcher in launchers {
+        let mut c: Vec<String> = launcher.iter().map(|s| s.to_string()).collect();
+        c.extend(["-m".to_string(), "lrc_align".to_string()]);
+        c.extend(args.iter().cloned());
+        out.push(c);
+    }
+    out.dedup();
+    out
+}
+
+fn spawn(command: &[String], extra: &[&std::ffi::OsStr]) -> std::io::Result<std::process::Output> {
+    let (program, args) = command.split_first().expect("non-empty candidate");
     let mut cmd = Command::new(program);
-    cmd.args(args).arg(audio).arg(lrc);
+    cmd.args(args).args(extra);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd.output().map_err(|e| format!("{program}: {e}"))?;
+    cmd.output()
+}
+
+fn system_env(key: &str) -> Option<String> {
+    std::env::var(key).ok()
+}
+
+/// Runs the first candidate that exists. Returns the command used and its output.
+fn run_with(
+    command: &[String],
+    extra: &[&std::ffi::OsStr],
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<(String, std::process::Output), AlignError> {
+    let mut tried = Vec::new();
+    for c in candidates(command, env) {
+        let shown = c.join(" ");
+        match spawn(&c, extra) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => tried.push(shown),
+            Err(e) => return Err(AlignError::Failed(format!("{shown}: {e}"))),
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                // A Python without the package: try the next one.
+                if !out.status.success() && stderr.contains("No module named") && stderr.contains("lrc_align") {
+                    tried.push(format!("{shown} (lrc_align not installed)"));
+                    continue;
+                }
+                return Ok((shown, out));
+            }
+        }
+    }
+    Err(AlignError::NotFound { tried })
+}
+
+fn run(command: &[String], audio: &Path, lrc: &Path) -> Result<String, AlignError> {
+    let (_, out) = run_with(command, &[audio.as_os_str(), lrc.as_os_str()], &system_env)?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     if out.status.success() {
         Ok(tail(&stdout, 1))
     } else {
         let detail = tail(&stderr, 3);
-        Err(if detail.is_empty() { format!("exit status {}", out.status) } else { detail })
+        Err(AlignError::Failed(if detail.is_empty() { format!("exit status {}", out.status) } else { detail }))
+    }
+}
+
+/// "Check" button: which command works, and the tool's version.
+fn check(command: &[String], env: &dyn Fn(&str) -> Option<String>) -> Result<String, AlignError> {
+    let (used, out) = run_with(command, &[std::ffi::OsStr::new("--version")], env)?;
+    if out.status.success() {
+        let version = tail(&String::from_utf8_lossy(&out.stdout), 1);
+        Ok(format!("{used} ({version})"))
+    } else {
+        Err(AlignError::Failed(tail(&String::from_utf8_lossy(&out.stderr), 3)))
     }
 }
 
@@ -126,7 +271,7 @@ impl GuiApp {
             wake.request_repaint();
         });
         if let Err(e) = spawned {
-            self.toast_error(tr.f("toast.align_failed", &[&e.to_string()]));
+            self.report_align_error(&AlignError::Failed(e.to_string()));
             return;
         }
         self.ui.align_job = Some(AlignJob { track: self.play_path.clone(), lrc, rx });
@@ -135,6 +280,7 @@ impl GuiApp {
 
     /// Applies a finished timing job (called every frame).
     pub(crate) fn poll_lyric_alignment(&mut self, ctx: &egui::Context) {
+        self.poll_align_check(ctx);
         let Some(job) = &self.ui.align_job else { return };
         let result = match job.rx.try_recv() {
             Ok(r) => r,
@@ -142,7 +288,7 @@ impl GuiApp {
                 ctx.request_repaint_after(Duration::from_millis(500));
                 return;
             }
-            Err(TryRecvError::Disconnected) => Err("worker stopped".to_string()),
+            Err(TryRecvError::Disconnected) => Err(AlignError::Failed("worker stopped".to_string())),
         };
         let job = self.ui.align_job.take().expect("checked");
         let tr = self.tr();
@@ -163,7 +309,67 @@ impl GuiApp {
                 }
                 self.toast_success(tr.f("toast.align_done", &[&summary]));
             }
-            Err(err) => self.toast_error(tr.f("toast.align_failed", &[&err])),
+            Err(err) => self.report_align_error(&err),
+        }
+    }
+
+    fn report_align_error(&mut self, err: &AlignError) {
+        let tr = self.tr();
+        match err {
+            AlignError::NotFound { tried } => {
+                tracing::warn!("lyric timing command not found; tried: {}", tried.join(" | "));
+                self.toast_error(tr.t("toast.align_not_found").to_string());
+            }
+            AlignError::Failed(detail) => {
+                tracing::warn!("lyric timing command failed: {}", err.describe());
+                self.toast_error(tr.f("toast.align_failed", &[detail]));
+            }
+        }
+    }
+
+    /// Settings "Check" button: finds a working command on a worker thread.
+    pub(crate) fn start_align_check(&mut self, ctx: &egui::Context) {
+        if self.ui.align_check.is_some() {
+            return;
+        }
+        let command = split_command(&self.config.align_command);
+        if command.is_empty() {
+            let tr = self.tr();
+            self.toast_warning(tr.t("toast.align_no_command").to_string());
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let wake = ctx.clone();
+        let spawned = std::thread::Builder::new().name("lyric-align-check".into()).spawn(move || {
+            let _ = tx.send(check(&command, &system_env));
+            wake.request_repaint();
+        });
+        if spawned.is_ok() {
+            self.ui.align_check = Some(rx);
+        }
+    }
+
+    pub(crate) fn align_check_running(&self) -> bool {
+        self.ui.align_check.is_some()
+    }
+
+    fn poll_align_check(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.ui.align_check else { return };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(300));
+                return;
+            }
+            Err(TryRecvError::Disconnected) => Err(AlignError::Failed("worker stopped".to_string())),
+        };
+        self.ui.align_check = None;
+        match result {
+            Ok(found) => {
+                let tr = self.tr();
+                self.toast_success(tr.f("toast.align_check_ok", &[&found]));
+            }
+            Err(err) => self.report_align_error(&err),
         }
     }
 }
@@ -183,6 +389,58 @@ mod tests {
         assert_eq!(split_command(r#"echo \"a b\""#), vec!["echo", "\"a", "b\""]);
         assert_eq!(split_command(r#"x """#), vec!["x", ""]);
         assert!(split_command("   ").is_empty());
+    }
+
+    #[test]
+    fn tool_name_gets_fallbacks_other_commands_do_not() {
+        use super::candidates;
+        let none = |_: &str| None;
+        let own = candidates(&["my-aligner".into(), "--fast".into()], &none);
+        assert_eq!(own, vec![vec!["my-aligner".to_string(), "--fast".to_string()]]);
+        let tool = candidates(&["lrc-align".into(), "--model".into(), "medium".into()], &none);
+        assert_eq!(tool[0], vec!["lrc-align", "--model", "medium"]);
+        // Module fallbacks keep the user's options.
+        assert!(tool.iter().any(|c| c.ends_with(&["-m".into(), "lrc_align".into(), "--model".into(), "medium".into()])));
+        assert!(super::is_tool_name(r"C:\Users\me\AppData\Roaming\Python\Python312\Scripts\lrc-align.exe"));
+    }
+
+    /// `lrc-align` not on PATH but in a user script folder: found there.
+    #[cfg(unix)]
+    #[test]
+    fn finds_the_tool_outside_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".local").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("lrc-align");
+        std::fs::write(&exe, "#!/bin/sh\necho 'lrc-align 9.9.9'\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home_s = home.path().to_string_lossy().into_owned();
+        let env = move |k: &str| (k == "HOME").then(|| home_s.clone());
+        // A name that is certainly not on PATH, but is the tool's name.
+        let found = super::check(&["lrc-align".into()], &env).unwrap();
+        assert!(found.contains(".local/bin/lrc-align") && found.contains("9.9.9"), "{found}");
+    }
+
+    /// Nothing anywhere: a NotFound listing what was tried.
+    #[cfg(unix)]
+    #[test]
+    fn reports_not_found_with_what_was_tried() {
+        let env = |_: &str| None;
+        match super::check(&["/nonexistent/dir/lrc-align".into()], &env) {
+            Err(super::AlignError::NotFound { tried }) => {
+                assert_eq!(tried[0], "/nonexistent/dir/lrc-align");
+                assert!(tried.len() >= 2, "{tried:?}");
+            }
+            // The module may really be installed on a developer machine.
+            Ok(_) => {}
+            Err(other) => panic!("{other:?}"),
+        }
+        // Not the tool: no fallbacks.
+        assert_eq!(
+            super::check(&["/nonexistent/other-tool".into()], &env),
+            Err(super::AlignError::NotFound { tried: vec!["/nonexistent/other-tool".into()] })
+        );
     }
 
     #[test]
