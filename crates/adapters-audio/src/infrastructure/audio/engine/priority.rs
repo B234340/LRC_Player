@@ -60,6 +60,16 @@ pub(crate) fn promote_decoder_thread() {
     unix::promote_decoder_thread();
 }
 
+/// Lowers the calling (background analysis) thread below normal priority so it never competes
+/// with decoding/rendering: Windows background mode (low CPU, I/O and memory priority; falls
+/// back to `THREAD_PRIORITY_LOWEST`), nice +10 on Linux/BSD. Best effort.
+pub(crate) fn demote_background_thread() {
+    #[cfg(windows)]
+    win::demote_background_thread();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    unix::demote_background_thread();
+}
+
 #[cfg(windows)]
 mod win {
     use windows_sys::Win32::System::Threading::{
@@ -111,6 +121,17 @@ mod win {
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
         }
     }
+
+    pub(super) fn demote_background_thread() {
+        use windows_sys::Win32::System::Threading::{THREAD_MODE_BACKGROUND_BEGIN, THREAD_PRIORITY_LOWEST};
+        // SAFETY: plain Win32 calls on the current thread's pseudo handle (background mode can
+        // only be entered for the calling thread, which this is).
+        unsafe {
+            if SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) == 0 {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+            }
+        }
+    }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -135,6 +156,14 @@ mod unix {
         // SAFETY: setpriority on the calling thread (tid 0 = caller for PRIO_PROCESS on Linux).
         unsafe {
             let _ = libc::setpriority(libc::PRIO_PROCESS, 0, -4);
+        }
+    }
+
+    pub(super) fn demote_background_thread() {
+        // Raising the nice value needs no privileges.
+        // SAFETY: setpriority on the calling thread (tid 0 = caller for PRIO_PROCESS on Linux).
+        unsafe {
+            let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 10);
         }
     }
 }

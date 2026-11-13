@@ -5,6 +5,7 @@ use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::Sender;
 
+use super::dither::{format_ditherable, quantize, DitherControl, Tpdf};
 use super::priority;
 use super::renderer::Renderer;
 use super::DeviceInfo;
@@ -87,51 +88,89 @@ pub(crate) fn default_output_device_name() -> Option<String> {
         .and_then(|d| d.name().ok())
 }
 
-/// Conversion from the renderer's f32 to a device sample type (rounded, clamped).
+/// Conversion from the renderer's f32 to a device sample type (rounded, clamped, optionally
+/// dithered). Integer scales are 2^(bits-1), the inverse of symphonia's int -> f32 conversion,
+/// so undithered integer sources round-trip bit-exactly.
 trait OutSample: cpal::SizedSample + Send + 'static {
-    fn from_f32(v: f32) -> Self;
+    /// Integer resolution (`None` for float formats).
+    const BITS: Option<u32>;
+    /// `noise_lsb` is TPDF dither in LSB units (0.0 when not dithering).
+    fn from_f32(v: f32, noise_lsb: f64) -> Self;
 }
 
 impl OutSample for f32 {
+    const BITS: Option<u32> = None;
     #[inline]
-    fn from_f32(v: f32) -> Self {
+    fn from_f32(v: f32, _: f64) -> Self {
         v
     }
 }
 impl OutSample for f64 {
+    const BITS: Option<u32> = None;
     #[inline]
-    fn from_f32(v: f32) -> Self {
+    fn from_f32(v: f32, _: f64) -> Self {
         v as f64
     }
 }
 impl OutSample for i16 {
+    const BITS: Option<u32> = Some(16);
     #[inline]
-    fn from_f32(v: f32) -> Self {
-        (v.clamp(-1.0, 1.0) * 32767.0).round() as i16
+    fn from_f32(v: f32, noise_lsb: f64) -> Self {
+        quantize(v, 16, noise_lsb) as i16
     }
 }
 impl OutSample for i32 {
+    const BITS: Option<u32> = Some(32);
     #[inline]
-    fn from_f32(v: f32) -> Self {
-        (v.clamp(-1.0, 1.0) as f64 * 2_147_483_647.0).round() as i32
+    fn from_f32(v: f32, noise_lsb: f64) -> Self {
+        quantize(v, 32, noise_lsb)
     }
 }
 impl OutSample for u16 {
+    const BITS: Option<u32> = Some(16);
     #[inline]
-    fn from_f32(v: f32) -> Self {
-        ((v.clamp(-1.0, 1.0) * 32767.0).round() as i32 + 32768) as u16
+    fn from_f32(v: f32, noise_lsb: f64) -> Self {
+        (quantize(v, 16, noise_lsb) + 32768) as u16
     }
 }
 impl OutSample for i8 {
+    const BITS: Option<u32> = Some(8);
     #[inline]
-    fn from_f32(v: f32) -> Self {
-        (v.clamp(-1.0, 1.0) * 127.0).round() as i8
+    fn from_f32(v: f32, noise_lsb: f64) -> Self {
+        quantize(v, 8, noise_lsb) as i8
     }
 }
 impl OutSample for u8 {
+    const BITS: Option<u32> = Some(8);
     #[inline]
-    fn from_f32(v: f32) -> Self {
-        ((v.clamp(-1.0, 1.0) * 127.0).round() as i32 + 128) as u8
+    fn from_f32(v: f32, noise_lsb: f64) -> Self {
+        (quantize(v, 8, noise_lsb) + 128) as u8
+    }
+}
+
+/// Integer resolution of a `DeviceInfo::sample_format` name (cpal's `SampleFormat` debug
+/// names and the exclusive output's names); `None` for float or unknown formats.
+pub(crate) fn format_effective_bits(name: &str) -> Option<u32> {
+    match name {
+        "I8" | "U8" => Some(8),
+        "I16" | "U16" => Some(16),
+        "I24" | "I24in32" => Some(24),
+        "I32" | "U32" => Some(32),
+        _ => None,
+    }
+}
+
+/// Converts one block of renderer output to device samples, dithering when `dither` is set
+/// (and the format is an integer format of at most 24 bits).
+fn convert_block<T: OutSample>(src: &[f32], dst: &mut [T], tpdf: &mut Tpdf, dither: bool) {
+    if dither && format_ditherable(T::BITS) {
+        for (d, s) in dst.iter_mut().zip(src) {
+            *d = T::from_f32(*s, tpdf.next());
+        }
+    } else {
+        for (d, s) in dst.iter_mut().zip(src) {
+            *d = T::from_f32(*s, 0.0);
+        }
     }
 }
 
@@ -143,6 +182,7 @@ fn build_typed<T: OutSample>(
     config: &cpal::StreamConfig,
     mut renderer: Renderer,
     err_tx: Sender<String>,
+    dither: DitherControl,
 ) -> std::result::Result<cpal::Stream, cpal::BuildStreamError> {
     let ch = renderer.channels();
     let rate = config.sample_rate.0.max(1) as u64;
@@ -153,6 +193,7 @@ fn build_typed<T: OutSample>(
         vec![0.0; SCRATCH_FRAMES * ch]
     };
     let mut prio: Option<priority::AudioThreadGuard> = None;
+    let mut tpdf = Tpdf::seeded_from_clock();
     let data_cb = move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
         if prio.is_none() {
             prio = Some(priority::promote_audio_thread());
@@ -171,14 +212,18 @@ fn build_typed<T: OutSample>(
             renderer.render(out, latency_ns);
             return;
         }
+        let dither_on = dither.active(T::BITS);
         let mut offset = 0usize;
         while offset < data.len() {
             let n = (data.len() - offset).min(scratch.len());
             let lat = latency_ns + (offset / ch) as u64 * 1_000_000_000 / rate;
             renderer.render(&mut scratch[..n], lat);
-            for (d, s) in data[offset..offset + n].iter_mut().zip(&scratch[..n]) {
-                *d = T::from_f32(*s);
-            }
+            convert_block(
+                &scratch[..n],
+                &mut data[offset..offset + n],
+                &mut tpdf,
+                dither_on,
+            );
             offset += n;
         }
     };
@@ -194,16 +239,18 @@ fn build_stream(
     format: cpal::SampleFormat,
     renderer: Renderer,
     err_tx: Sender<String>,
+    dither: DitherControl,
 ) -> Result<cpal::Stream> {
     use cpal::SampleFormat as F;
+    let (d, c, r, e, t) = (device, config, renderer, err_tx, dither);
     let r = match format {
-        F::F32 => build_typed::<f32>(device, config, renderer, err_tx),
-        F::F64 => build_typed::<f64>(device, config, renderer, err_tx),
-        F::I16 => build_typed::<i16>(device, config, renderer, err_tx),
-        F::I32 => build_typed::<i32>(device, config, renderer, err_tx),
-        F::U16 => build_typed::<u16>(device, config, renderer, err_tx),
-        F::I8 => build_typed::<i8>(device, config, renderer, err_tx),
-        F::U8 => build_typed::<u8>(device, config, renderer, err_tx),
+        F::F32 => build_typed::<f32>(d, c, r, e, t),
+        F::F64 => build_typed::<f64>(d, c, r, e, t),
+        F::I16 => build_typed::<i16>(d, c, r, e, t),
+        F::I32 => build_typed::<i32>(d, c, r, e, t),
+        F::U16 => build_typed::<u16>(d, c, r, e, t),
+        F::I8 => build_typed::<i8>(d, c, r, e, t),
+        F::U8 => build_typed::<u8>(d, c, r, e, t),
         other => return Err(anyhow!("unsupported device sample format {other:?}")),
     };
     r.map_err(|e| anyhow!("{e}"))
@@ -217,6 +264,7 @@ pub(crate) fn open_cpal(
     buffer_ms: u32,
     make_renderer: &mut dyn FnMut(u32, u16) -> Renderer,
     err_tx: Sender<String>,
+    dither: &DitherControl,
 ) -> Result<(cpal::Stream, DeviceInfo)> {
     let host = cpal::default_host();
     let mut fell_back = false;
@@ -277,7 +325,15 @@ pub(crate) fn open_cpal(
             buffer_size,
         };
         let renderer = make_renderer(rate, channels);
-        match build_stream(&device, &config, format, renderer, err_tx.clone()) {
+        let built = build_stream(
+            &device,
+            &config,
+            format,
+            renderer,
+            err_tx.clone(),
+            dither.clone(),
+        );
+        match built {
             Ok(stream) => {
                 if let Err(e) = stream.play() {
                     last_err = Some(anyhow!("{name}: {e}"));
@@ -300,6 +356,8 @@ pub(crate) fn open_cpal(
                         sample_format: format!("{format:?}"),
                         buffer_frames,
                         follows_default: preferred.is_none() || fell_back,
+                        exclusive: false,
+                        dither: dither.armed(format_effective_bits(&format!("{format:?}"))),
                     },
                 ));
             }
@@ -310,4 +368,66 @@ pub(crate) fn open_cpal(
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow!("could not open {name}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_sources_round_trip_bit_exactly_without_dither() {
+        let mut t = Tpdf::new(5);
+        let src: Vec<f32> = (i16::MIN..=i16::MAX).map(|s| s as f32 / 32768.0).collect();
+        let mut out = vec![0i16; src.len()];
+        convert_block(&src, &mut out, &mut t, false);
+        assert!(out.iter().zip(i16::MIN..=i16::MAX).all(|(o, s)| *o == s));
+        let mut u = vec![0u16; src.len()];
+        convert_block(&src, &mut u, &mut t, false);
+        assert!(u
+            .iter()
+            .zip(i16::MIN..=i16::MAX)
+            .all(|(o, s)| *o as i32 == s as i32 + 32768));
+        // 32-bit integer output is never dithered and holds every f32 sample exactly.
+        let mut w = vec![0i32; src.len()];
+        convert_block(&src, &mut w, &mut t, true);
+        assert!(w
+            .iter()
+            .zip(i16::MIN..=i16::MAX)
+            .all(|(o, s)| *o == (s as i32) << 16));
+        let src8: Vec<f32> = (i8::MIN..=i8::MAX).map(|s| s as f32 / 128.0).collect();
+        let mut b = vec![0u8; src8.len()];
+        convert_block(&src8, &mut b, &mut t, false);
+        assert!(b.iter().zip(0u8..=255).all(|(o, s)| *o == s));
+        // Full scale clamps instead of wrapping.
+        let mut c = [0i16; 3];
+        convert_block(&[1.5, -1.5, 1.0], &mut c, &mut t, false);
+        assert_eq!(c, [i16::MAX, i16::MIN, i16::MAX]);
+    }
+
+    #[test]
+    fn cpal_integer_formats_dither_only_when_asked() {
+        let mut t = Tpdf::new(5);
+        // 0.3 LSB at 16 bit: silent without dither, audible (on average 0.3) with it.
+        let src = vec![0.3f32 / 32768.0; 50_000];
+        let mut out = vec![0i16; src.len()];
+        convert_block(&src, &mut out, &mut t, false);
+        assert!(out.iter().all(|s| *s == 0));
+        convert_block(&src, &mut out, &mut t, true);
+        let mean = out.iter().map(|s| *s as f64).sum::<f64>() / out.len() as f64;
+        assert!((mean - 0.3).abs() < 0.02, "mean {mean}");
+        assert!(out.iter().all(|s| s.abs() <= 2));
+        // Float output is untouched even when dither is requested.
+        let mut f = vec![0f32; src.len()];
+        convert_block(&src, &mut f, &mut t, true);
+        assert_eq!(f, src);
+    }
+
+    #[test]
+    fn effective_bits_of_format_names() {
+        assert_eq!(format_effective_bits("I16"), Some(16));
+        assert_eq!(format_effective_bits("U8"), Some(8));
+        assert_eq!(format_effective_bits("I24in32"), Some(24));
+        assert_eq!(format_effective_bits("I32"), Some(32));
+        assert_eq!(format_effective_bits("F32"), None);
+    }
 }

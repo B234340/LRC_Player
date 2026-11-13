@@ -4,18 +4,26 @@
 //! engine thread through three lock-free SPSC queues ([`Feeder`]):
 //! - `samples`: interleaved f32 at the device rate/channel count;
 //! - `markers`: positional events keyed by absolute sample index (`TrackStart`, `End`);
-//! - `cmds`: immediate commands (`Flush`, `SetPaused`, `SetEq`).
+//! - `cmds`: immediate commands (`Flush`, `SetPaused`, DSP settings, per-track gains).
 //!
 //! The renderer never allocates, never locks, and never makes syscalls (apart from reading the
 //! monotonic clock, which is vDSO / QueryPerformanceCounter). It owns the transport envelope
-//! (fade in/out for pause/resume/seek/flush/underrun), smoothed volume and mute, the EQ and
-//! limiter, sample-accurate position bookkeeping, and the spectrum tap.
+//! (fade in/out for pause/resume/seek/flush/underrun), smoothed volume and mute, the
+//! per-track normalization gain, the filter chain and limiter, sample-accurate position
+//! bookkeeping, and the spectrum tap.
+//!
+//! Per-sample chain: `x * norm` -> graphic EQ (+preamp) -> parametric EQ (+preamp) ->
+//! crossfeed -> auto headroom -> `* fade envelope * volume` -> limiter (soft knee whenever
+//! anything can boost, else a hard clamp that is the identity inside ±1). With every stage
+//! off/unity the samples pass bit-exactly.
 //!
 //! Click protection: every transport change is a gain ramp on the real signal (pause, resume,
 //! flush, starvation, priming). Where audio stops before a ramp can complete (the ring ran dry
 //! exactly at a callback boundary, a flush with too little stale audio left, the end of the
 //! last track on a non-zero sample) a short *declick tail* - a linear ramp from the last output
-//! value to zero - is mixed in, so the output never steps. EQ changes are crossfaded.
+//! value to zero - is mixed in, so the output never steps. Filter-chain changes are
+//! crossfaded; normalization changes on the audible track are ramped (~300 ms) and switch
+//! sample-exactly at gapless boundaries (the gain is keyed by track sequence number).
 
 use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -23,7 +31,9 @@ use std::time::Instant;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use super::dsp::{hard_limit, soft_limit, EqCoeffs, EqState};
+use super::crossfeed::CrossfeedCoeffs;
+use super::dsp::{hard_limit, soft_limit, soft_limit_engaged, ChainCoeffs, ChainState, EqCoeffs};
+use super::peq::PeqCoeffs;
 
 /// Positional marker. `at` is an absolute index into the sample stream (in samples, i.e.
 /// frames * channels) counted from the creation of the ring.
@@ -55,6 +65,9 @@ impl Marker {
 }
 
 /// Immediate command for the renderer.
+// The filter coefficients travel by value (~0.5 KB) on purpose: boxing them would allocate on
+// the engine thread and free in the audio callback.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RtCommand {
     /// Fade out, then discard everything before sample index `until` and switch to `gen`.
@@ -64,6 +77,17 @@ pub(crate) enum RtCommand {
     },
     SetPaused(bool),
     SetEq(EqCoeffs),
+    SetPeq(PeqCoeffs),
+    SetCrossfeed(CrossfeedCoeffs),
+    /// Linear auto-headroom gain.
+    SetHeadroom(f32),
+    /// Normalization gain (linear) and resampling flag of track `seq`. Applied exactly at the
+    /// track's `TrackStart`; for the audible track the gain ramps to the new value.
+    SetTrackParams {
+        seq: u64,
+        gain: f32,
+        resampled: bool,
+    },
 }
 
 /// Seqlock-protected playback clock published by the renderer.
@@ -263,6 +287,15 @@ pub(crate) struct RtShared {
     /// Index of the processed `End` marker + 1 (0 = none).
     pub(crate) ended_at: AtomicU64,
     pub(crate) tap: SpectrumTap,
+    /// The signal is being altered (gain != 1, EQ, resampling, fades...): integer output
+    /// formats are dithered only while this is set, so untouched audio stays bit-perfect.
+    /// Written by the renderer at the end of every callback: true when any sample rendered in
+    /// that callback was changed (any gain != 1 incl. fades/volume/normalization/headroom, an
+    /// active EQ/PEQ/crossfeed or crossfade, a resampled track, the declick tail, or the
+    /// limiter); false for untouched audio and for pure silence.
+    pub(crate) processing_active: AtomicBool,
+    /// `now_ns()` of the last callback in which the limiter changed samples (0 = never).
+    pub(crate) limiter_ns: AtomicU64,
 }
 
 impl RtShared {
@@ -279,6 +312,8 @@ impl RtShared {
             ended_gen: AtomicU64::new(0),
             ended_at: AtomicU64::new(0),
             tap: SpectrumTap::new(8192),
+            processing_active: AtomicBool::new(false),
+            limiter_ns: AtomicU64::new(0),
         }
     }
 
@@ -311,6 +346,19 @@ pub(crate) struct RenderConfig {
 }
 
 const LOCAL_MARKERS: usize = 64;
+/// Tracks whose parameters the renderer remembers (the audible one plus queued successors).
+const TRACK_PARAMS: usize = 16;
+/// Largest frame (channels) crossfaded sample-by-sample between two filter chains; wider
+/// devices switch chains without a crossfade.
+const XFADE_MAX_CHANNELS: usize = 32;
+
+/// Per-track parameters keyed by sequence number (0 = empty slot).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TrackParams {
+    seq: u64,
+    gain: f32,
+    resampled: bool,
+}
 const CMD_QUEUE: usize = 256;
 const MARKER_QUEUE: usize = 256;
 
@@ -511,12 +559,25 @@ pub(crate) fn new_pair(cfg: RenderConfig, shared: Arc<RtShared>) -> (Feeder, Ren
         vol: f32::NAN,
         // One-pole smoother, ~10 ms time constant.
         vol_coef: 1.0 - (-1.0 / (cfg.rate.max(1) as f32 * 0.010)).exp(),
-        eq: EqState::new(),
-        eq_old: EqState::new(),
-        eq_xfade_left: 0,
-        // ~20 ms crossfade between the old and new EQ (both filters run meanwhile).
-        eq_xfade_len: (cfg.rate as usize / 50).max(1),
-        eq_pending: None,
+        fx: ChainState::new(),
+        fx_old: ChainState::new(),
+        fx_target: ChainCoeffs::BYPASS,
+        fx_xfade_left: 0,
+        // ~20 ms crossfade between the old and new chain (both run meanwhile).
+        fx_xfade_len: (cfg.rate as usize / 50).max(1),
+        params: [TrackParams {
+            seq: 0,
+            gain: 1.0,
+            resampled: false,
+        }; TRACK_PARAMS],
+        norm: 1.0,
+        norm_target: 1.0,
+        norm_step: 0.0,
+        // ~300 ms normalization ramp.
+        norm_ramp: (cfg.rate as usize * 3 / 10).max(1),
+        resampled: false,
+        touched: false,
+        limited: false,
         track_seq: 0,
         base: 0,
         track_pos: 0,
@@ -555,13 +616,26 @@ pub struct Renderer {
     fade_frames: usize,
     vol: f32,
     vol_coef: f32,
-    eq: EqState,
-    /// Previous EQ (with its filter state) while crossfading to `eq`.
-    eq_old: EqState,
-    eq_xfade_left: usize,
-    eq_xfade_len: usize,
-    /// Latest EQ received during a crossfade; applied when it completes.
-    eq_pending: Option<EqCoeffs>,
+    /// Filter chain (graphic EQ, parametric EQ, crossfeed, headroom).
+    fx: ChainState,
+    /// Previous chain (with its filter state) while crossfading to `fx`.
+    fx_old: ChainState,
+    /// Chain requested by the engine thread; `fx` follows it (crossfaded) when they differ.
+    fx_target: ChainCoeffs,
+    fx_xfade_left: usize,
+    fx_xfade_len: usize,
+    params: [TrackParams; TRACK_PARAMS],
+    /// Normalization gain (linear) of the audible track, ramping towards `norm_target`.
+    norm: f32,
+    norm_target: f32,
+    norm_step: f32,
+    norm_ramp: usize,
+    /// The audible track is resampled (for `processing_active`).
+    resampled: bool,
+    /// Some sample of this callback was changed (published as `processing_active`).
+    touched: bool,
+    /// The limiter changed some sample of this callback.
+    limited: bool,
     track_seq: u64,
     base: u64,
     track_pos: u64,
@@ -608,28 +682,100 @@ impl Renderer {
             match cmd {
                 RtCommand::Flush { gen, until } => self.pending_flush = Some((gen, until)),
                 RtCommand::SetPaused(p) => self.paused = p,
-                RtCommand::SetEq(c) => self.set_eq(c),
+                RtCommand::SetEq(c) => self.fx_target.eq = c,
+                RtCommand::SetPeq(c) => self.fx_target.peq = c,
+                RtCommand::SetCrossfeed(c) => self.fx_target.xfeed = c,
+                RtCommand::SetHeadroom(g) => {
+                    self.fx_target.headroom = if g.is_finite() {
+                        g.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    }
+                }
+                RtCommand::SetTrackParams {
+                    seq,
+                    gain,
+                    resampled,
+                } => self.set_track_params(seq, gain, resampled),
             }
+        }
+        self.update_chain();
+    }
+
+    /// Moves the filter chain towards `fx_target`. While audio is audible the old and new
+    /// chains are crossfaded (a hard coefficient/gain switch is an audible click); while silent
+    /// it switches at once. A target arriving during a crossfade is applied after it.
+    fn update_chain(&mut self) {
+        if self.fx_xfade_left > 0 || *self.fx.coeffs() == self.fx_target {
+            return;
+        }
+        if self.mode != Mode::Playing || self.env <= 0.0 || self.ch > XFADE_MAX_CHANNELS {
+            self.fx.set(self.fx_target);
+            return;
+        }
+        self.fx_old = self.fx;
+        self.fx.set(self.fx_target);
+        self.fx_xfade_left = self.fx_xfade_len;
+    }
+
+    fn set_track_params(&mut self, seq: u64, gain: f32, resampled: bool) {
+        let gain = if gain.is_finite() && gain >= 0.0 {
+            gain
+        } else {
+            1.0
+        };
+        let p = TrackParams {
+            seq,
+            gain,
+            resampled,
+        };
+        // Update in place, else replace the oldest (smallest seq: sequence numbers only grow).
+        let slot = match self.params.iter().position(|t| t.seq == seq) {
+            Some(i) => i,
+            None => {
+                let mut oldest = 0;
+                for (i, t) in self.params.iter().enumerate() {
+                    if t.seq < self.params[oldest].seq {
+                        oldest = i;
+                    }
+                }
+                oldest
+            }
+        };
+        self.params[slot] = p;
+        if seq == self.track_seq {
+            self.resampled = resampled;
+            self.ramp_norm(gain);
         }
     }
 
-    /// Switches the EQ. While audio is audible the old and new filters are crossfaded (a hard
-    /// coefficient/preamp switch is an audible click); while silent it switches at once.
-    fn set_eq(&mut self, c: EqCoeffs) {
-        if self.eq_xfade_left > 0 {
-            self.eq_pending = Some(c);
-            return;
-        }
-        if *self.eq.coeffs() == c {
-            return;
-        }
+    /// Ramps the audible track's normalization gain to `gain` (at once while silent).
+    fn ramp_norm(&mut self, gain: f32) {
+        self.norm_target = gain;
         if self.mode != Mode::Playing || self.env <= 0.0 {
-            self.eq.set(c);
-            return;
+            self.norm = gain;
+            self.norm_step = 0.0;
+        } else {
+            self.norm_step = (gain - self.norm) / self.norm_ramp as f32;
         }
-        self.eq_old = self.eq;
-        self.eq.set(c);
-        self.eq_xfade_left = self.eq_xfade_len;
+    }
+
+    /// A new track starts at this sample: its gain applies from here on, without a ramp.
+    fn enter_track(&mut self, seq: u64) {
+        let p = self
+            .params
+            .iter()
+            .find(|t| t.seq == seq)
+            .copied()
+            .unwrap_or(TrackParams {
+                seq,
+                gain: 1.0,
+                resampled: false,
+            });
+        self.norm = p.gain;
+        self.norm_target = p.gain;
+        self.norm_step = 0.0;
+        self.resampled = p.resampled;
     }
 
     /// Records that audio stops abruptly at frame `k` of `out` (a declick tail starts there).
@@ -741,6 +887,7 @@ impl Renderer {
                     self.track_seq = seq;
                     self.base = base_frames;
                     self.track_pos = base_frames;
+                    self.enter_track(seq);
                     if self.mode == Mode::Ended {
                         self.mode = Mode::Priming;
                     }
@@ -827,6 +974,8 @@ impl Renderer {
         let tail = if starving { n.min(self.fade_frames) } else { 0 };
         let tail_start = n - tail;
         let inv_ch = 1.0 / ch as f32;
+        let mut touched = self.resampled;
+        let mut limited = false;
         for i in 0..n {
             if i >= tail_start {
                 self.env = (self.env - self.env_step).max(0.0);
@@ -836,50 +985,92 @@ impl Renderer {
                 self.env = (self.env - self.env_step).max(target);
             }
             if self.vol != vol_target {
-                self.vol += (vol_target - self.vol) * self.vol_coef;
-                if (self.vol - vol_target).abs() < 1.0e-5 {
-                    self.vol = vol_target;
+                let next = self.vol + (vol_target - self.vol) * self.vol_coef;
+                // Near the target the f32 increment rounds away (the smoother would stall a
+                // few 1e-5 short forever, so volume 1.0 would never be exact again): snap.
+                self.vol = if next == self.vol || (next - vol_target).abs() < 1.0e-5 {
+                    vol_target
+                } else {
+                    next
+                };
+            }
+            if self.norm != self.norm_target {
+                self.norm += self.norm_step;
+                let done = if self.norm_step > 0.0 {
+                    self.norm >= self.norm_target
+                } else {
+                    self.norm <= self.norm_target
+                };
+                if done || self.norm_step == 0.0 {
+                    self.norm = self.norm_target;
                 }
             }
             let g = self.env * self.vol;
-            let xfade = self.eq_xfade_left > 0;
-            let eq_active = self.eq.active();
-            let soft = xfade || eq_active || vol_target > 1.0 || self.vol > 1.0;
+            let pre = self.norm;
+            let xfade = self.fx_xfade_left > 0;
+            let fx_active = self.fx.active();
+            let soft = xfade
+                || fx_active
+                || vol_target > 1.0
+                || self.vol > 1.0
+                || pre > 1.0
+                || self.norm_target > 1.0;
+            touched |= xfade || fx_active || g != 1.0 || pre != 1.0;
             let frame = &mut dst[i * ch..(i + 1) * ch];
             let mut mono = 0.0f32;
             if xfade {
-                let a = 1.0 - self.eq_xfade_left as f32 / self.eq_xfade_len as f32;
-                let (pa, pb) = (self.eq_old.preamp(), self.eq.preamp());
-                for (c, s) in frame.iter_mut().enumerate() {
-                    let yo = self.eq_old.process(c, *s) * pa;
-                    let yn = self.eq.process(c, *s) * pb;
-                    let y = soft_limit((yo + (yn - yo) * a) * g);
+                let a = 1.0 - self.fx_xfade_left as f32 / self.fx_xfade_len as f32;
+                let mut old = [0.0f32; XFADE_MAX_CHANNELS];
+                let old = &mut old[..ch];
+                for (o, s) in old.iter_mut().zip(frame.iter_mut()) {
+                    *s *= pre;
+                    *o = *s;
+                }
+                self.fx_old.process_frame(old);
+                self.fx.process_frame(frame);
+                for (s, yo) in frame.iter_mut().zip(old.iter()) {
+                    let x = (yo + (*s - yo) * a) * g;
+                    limited |= soft_limit_engaged(x);
+                    let y = soft_limit(x);
                     *s = y;
                     mono += y;
                 }
-                self.eq_xfade_left -= 1;
-                if self.eq_xfade_left == 0 {
-                    if let Some(p) = self.eq_pending.take() {
-                        self.set_eq(p);
-                    }
+                self.fx_xfade_left -= 1;
+                if self.fx_xfade_left == 0 {
+                    self.update_chain();
                 }
-            } else if eq_active {
-                let pre = self.eq.preamp();
-                for (c, s) in frame.iter_mut().enumerate() {
-                    let y = soft_limit(self.eq.process(c, *s) * pre * g);
+            } else if fx_active {
+                if pre != 1.0 {
+                    frame.iter_mut().for_each(|s| *s *= pre);
+                }
+                self.fx.process_frame(frame);
+                for s in frame.iter_mut() {
+                    let x = *s * g;
+                    limited |= soft_limit_engaged(x);
+                    let y = soft_limit(x);
                     *s = y;
                     mono += y;
                 }
             } else {
+                // `g * 1.0 == g` exactly: unity normalization keeps this path bit-exact.
+                let g = g * pre;
                 for s in frame.iter_mut() {
-                    let y = *s * g;
-                    let y = if soft { soft_limit(y) } else { hard_limit(y) };
+                    let x = *s * g;
+                    let y = if soft {
+                        limited |= soft_limit_engaged(x);
+                        soft_limit(x)
+                    } else {
+                        limited |= x.abs() > 1.0;
+                        hard_limit(x)
+                    };
                     *s = y;
                     mono += y;
                 }
             }
             self.tap_write(mono * inv_ch);
         }
+        self.touched |= touched || limited;
+        self.limited |= limited;
     }
 
     /// Renders interleaved device samples into `out`. `latency_ns` is the time from now until
@@ -889,8 +1080,12 @@ impl Renderer {
         let frames = out.len() / ch;
         self.shared.callbacks.fetch_add(1, Ordering::Relaxed);
         let now_ns = self.shared.now_ns();
-        self.drain_commands();
+        // Markers first: every command the engine thread queued before a marker we hold (e.g.
+        // a track's gain before its `TrackStart`) is then visible to `drain_commands`.
         self.pull_markers();
+        self.drain_commands();
+        self.touched = false;
+        self.limited = false;
 
         let muted = self.shared.muted.load(Ordering::Relaxed);
         let vol_target = if muted { 0.0 } else { self.shared.volume() };
@@ -999,7 +1194,18 @@ impl Renderer {
             self.last_raw
                 .copy_from_slice(&out[(frames - 1) * ch..frames * ch]);
         }
+        if self.tail_left > 0 || self.cut_at.is_some() {
+            self.touched = true;
+        }
         self.mix_tail(out, frames);
+        self.shared
+            .processing_active
+            .store(self.touched, Ordering::Relaxed);
+        if self.limited {
+            self.shared
+                .limiter_ns
+                .store(now_ns.max(1), Ordering::Relaxed);
+        }
         self.shared
             .tap
             .inner
