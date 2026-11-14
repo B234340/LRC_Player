@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use eframe::egui::{self, epaint::text::VariationCoords, Context, FontData, FontDefinitions, FontFamily, FontTweak};
+use eframe::egui::{epaint::text::VariationCoords, Context, FontData, FontDefinitions, FontFamily, FontTweak};
 use fontdb::{Database, Family, Query, Source, Stretch, Style, Weight, ID};
 use skrifa::{
     instance::{LocationRef, Size},
@@ -162,21 +162,11 @@ pub struct FontReport {
     pub korean_bold: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-struct FontsInstalled {
-    bold: bool,
-    /// Pass in which `set_fonts` was called; the fonts are live from the next pass on.
-    pass: u64,
-}
-
-fn installed_id() -> egui::Id {
-    egui::Id::new("lrc_ui_fonts_installed")
-}
-
-/// Whether the bold family is registered *and active* (used by `theme::bold_family`).
-pub fn bold_available(ctx: &Context) -> bool {
-    ctx.data(|d| d.get_temp::<FontsInstalled>(installed_id()))
-        .is_some_and(|f| f.bold && ctx.cumulative_pass_nr() > f.pass)
+/// Whether the bold family is registered *and active* in the pass being run (used by
+/// `theme::bold_family`). Decided from the fonts the pass actually uses, so fonts installed
+/// before the first pass (startup) are bold-ready on the very first frame.
+pub fn bold_available(_ctx: &Context) -> bool {
+    text::bold_active()
 }
 
 /// A face picked from the database: font-data key plus shared bytes.
@@ -355,14 +345,9 @@ pub fn build_definitions_for(extra_dirs: &[&Path], platform: FontPlatform) -> (F
 /// per-pass tracker that lets [`super::text`] use the per-language families once they are live,
 /// and tells language detection which Japanese font is installed.
 pub fn install_definitions(ctx: &Context, defs: FontDefinitions) {
-    let bold = defs
-        .families
-        .contains_key(&FontFamily::Name(BOLD_FAMILY.into()));
     text::set_japanese_face(japanese_face(&defs));
     ctx.set_fonts(defs);
     text::register(ctx);
-    let pass = ctx.cumulative_pass_nr();
-    ctx.data_mut(|d| d.insert_temp(installed_id(), FontsInstalled { bold, pass }));
 }
 
 /// Build and install in one go. The bold family becomes usable on the next frame; call

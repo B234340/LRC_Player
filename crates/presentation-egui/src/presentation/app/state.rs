@@ -157,7 +157,30 @@ pub fn initial_window() -> Option<WindowStateDto> {
 impl GuiApp {
     /// The real application (persistent state, audio engine, system fonts).
     pub fn new(cc: &CreationContext<'_>) -> Self {
-        Self::with_options(&cc.egui_ctx, AppOptions::default())
+        let mut app = Self::with_options(&cc.egui_ctx, AppOptions::default());
+        app.wait_for_fonts(&cc.egui_ctx);
+        app
+    }
+
+    /// Installs the system fonts before the first frame. eframe keeps the window hidden until
+    /// that frame is painted, so waiting here avoids a first frame drawn with the built-in
+    /// fonts (no Japanese glyphs) that is then redrawn: a visible flash at startup. The fonts
+    /// were being built on the worker while the rest of the app started; if that takes
+    /// unusually long, the window opens anyway and they are installed when ready.
+    fn wait_for_fonts(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.ui.fonts_rx else { return };
+        let started = std::time::Instant::now();
+        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(defs) => {
+                crate::presentation::ui::fonts::install_definitions(ctx, defs);
+                self.ui.fonts_rx = None;
+                tracing::debug!("fonts ready after {:?} at startup", started.elapsed());
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => self.ui.fonts_rx = None,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                tracing::warn!("fonts not ready after 3 s; opening the window without them");
+            }
+        }
     }
 
     /// Builds the app with explicit options (tests and screenshots use temp data).
