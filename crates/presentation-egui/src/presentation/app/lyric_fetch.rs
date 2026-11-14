@@ -4,6 +4,9 @@
 //! lyrics discovery found nothing), or on demand from the "Search online" button. The found
 //! LRC is saved next to the audio file (`song.lrc`), or in the app's data folder when that is
 //! not possible (then attached to the track), and loaded right away.
+//!
+//! The query building ([`track_query`]), saving ([`outcome_of`] / [`save_lrc`]) and installing
+//! ([`GuiApp::install_fetched_lyrics`]) are shared with the bulk download (`lyric_batch.rs`).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -30,7 +33,7 @@ pub(crate) struct FetchJob {
 }
 
 /// Folder for lyrics that cannot be written next to the audio.
-fn data_lyrics_dir() -> Option<PathBuf> {
+pub(crate) fn data_lyrics_dir() -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join("data").join("lyrics"))
 }
 
@@ -65,6 +68,30 @@ pub(crate) fn save_lrc(audio: &Path, lrc: &str, fallback_dir: Option<&Path>) -> 
     Ok((path, true))
 }
 
+/// LRCLIB query for a track: its title (the file name when there is no title tag), artist,
+/// album and duration.
+pub(crate) fn track_query(path: &str, title: Option<&str>, artist: Option<&str>, album: Option<&str>, duration_ms: Option<u64>) -> LrclibQuery {
+    let stem = || Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    LrclibQuery {
+        title: title.filter(|t| !t.trim().is_empty()).map_or_else(stem, str::to_owned),
+        artist: artist.unwrap_or_default().to_owned(),
+        album: album.unwrap_or_default().to_owned(),
+        duration_ms,
+    }
+}
+
+/// Turns a lookup result into an outcome; found synced lyrics are written with [`save_lrc`].
+pub(crate) fn outcome_of(result: LrclibResult, audio: &Path, fallback_dir: Option<&Path>) -> Result<FetchOutcome, String> {
+    match result {
+        LrclibResult::Synced { lrc, word_sync } => {
+            save_lrc(audio, &lrc, fallback_dir).map(|(path, attached)| FetchOutcome::Saved { path, word_sync, attached })
+        }
+        LrclibResult::Instrumental => Ok(FetchOutcome::Instrumental),
+        LrclibResult::PlainOnly => Ok(FetchOutcome::PlainOnly),
+        LrclibResult::NotFound => Ok(FetchOutcome::NotFound),
+    }
+}
+
 impl GuiApp {
     pub(crate) fn lyrics_fetch_running(&self) -> bool {
         self.ui.fetch_job.as_ref().is_some_and(|j| j.track == self.play_path)
@@ -72,12 +99,30 @@ impl GuiApp {
 
     /// The query for the playing track (file name when there is no title tag).
     fn lyrics_query(&self) -> LrclibQuery {
-        let stem = Path::new(&self.play_path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        LrclibQuery {
-            title: self.play_title.clone().filter(|t| !t.trim().is_empty()).unwrap_or(stem),
-            artist: self.play_artist.clone().unwrap_or_default(),
-            album: self.play_album.clone().unwrap_or_default(),
-            duration_ms: self.play_duration_ms,
+        track_query(
+            &self.play_path,
+            self.play_title.as_deref(),
+            self.play_artist.as_deref(),
+            self.play_album.as_deref(),
+            self.play_duration_ms,
+        )
+    }
+
+    /// Where downloaded lyrics go when they cannot be written beside the audio (none without
+    /// persistence, e.g. in tests).
+    pub(crate) fn lyrics_fallback_dir(&self) -> Option<PathBuf> {
+        if self.persist { data_lyrics_dir() } else { None }
+    }
+
+    /// Records a downloaded LRC for `track`: attached when it lives outside the audio folder,
+    /// and loaded right away when `track` is playing.
+    pub(crate) fn install_fetched_lyrics(&mut self, track: &str, path: &Path, attached: bool) {
+        if attached {
+            self.lyrics_overrides.insert(track.to_string(), path.to_string_lossy().into_owned());
+            self.save_state();
+        }
+        if track == self.play_path {
+            self.set_lyrics_candidates(Lyrics::rank_candidates([path.to_path_buf()]));
         }
     }
 
@@ -89,16 +134,12 @@ impl GuiApp {
         self.ui.fetch_tried.insert(self.play_path.clone());
         let query = self.lyrics_query();
         let audio = PathBuf::from(&self.play_path);
-        let fallback = if self.persist { data_lyrics_dir() } else { None };
+        let fallback = self.lyrics_fallback_dir();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let wake = ctx.clone();
         let spawned = std::thread::Builder::new().name("lyrics-fetch".into()).spawn(move || {
             let outcome = match lrclib_fetch(&query) {
-                Ok(LrclibResult::Synced { lrc, word_sync }) => save_lrc(&audio, &lrc, fallback.as_deref())
-                    .map(|(path, attached)| FetchOutcome::Saved { path, word_sync, attached }),
-                Ok(LrclibResult::Instrumental) => Ok(FetchOutcome::Instrumental),
-                Ok(LrclibResult::PlainOnly) => Ok(FetchOutcome::PlainOnly),
-                Ok(LrclibResult::NotFound) => Ok(FetchOutcome::NotFound),
+                Ok(result) => outcome_of(result, &audio, fallback.as_deref()),
                 Err(e) => Err(format!("{e:#}")),
             };
             let _ = tx.send(outcome);
@@ -139,13 +180,7 @@ impl GuiApp {
         let tr = self.tr();
         match result {
             Ok(FetchOutcome::Saved { path, word_sync, attached }) => {
-                if attached {
-                    self.lyrics_overrides.insert(track.to_string(), path.to_string_lossy().into_owned());
-                    self.save_state();
-                }
-                if track == self.play_path {
-                    self.set_lyrics_candidates(Lyrics::rank_candidates([path.clone()]));
-                }
+                self.install_fetched_lyrics(track, &path, attached);
                 let key = if word_sync { "toast.lyrics_fetched_words" } else { "toast.lyrics_fetched" };
                 self.toast_success(tr.t(key).to_string());
             }
@@ -173,6 +208,13 @@ impl GuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_falls_back_to_the_file_name() {
+        let q = track_query("/m/01 Song.flac", Some("  "), Some("Artist"), None, Some(200_000));
+        assert_eq!(q, LrclibQuery { title: "01 Song".into(), artist: "Artist".into(), album: String::new(), duration_ms: Some(200_000) });
+        assert_eq!(track_query("/m/x.flac", Some("Title"), None, Some("Album"), None).title, "Title");
+    }
 
     #[test]
     fn saves_beside_the_audio_without_replacing_anything() {

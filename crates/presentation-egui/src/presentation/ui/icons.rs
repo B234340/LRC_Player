@@ -68,6 +68,14 @@ pub enum Icon {
     Edit,
     /// Waveform (signal path / sound quality).
     Waveform,
+    /// Floating lyrics bar over a screen (desktop lyrics window).
+    DesktopLyrics,
+    /// Closed padlock (desktop lyrics click-through).
+    Lock,
+    /// Open padlock.
+    Unlock,
+    /// Window with an arrow out of it (bring the main window to the front).
+    OpenWindow,
 }
 
 impl Icon {
@@ -479,6 +487,45 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             seg(painter, g.p(12.0, 4.0), g.p(12.0, 15.0), st);
             polyline(painter, g.pts(&[(7.0, 10.5), (12.0, 15.5), (17.0, 10.5)]), st);
             seg(painter, g.p(5.5, 19.5), g.p(18.5, 19.5), st);
+        }
+        Icon::DesktopLyrics => {
+            // A screen with a stand, and a lyric bar floating over its lower half: one line
+            // half "sung" (thicker), one shorter line under it.
+            painter.rect_stroke(
+                Rect::from_min_max(g.p(3.0, 3.5), g.p(21.0, 16.5)),
+                g.s(2.2),
+                st,
+                egui::StrokeKind::Middle,
+            );
+            seg(painter, g.p(12.0, 16.5), g.p(12.0, 20.0), st);
+            seg(painter, g.p(8.0, 20.5), g.p(16.0, 20.5), st);
+            seg(painter, g.p(7.0, 8.5), g.p(12.0, 8.5), Stroke::new(w * 1.35, color));
+            seg(painter, g.p(12.0, 8.5), g.p(17.0, 8.5), Stroke::new(w * 0.7, color));
+            seg(painter, g.p(9.0, 12.0), g.p(15.0, 12.0), Stroke::new(w * 0.7, color));
+        }
+        Icon::Lock | Icon::Unlock => {
+            rrect(5.5, 10.5, 18.5, 20.0, 2.2);
+            let ink = theme::on_color(color);
+            painter.circle_filled(g.p(12.0, 14.6), g.s(1.5), ink);
+            seg(painter, g.p(12.0, 15.0), g.p(12.0, 17.2), Stroke::new(w * 0.9, ink));
+            let (l, r) = (8.5, 15.5);
+            if icon == Icon::Lock {
+                let mut shackle = vec![g.p(l, 10.5)];
+                shackle.extend(arc(g.p(12.0, 7.5), g.s(3.5), PI, TAU, 14));
+                shackle.push(g.p(r, 10.5));
+                polyline(painter, shackle, st);
+            } else {
+                // Shackle lifted out of the body on the right.
+                let mut shackle = vec![g.p(l, 10.5)];
+                shackle.extend(arc(g.p(12.0, 5.5), g.s(3.5), PI, TAU, 14));
+                shackle.push(g.p(r, 7.0));
+                polyline(painter, shackle, st);
+            }
+        }
+        Icon::OpenWindow => {
+            polyline(painter, g.pts(&[(11.0, 4.5), (6.0, 4.5), (4.5, 6.0), (4.5, 18.0), (6.0, 19.5), (18.0, 19.5), (19.5, 18.0), (19.5, 13.0)]), st);
+            seg(painter, g.p(11.0, 13.0), g.p(19.5, 4.5), st);
+            polyline(painter, g.pts(&[(14.0, 4.5), (19.5, 4.5), (19.5, 10.0)]), st);
         }
     }
 }

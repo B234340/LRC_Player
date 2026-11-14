@@ -307,6 +307,8 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                     favorite: Some(false),
                     quality: Some(crate::presentation::ui::views::QualityBadge::Untouched),
                     signal_open: false,
+                    desktop_lyrics: false,
+                    desktop_lyrics_locked: false,
                     tr,
                 },
             );
@@ -363,6 +365,7 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                             can_char_shift: true,
                             can_generate_timing: false,
                             generating_timing: false,
+                            desktop_lyrics: false,
                             tr,
                         },
                         &mut s.lyrics,
@@ -408,6 +411,7 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                         can_char_shift: true,
                         can_generate_timing: false,
                         generating_timing: false,
+                        desktop_lyrics: false,
                         tr,
                     }),
                     favorite: Some(true),
@@ -617,6 +621,8 @@ fn transport_widths() {
                         favorite: Some(false),
                         quality: Some(crate::presentation::ui::views::QualityBadge::Untouched),
                         signal_open: false,
+                        desktop_lyrics: false,
+                        desktop_lyrics_locked: false,
                         tr: Tr::JA,
                     },
                 );
@@ -798,4 +804,5 @@ const ALL_ICONS: &[Icon] = &[
     Icon::ChevronDown, Icon::ChevronUp, Icon::Check, Icon::Trash, Icon::Refresh, Icon::Grip,
     Icon::SidebarToggle, Icon::Save, Icon::Info, Icon::Warning, Icon::Error, Icon::Success,
     Icon::TextSmaller, Icon::TextLarger, Icon::Undo, Icon::ArrowDownToLine, Icon::Speaker, Icon::Edit, Icon::Waveform,
+    Icon::DesktopLyrics, Icon::Lock, Icon::Unlock, Icon::OpenWindow,
 ];

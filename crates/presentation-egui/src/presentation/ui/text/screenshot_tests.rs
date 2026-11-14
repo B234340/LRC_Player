@@ -182,6 +182,7 @@ fn lyrics_shot(ppp: f32, name: &str) {
                 can_char_shift: true,
                 can_generate_timing: false,
                 generating_timing: false,
+                desktop_lyrics: false,
                 tr: Tr::JA,
             },
             &mut state,

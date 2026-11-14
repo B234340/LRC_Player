@@ -1,6 +1,7 @@
 //! Page views.
 
 pub mod album_grid;
+pub mod desktop_lyrics;
 pub mod eq_graph;
 pub mod eq_panel;
 pub mod lyrics_view;

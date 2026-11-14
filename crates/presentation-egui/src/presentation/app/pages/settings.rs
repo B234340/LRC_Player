@@ -199,6 +199,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
                     app.save_config();
                 }
             });
+            crate::presentation::app::lyric_batch::lyrics_batch_row(app, ui, tr);
             settings_row(ui, false, tr.t("settings.align_command"), Some(tr.t("settings.align_command_hint")), |ui| {
                 ui.horizontal(|ui| {
                     let checking = app.align_check_running();
@@ -227,6 +228,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
             settings_row(ui, false, tr.t("settings.offsets"), Some(tr.t("settings.offsets_hint")), |ui| {
                 ui.label(theme::muted(ui, format!("{}", app.lyrics_offsets.len())));
             });
+            desktop_lyrics_rows(app, ui, tr);
         });
 
         // ---------------- shortcuts ----------------
@@ -421,4 +423,72 @@ fn sound_quality_rows(app: &mut GuiApp, ui: &mut Ui, tr: Tr) {
     let signal = app.signal_path().cloned();
     signal_path_view(ui, signal.as_ref(), tr);
     ui.add_space(14.0);
+}
+
+/// Settings → 歌詞 → 「デスクトップ歌詞」 (the window itself: `app/desktop_lyrics.rs`).
+fn desktop_lyrics_rows(app: &mut GuiApp, ui: &mut Ui, tr: Tr) {
+    use lrc_player_application::config::DESKTOP_LYRICS_FONT_RANGE;
+    let pal = theme::palette(ui);
+    let r = ui.available_rect_before_wrap();
+    ui.painter().hline(r.x_range(), r.top(), egui::Stroke::new(1.0, pal.border));
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+        paint_icon(ui.painter(), r, Icon::DesktopLyrics, pal.text_muted);
+        ui.label(egui::RichText::new(tr.t("settings.desktop_lyrics")).color(pal.text).strong());
+    });
+    ui.add_space(2.0);
+    ui.add(egui::Label::new(theme::caption(ui, tr.t("settings.desktop_lyrics_hint"))).wrap());
+    ui.add_space(4.0);
+
+    let ctx = ui.ctx().clone();
+    let enabled = app.config.desktop_lyrics.enabled;
+    settings_row(ui, true, tr.t("desktop_lyrics.toggle"), None, |ui| {
+        let mut on = enabled;
+        if toggle_switch(ui, &mut on).changed() {
+            app.toggle_desktop_lyrics(&ctx);
+        }
+    });
+    let mut changed = false;
+    let mut save_now = false;
+    let dl = &mut app.config.desktop_lyrics;
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_font"), None, |ui| {
+        ui.spacing_mut().slider_width = slider_width(ui, 160.0);
+        let resp = ui.add(egui::Slider::new(&mut dl.font_size, DESKTOP_LYRICS_FONT_RANGE).step_by(1.0).fixed_decimals(0).suffix(" pt"));
+        changed |= resp.changed();
+        save_now |= resp.drag_stopped() || (resp.changed() && !resp.dragged());
+    });
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_opacity"), None, |ui| {
+        let mut pct = (dl.opacity * 100.0).round();
+        ui.spacing_mut().slider_width = slider_width(ui, 160.0);
+        let resp = ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix(" %"));
+        if resp.changed() {
+            dl.opacity = pct / 100.0;
+            changed = true;
+        }
+        save_now |= resp.drag_stopped() || (resp.changed() && !resp.dragged());
+    });
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_next_line"), None, |ui| {
+        save_now |= toggle_switch(ui, &mut dl.show_next_line).changed();
+    });
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_title"), None, |ui| {
+        save_now |= toggle_switch(ui, &mut dl.show_title).changed();
+    });
+    let mut lock = dl.locked;
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_lock"), Some(tr.t("settings.desktop_lyrics_lock_hint")), |ui| {
+        if toggle_switch(ui, &mut lock).changed() {
+            app.set_desktop_lyrics_locked(&ctx, lock);
+        }
+    });
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_reset"), Some(tr.t("settings.desktop_lyrics_reset_hint")), |ui| {
+        if button(ui, ButtonKind::Secondary, Some(Icon::Undo), tr.t("settings.desktop_lyrics_reset")).clicked() {
+            app.reset_desktop_lyrics_position(&ctx);
+        }
+    });
+    if save_now {
+        app.save_config();
+    } else if changed {
+        app.save_config_soon();
+    }
 }

@@ -21,11 +21,13 @@
 mod artwork;
 mod audio_quality;
 mod artwork_loader;
+pub(crate) mod desktop_lyrics;
 mod dispatch;
 mod drop;
 pub(crate) mod library_index;
 mod loudness;
 mod lyric_align;
+mod lyric_batch;
 mod lyric_fetch;
 mod lyrics;
 mod media_controls;
@@ -164,6 +166,8 @@ pub(crate) struct UiShell {
     pub(crate) fetch_job: Option<lyric_fetch::FetchJob>,
     /// Tracks already looked up automatically this session.
     pub(crate) fetch_tried: std::collections::HashSet<String>,
+    /// Bulk lyrics download for library tracks without lyrics (see `app/lyric_batch.rs`).
+    pub(crate) lyric_batch: lyric_batch::LyricBatch,
     /// Running external lyric-timing job (see `app/lyric_align.rs`).
     pub(crate) align_job: Option<lyric_align::AlignJob>,
     /// Settings "Check" for the timing command.
@@ -172,6 +176,8 @@ pub(crate) struct UiShell {
     /// Last (message, time) toast, to drop identical repeats.
     pub(crate) last_toast: Option<(String, Instant)>,
     pub(crate) window: Option<lrc_player_application::dto::WindowStateDto>,
+    /// Desktop lyrics window (see `app/desktop_lyrics.rs`).
+    pub(crate) desktop_lyrics: desktop_lyrics::DesktopLyrics,
     /// Rows of the current detail page (album / artist / playlist), rebuilt on change.
     pub(crate) detail_rows: pages::DetailRows,
 }
@@ -319,6 +325,8 @@ impl GuiApp {
         }
         self.maybe_submit_state();
         self.flush_config_if_due(false);
+        // Also from `logic`, so the desktop lyrics window lives on while this one is minimized.
+        self.sync_desktop_lyrics(ctx);
         self.schedule_repaint(ctx);
     }
 
@@ -405,6 +413,7 @@ impl App for GuiApp {
         self.poll_autoeq_picker();
         self.poll_lyric_alignment(ctx);
         self.poll_lyrics_fetch(ctx);
+        self.poll_lyric_batch();
         self.poll_dropped();
         self.artwork.poll(ctx);
         self.ensure_play_artwork();
@@ -422,6 +431,12 @@ impl App for GuiApp {
         // Again after drawing, so actions from this frame's UI are reflected right away.
         self.after_frame(&ctx);
         self.artwork.end_frame();
+    }
+
+    /// Transparent, so the desktop lyrics window (same GL context) can be see-through; the main
+    /// window paints its whole area itself.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

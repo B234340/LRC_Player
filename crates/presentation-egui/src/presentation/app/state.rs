@@ -381,9 +381,11 @@ impl GuiApp {
                 align_check: None,
                 fetch_job: None,
                 fetch_tried: Default::default(),
+                lyric_batch: Default::default(),
                 exclude_input: String::new(),
                 last_toast: None,
                 window: state.window,
+                desktop_lyrics: super::desktop_lyrics::DesktopLyrics::new(state.desktop_lyrics_window),
                 detail_rows: Default::default(),
             },
             media: MediaControlsBridge::new(opts.media_controls),
@@ -438,6 +440,7 @@ impl GuiApp {
             window: self.ui.window,
             library_columns: self.ui.library_columns.iter().filter_map(|c| column_key(*c)).map(str::to_string).collect(),
             album_card_size: Some(self.ui.album_card_size),
+            desktop_lyrics_window: self.ui.desktop_lyrics.window_for_save(),
         }
     }
 

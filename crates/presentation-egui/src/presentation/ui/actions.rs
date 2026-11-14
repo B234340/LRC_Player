@@ -171,6 +171,10 @@ pub enum UiAction {
     FetchLyricsOnline,
     /// New lyric font size (points of the *active* line).
     SetLyricFontSize(f32),
+    /// Show / hide the desktop lyrics window.
+    ToggleDesktopLyrics,
+    /// Lock (click-through) / unlock the desktop lyrics window.
+    SetDesktopLyricsLocked(bool),
 
     // ----- EQ -----
     SetEq(EqSettings),

@@ -20,6 +20,8 @@ pub const SHORTCUT_LIST: &[(&str, &str)] = &[
     ("M", "shortcut.mute"),
     ("Ctrl + F", "shortcut.search"),
     ("Ctrl + L", "shortcut.lyrics"),
+    ("Ctrl + Shift + L", "shortcut.desktop_lyrics"),
+    ("Ctrl + Alt + L", "shortcut.desktop_lyrics_lock"),
     ("Ctrl + ,", "shortcut.settings"),
     ("Ctrl + U", "shortcut.queue"),
     ("Alt + ←", "shortcut.back"),

@@ -45,6 +45,9 @@ pub struct TransportProps<'a> {
     pub quality: Option<QualityBadge>,
     /// The signal-path popover is open.
     pub signal_open: bool,
+    /// The desktop lyrics window is shown / locked (click-through).
+    pub desktop_lyrics: bool,
+    pub desktop_lyrics_locked: bool,
     pub tr: Tr,
 }
 
@@ -90,6 +93,13 @@ const RIGHT_MAX: f32 = 330.0;
 /// window's minimum width apart from the root margin (see `shell::MIN_WINDOW_WIDTH`).
 pub const MIN_WIDTH_ALL_CONTROLS: f32 = 2.0 * PAD + LEFT_MIN + REGION_GAP + CENTER_MIN + REGION_GAP + RIGHT_MIN;
 
+/// The desktop lyrics toggle (one more 31 px button + 2 px gap) is an extra: it is shown from
+/// [`MIN_WIDTH_DESKTOP_LYRICS`] = 758 px, taking its room from the title / volume surplus, so
+/// the window minimum ([`MIN_WIDTH_ALL_CONTROLS`]) is unchanged. Narrower windows reach the
+/// desktop lyrics from the lyrics panel's ⋮ menu, Settings and Ctrl+Shift+L.
+const DESKTOP_LYRICS_BTN: f32 = 31.0 + 2.0;
+pub const MIN_WIDTH_DESKTOP_LYRICS: f32 = MIN_WIDTH_ALL_CONTROLS + DESKTOP_LYRICS_BTN;
+
 /// Region widths for a bar width.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TransportLayout {
@@ -100,27 +110,32 @@ pub(crate) struct TransportLayout {
     pub all_controls: bool,
     /// Below the minimum: queue / lyrics and a slim slider still fit (safety net).
     pub medium: bool,
+    /// The desktop lyrics toggle fits (at or above [`MIN_WIDTH_DESKTOP_LYRICS`]).
+    pub desktop_lyrics: bool,
 }
 
 pub(crate) fn transport_layout(w: f32) -> TransportLayout {
     if w >= MIN_WIDTH_ALL_CONTROLS {
         // Generous side regions on wide bars; on narrower ones the title area and the
         // volume slider shrink before the center (controls + seek bar) gets below its minimum.
+        let desktop_lyrics = w >= MIN_WIDTH_DESKTOP_LYRICS;
+        let extra = if desktop_lyrics { DESKTOP_LYRICS_BTN } else { 0.0 };
+        let (right_min, right_fixed) = (RIGHT_MIN + extra, RIGHT_FIXED + extra);
         let mut left = (w * 0.27).clamp(LEFT_MIN, LEFT_MAX);
-        let mut right = (w * 0.27).clamp(RIGHT_MIN, RIGHT_MAX);
+        let mut right = (w * 0.27).clamp(right_min, RIGHT_MAX + extra);
         let center = |l: f32, r: f32| w - 2.0 * PAD - l - r - 2.0 * REGION_GAP;
         let deficit = CENTER_MIN - center(left, right);
         if deficit > 0.0 {
             let from_left = deficit.min(left - LEFT_MIN);
             left -= from_left;
-            right -= (deficit - from_left).min(right - RIGHT_MIN);
+            right -= (deficit - from_left).min(right - right_min);
         }
-        let slider = (right - RIGHT_FIXED).clamp(SLIDER_MIN, SLIDER_MAX);
-        TransportLayout { left_w: left, right_w: right, slider_w: slider, all_controls: true, medium: true }
+        let slider = (right - right_fixed).clamp(SLIDER_MIN, SLIDER_MAX);
+        TransportLayout { left_w: left, right_w: right, slider_w: slider, all_controls: true, medium: true, desktop_lyrics }
     } else if w >= 560.0 {
-        TransportLayout { left_w: 180.0, right_w: 150.0, slider_w: 64.0, all_controls: false, medium: true }
+        TransportLayout { left_w: 180.0, right_w: 150.0, slider_w: 64.0, all_controls: false, medium: true, desktop_lyrics: false }
     } else {
-        TransportLayout { left_w: 56.0, right_w: 40.0, slider_w: 0.0, all_controls: false, medium: false }
+        TransportLayout { left_w: 56.0, right_w: 40.0, slider_w: 0.0, all_controls: false, medium: false, desktop_lyrics: false }
     }
 }
 
@@ -341,9 +356,48 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
             if icon_button(&mut rui, Icon::Lyrics, 17.0, l, tr.t("transport.lyrics")).clicked() {
                 actions.push(UiAction::ToggleRightPanel(RightPanel::Lyrics));
             }
+            if lay.desktop_lyrics {
+                desktop_lyrics_button(&mut rui, props, &pal, &mut actions);
+            }
         }
     }
     actions
+}
+
+/// Desktop lyrics toggle: click shows / hides the window, or unlocks it while it is locked
+/// (click-through, so this is its unlock path); right-click opens a small menu.
+fn desktop_lyrics_button(ui: &mut Ui, props: &TransportProps<'_>, pal: &theme::Palette, actions: &mut Vec<UiAction>) {
+    let tr = props.tr;
+    let locked = props.desktop_lyrics && props.desktop_lyrics_locked;
+    let tip = if locked { tr.t("desktop_lyrics.button_locked_tip") } else { tr.t("desktop_lyrics.button_tip") };
+    let resp = icon_button(ui, Icon::DesktopLyrics, 17.0, props.desktop_lyrics, tip);
+    if locked {
+        // Padlock badge at the top-right corner.
+        let c = pos2(resp.rect.right() - 6.0, resp.rect.top() + 7.0);
+        ui.painter().circle_filled(c, 7.5, pal.bg);
+        ui.painter().circle_filled(c, 6.0, pal.accent);
+        crate::presentation::ui::icons::paint_icon(ui.painter(), Rect::from_center_size(c, Vec2::splat(9.5)), Icon::Lock, pal.accent_text);
+    }
+    if resp.clicked() {
+        actions.push(if locked { UiAction::SetDesktopLyricsLocked(false) } else { UiAction::ToggleDesktopLyrics });
+    }
+    resp.context_menu(|ui| {
+        let mut on = props.desktop_lyrics;
+        if ui.checkbox(&mut on, tr.t("desktop_lyrics.toggle")).clicked() {
+            actions.push(UiAction::ToggleDesktopLyrics);
+            ui.close();
+        }
+        let mut lock = props.desktop_lyrics_locked;
+        if ui.checkbox(&mut lock, tr.t("desktop_lyrics.lock_menu")).clicked() {
+            actions.push(UiAction::SetDesktopLyricsLocked(lock));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button(tr.t("desktop_lyrics.settings")).clicked() {
+            actions.push(UiAction::Navigate(Page::Settings));
+            ui.close();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -365,5 +419,22 @@ mod tests {
             assert!(l.slider_w >= SLIDER_MIN && l.right_w >= RIGHT_FIXED + l.slider_w - 0.01, "w={w}");
         }
         assert!(!transport_layout(MIN_WIDTH_ALL_CONTROLS - 1.0).all_controls);
+    }
+
+    #[test]
+    fn desktop_lyrics_button_takes_surplus_only() {
+        assert_eq!(MIN_WIDTH_DESKTOP_LYRICS, 758.0);
+        assert!(!transport_layout(MIN_WIDTH_ALL_CONTROLS).desktop_lyrics, "the window minimum is unchanged");
+        assert!(!transport_layout(MIN_WIDTH_DESKTOP_LYRICS - 1.0).desktop_lyrics);
+        for w in [MIN_WIDTH_DESKTOP_LYRICS, 770.0, 900.0, 1264.0, 2000.0] {
+            let l = transport_layout(w);
+            assert!(l.all_controls && l.desktop_lyrics, "w={w}");
+            let center = w - 2.0 * PAD - l.left_w - l.right_w - 2.0 * REGION_GAP;
+            assert!(center >= CENTER_MIN - 0.01, "w={w} center={center}");
+            assert!(l.left_w >= LEFT_MIN - 0.01, "w={w}");
+            assert!(l.slider_w >= SLIDER_MIN && l.right_w >= RIGHT_FIXED + DESKTOP_LYRICS_BTN + l.slider_w - 0.01, "w={w}");
+        }
+        // Wide windows keep the full volume slider next to the extra button.
+        assert_eq!(transport_layout(1264.0).slider_w, SLIDER_MAX);
     }
 }

@@ -254,6 +254,47 @@ pub struct Config {
     pub exclusive_mode: bool,
     #[serde(default)]
     pub parametric_eq: ParametricEqSetting,
+    /// Desktop lyrics: a small always-on-top window with the current line.
+    #[serde(default)]
+    pub desktop_lyrics: DesktopLyricsSetting,
+}
+
+/// Desktop lyrics window settings (geometry lives in `state.json`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DesktopLyricsSetting {
+    /// The window is shown.
+    pub enabled: bool,
+    /// Point size of the current line (the next line is smaller).
+    pub font_size: f32,
+    /// Background opacity `0..=1` (the text stays opaque).
+    pub opacity: f32,
+    pub show_next_line: bool,
+    pub show_title: bool,
+    /// Click-through: the window ignores the mouse (unlock from the main window).
+    pub locked: bool,
+}
+
+/// Range of [`DesktopLyricsSetting::font_size`].
+pub const DESKTOP_LYRICS_FONT_RANGE: std::ops::RangeInclusive<f32> = 16.0..=72.0;
+
+impl Default for DesktopLyricsSetting {
+    fn default() -> Self {
+        Self { enabled: false, font_size: 32.0, opacity: 0.7, show_next_line: true, show_title: false, locked: false }
+    }
+}
+
+impl DesktopLyricsSetting {
+    /// Values from a hand-edited file brought into range.
+    pub fn sanitized(self) -> Self {
+        let font_size = if self.font_size.is_finite() { self.font_size } else { Self::default().font_size };
+        let opacity = if self.opacity.is_finite() { self.opacity } else { Self::default().opacity };
+        Self {
+            font_size: font_size.clamp(*DESKTOP_LYRICS_FONT_RANGE.start(), *DESKTOP_LYRICS_FONT_RANGE.end()),
+            opacity: opacity.clamp(0.0, 1.0),
+            ..self
+        }
+    }
 }
 
 fn default_accent() -> String {
@@ -297,6 +338,7 @@ impl Default for Config {
             dither: DitherSetting::default(),
             exclusive_mode: false,
             parametric_eq: ParametricEqSetting::default(),
+            desktop_lyrics: DesktopLyricsSetting::default(),
         }
     }
 }
@@ -379,6 +421,27 @@ mod tests {
         assert!(!cfg.parametric_eq.enabled && cfg.parametric_eq.filters.is_empty());
         let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.resampler_taps, 64);
+    }
+
+    #[test]
+    fn desktop_lyrics_defaults_and_partial_objects() {
+        let old: Config = serde_json::from_str(r#"{"resampler_taps": 32, "preferred_output_device": null}"#).unwrap();
+        let d = old.desktop_lyrics;
+        assert_eq!(d, DesktopLyricsSetting::default());
+        assert!(!d.enabled && !d.locked, "off and unlocked by default");
+        assert!(d.show_next_line && !d.show_title);
+        assert!(DESKTOP_LYRICS_FONT_RANGE.contains(&d.font_size));
+        assert!((0.0..=1.0).contains(&d.opacity));
+        let partial: Config = serde_json::from_str(
+            r#"{"resampler_taps": 32, "preferred_output_device": null, "desktop_lyrics": {"enabled": true, "opacity": 3.0, "font_size": 4}}"#,
+        )
+        .unwrap();
+        assert!(partial.desktop_lyrics.enabled);
+        assert!(partial.desktop_lyrics.show_next_line, "missing fields take their defaults");
+        let s = partial.desktop_lyrics.sanitized();
+        assert_eq!((s.opacity, s.font_size), (1.0, 16.0));
+        let back: Config = serde_json::from_str(&serde_json::to_string(&partial).unwrap()).unwrap();
+        assert_eq!(back.desktop_lyrics, partial.desktop_lyrics);
     }
 
     #[test]

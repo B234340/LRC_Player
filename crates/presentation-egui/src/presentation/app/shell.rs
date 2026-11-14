@@ -122,6 +122,8 @@ impl GuiApp {
                         favorite: (!self.play_path.is_empty()).then(|| self.is_favorite_path(&self.play_path)),
                         quality: self.signal_path().map(quality_badge),
                         signal_open: self.ui.signal_open,
+                        desktop_lyrics: self.config.desktop_lyrics.enabled,
+                        desktop_lyrics_locked: self.config.desktop_lyrics.locked,
                         tr,
                     },
                 ));
@@ -268,6 +270,7 @@ impl GuiApp {
             can_char_shift: self.loaded_timeline.as_ref().is_some_and(|t| t.karaoke_char_count() > 1),
             can_generate_timing: !self.config.align_command.trim().is_empty() && self.selected_lyrics_index.is_some(),
             generating_timing: self.lyric_alignment_running(),
+            desktop_lyrics: self.config.desktop_lyrics.enabled,
             tr,
         };
         lyrics_view(ui, &props, &mut self.ui.side_lyrics)

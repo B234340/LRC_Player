@@ -1010,3 +1010,266 @@ fn sound_quality() {
         shoot(&mut h, &format!("signal_bit_perfect_760x640_{suffix}"));
     }
 }
+
+/// Settings → 歌詞 → 「歌詞のない曲をまとめて取得」: idle (with recently checked tracks), the
+/// confirmation dialog, running (fake LRCLIB that stalls on the 8th track), stopping and the
+/// last result, at 1280x800 and 1000x700 with the right panel, dark and light.
+///
+/// `APP_SCREENS_DIR=<dir> cargo test -p lrc_player --lib app::screenshot_tests::lyrics_batch -- --ignored --test-threads=1`
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn lyrics_batch_settings() {
+    use lrc_player_application::infrastructure::lyrics::{LrclibQuery, LrclibResult};
+    let sizes = [(1280.0, 800.0, None), (1000.0, 700.0, Some(RightPanel::Queue))];
+    for dark in [true, false] {
+        // Fresh files per theme: the run writes .lrc files.
+        let fx = fixture();
+        let suffix = if dark { "dark" } else { "light" };
+        let mut h = start(&fx, dark, Language::Ja);
+        with_app(&mut h, |a| {
+            let misses = a.lyric_misses();
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let mut m = misses.lock().unwrap();
+            for p in &fx.paths[15..18] {
+                m.record(p, super::lyric_batch::MissKind::NotFound, now);
+            }
+        });
+        let show = |h: &mut H<'_>, w: f32, ht: f32, panel: Option<RightPanel>| {
+            h.set_size(Vec2::new(w, ht));
+            with_app(h, |a| {
+                a.ui.right_panel = panel;
+                a.navigate(Page::Settings);
+                a.ui.lyric_batch.scroll_into_view = 3;
+            });
+        };
+        for (w, ht, panel) in sizes {
+            show(&mut h, w, ht, panel);
+            pump(&mut h, 10.0, |a| a.ui.lyric_batch.has_count());
+            let pname = if panel.is_some() { "panel" } else { "nopanel" };
+            shoot(&mut h, &format!("lyrics_batch_idle_{w}x{ht}_{pname}_{suffix}"));
+        }
+        with_app(&mut h, |a| a.ui.lyric_batch.confirm = true);
+        shoot(&mut h, &format!("lyrics_batch_dialog_1000x700_{suffix}"));
+        with_app(&mut h, |a| a.ui.lyric_batch.confirm = false);
+
+        // Running: a few varied answers, then the fake server stalls until `release` drops.
+        let (release, stall) = crossbeam_channel::bounded::<()>(0);
+        let mut n = 0usize;
+        let fetch: super::lyric_batch::FetchFn = Box::new(move |_q: &LrclibQuery| {
+            n += 1;
+            Ok(match n {
+                1 | 4 => LrclibResult::Synced { lrc: "[00:01.00]la\n".into(), word_sync: false },
+                2 | 5 | 6 => LrclibResult::NotFound,
+                3 => LrclibResult::Instrumental,
+                7 => LrclibResult::PlainOnly,
+                _ => {
+                    let _ = stall.recv();
+                    LrclibResult::NotFound
+                }
+            })
+        });
+        let ctx = h.ctx.clone();
+        with_app(&mut h, |a| a.start_lyrics_batch_with(&ctx, fetch, Duration::ZERO));
+        pump(&mut h, 10.0, |a| a.lyrics_batch_progress().is_some_and(|(c, _)| c.done >= 7));
+        for (w, ht, panel) in sizes {
+            show(&mut h, w, ht, panel);
+            let pname = if panel.is_some() { "panel" } else { "nopanel" };
+            shoot(&mut h, &format!("lyrics_batch_running_{w}x{ht}_{pname}_{suffix}"));
+        }
+        with_app(&mut h, |a| a.cancel_lyrics_batch());
+        shoot(&mut h, &format!("lyrics_batch_stopping_1000x700_{suffix}"));
+        drop(release);
+        pump(&mut h, 10.0, |a| a.lyrics_batch_progress().is_none());
+        for (w, ht, panel) in sizes {
+            show(&mut h, w, ht, panel);
+            let pname = if panel.is_some() { "panel" } else { "nopanel" };
+            shoot(&mut h, &format!("lyrics_batch_done_{w}x{ht}_{pname}_{suffix}"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Desktop lyrics
+// ---------------------------------------------------------------------------------------
+
+/// Fonts for widget-only shots (the app loads its own on a worker).
+fn widget_fonts() -> &'static egui::FontDefinitions {
+    static DEFS: std::sync::OnceLock<egui::FontDefinitions> = std::sync::OnceLock::new();
+    DEFS.get_or_init(|| crate::presentation::ui::fonts::build_definitions(&[Path::new("/mnt/c/Windows/Fonts")]).0)
+}
+
+/// A stand-in desktop behind the overlay: a gradient wallpaper and a white "window".
+fn paint_desktop(ui: &egui::Ui) {
+    let r = ui.max_rect();
+    let mut mesh = egui::epaint::Mesh::default();
+    let (a, b) = (Color32::from_rgb(28, 60, 120), Color32::from_rgb(214, 120, 70));
+    mesh.colored_vertex(r.left_top(), a);
+    mesh.colored_vertex(r.right_top(), b);
+    mesh.colored_vertex(r.right_bottom(), b);
+    mesh.colored_vertex(r.left_bottom(), a);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+    let win = egui::Rect::from_min_size(r.min + egui::vec2(r.width() * 0.55, r.height() * 0.15), egui::vec2(r.width() * 0.5, r.height()));
+    ui.painter().rect_filled(win, 6.0, Color32::from_rgb(246, 246, 248));
+    for i in 0..6 {
+        let y = win.top() + 14.0 + i as f32 * 16.0;
+        ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(win.left() + 14.0, y), egui::vec2(win.width() * 0.6, 6.0)), 3.0, Color32::from_gray(200));
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OverlayCase {
+    Karaoke,
+    Plain,
+    Intro,
+    Interlude,
+    NoTrack,
+    NoLyrics,
+    Instrumental,
+}
+
+struct OverlayShot {
+    name: &'static str,
+    case: OverlayCase,
+    size: Vec2,
+    opacity: f32,
+    hover: bool,
+    locked: bool,
+    show_title: bool,
+}
+
+fn overlay_shot(dark: bool, shot: &OverlayShot) {
+    use crate::presentation::ui::text::TextLang;
+    use crate::presentation::ui::views::desktop_lyrics::{
+        desktop_lyrics_view, DesktopLyricsContent, DesktopLyricsProps, DesktopLyricsViewState, OverlayLine,
+    };
+    let (case, opacity, hover, locked, show_title) = (shot.case, shot.opacity, shot.hover, shot.locked, shot.show_title);
+    let mut state = DesktopLyricsViewState::default();
+    let mut h = Harness::builder()
+        .with_size(shot.size)
+        .with_pixels_per_point(1.0)
+        .with_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light })
+        .build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            let id = egui::Id::new("overlay_shot_fonts");
+            if ctx.data(|d| d.get_temp::<bool>(id).is_none()) {
+                crate::presentation::ui::fonts::install_definitions(&ctx, widget_fonts().clone());
+                ctx.data_mut(|d| d.insert_temp(id, true));
+            }
+            let mode = if dark { theme::ThemeMode::Dark } else { theme::ThemeMode::Light };
+            theme::sync(&ctx, mode, theme::Accent::Teal);
+            paint_desktop(ui);
+            let karaoke = OverlayLine { text: "<00:22.00>その一言で全てが分かった", karaoke: true, highlighted_chars: 0.0 };
+            let content = match case {
+                OverlayCase::Karaoke => DesktopLyricsContent::Lyrics {
+                    current: Some(OverlayLine { text: "その一言で全てが分かった", highlighted_chars: 5.4, ..karaoke }),
+                    intro: false,
+                    next: Some("日が沈み出した空と君の姿"),
+                    line_key: 3,
+                    lang: TextLang::Ja,
+                },
+                OverlayCase::Plain => DesktopLyricsContent::Lyrics {
+                    current: Some(OverlayLine { text: "Don't start now, don't come around to see me", karaoke: false, highlighted_chars: 0.0 }),
+                    intro: false,
+                    next: Some("Walk away, you know how"),
+                    line_key: 3,
+                    lang: TextLang::Latin,
+                },
+                OverlayCase::Intro => DesktopLyricsContent::Lyrics { current: None, intro: true, next: Some("沈むように溶けてゆくように"), line_key: 0, lang: TextLang::Ja },
+                OverlayCase::Interlude => DesktopLyricsContent::Lyrics { current: None, intro: false, next: Some("初めて会った日から"), line_key: 7, lang: TextLang::Ja },
+                OverlayCase::NoTrack => DesktopLyricsContent::NoTrack,
+                OverlayCase::NoLyrics => DesktopLyricsContent::NoLyrics,
+                OverlayCase::Instrumental => DesktopLyricsContent::Instrumental,
+            };
+            let props = DesktopLyricsProps {
+                content,
+                title: "夜に駆ける",
+                artist: "YOASOBI",
+                font_size: 32.0,
+                opacity,
+                show_next_line: true,
+                show_title,
+                locked,
+                playing: true,
+                has_track: !matches!(case, OverlayCase::NoTrack),
+                force_controls: hover,
+                tr: crate::presentation::ui::Tr::JA,
+            };
+            let _ = desktop_lyrics_view(ui, &props, &mut state);
+        });
+    // The lock hint fades out after a few seconds of (harness) time.
+    h.run_steps(if locked { 2 } else { 24 });
+    let img = h.render().expect("render (needs a wgpu adapter)");
+    let dir = out_dir().join("screens-overlay");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("overlay_{}_{}.png", shot.name, if dark { "dark" } else { "light" }));
+    img.save(&path).expect("save png");
+    eprintln!("wrote {}", path.display());
+}
+
+/// Desktop lyrics: the overlay content over a stand-in desktop (dark / light, karaoke
+/// mid-line, hover controls, empty states, locked, transparent), the Settings subsection
+/// and the transport button. PNGs in `$APP_SCREENS_DIR/screens-overlay/`.
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn desktop_lyrics_screens() {
+    let wide = super::desktop_lyrics::DEFAULT_SIZE;
+    let shots = [
+        OverlayShot { name: "karaoke", case: OverlayCase::Karaoke, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
+        OverlayShot { name: "karaoke_hover", case: OverlayCase::Karaoke, size: wide, opacity: 0.72, hover: true, locked: false, show_title: false },
+        OverlayShot { name: "karaoke_title", case: OverlayCase::Karaoke, size: Vec2::new(640.0, 150.0), opacity: 0.72, hover: false, locked: false, show_title: true },
+        OverlayShot { name: "karaoke_transparent", case: OverlayCase::Karaoke, size: wide, opacity: 0.0, hover: false, locked: false, show_title: false },
+        OverlayShot { name: "plain_long_narrow", case: OverlayCase::Plain, size: Vec2::new(380.0, 120.0), opacity: 0.72, hover: false, locked: false, show_title: false },
+        OverlayShot { name: "narrow_hover", case: OverlayCase::Karaoke, size: Vec2::new(300.0, 110.0), opacity: 0.72, hover: true, locked: false, show_title: false },
+        OverlayShot { name: "intro", case: OverlayCase::Intro, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
+        OverlayShot { name: "interlude", case: OverlayCase::Interlude, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
+        OverlayShot { name: "no_track", case: OverlayCase::NoTrack, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
+        OverlayShot { name: "no_lyrics", case: OverlayCase::NoLyrics, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
+        OverlayShot { name: "instrumental", case: OverlayCase::Instrumental, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
+        OverlayShot { name: "locked", case: OverlayCase::Karaoke, size: wide, opacity: 0.72, hover: false, locked: true, show_title: false },
+    ];
+    for dark in [true, false] {
+        for shot in &shots {
+            overlay_shot(dark, shot);
+        }
+    }
+
+    // The real app: Settings subsection and the transport button (active / locked).
+    for dark in [true, false] {
+        let fx = fixture();
+        let suffix = if dark { "dark" } else { "light" };
+        let mut h = start(&fx, dark, Language::Ja);
+        // Register the overlay viewport without embedding it into the main screenshot.
+        h.ctx.set_embed_viewports(false);
+        let dir = "screens-overlay";
+        std::fs::create_dir_all(out_dir().join(dir)).unwrap();
+        with_app(&mut h, |a| {
+            a.config.desktop_lyrics.enabled = true;
+            a.navigate(Page::Library);
+            a.ui.right_panel = Some(RightPanel::Lyrics);
+        });
+        shoot(&mut h, &format!("{dir}/transport_desktop_lyrics_on_{suffix}"));
+        with_app(&mut h, |a| a.config.desktop_lyrics.locked = true);
+        shoot(&mut h, &format!("{dir}/transport_desktop_lyrics_locked_{suffix}"));
+        // 3× zoom of the transport's right-hand toggles.
+        h.run_steps(2);
+        let img = h.render().expect("render");
+        let (w, ht) = (img.width(), img.height());
+        let full = image::RgbaImage::from_raw(w, ht, img.into_raw()).unwrap();
+        let crop = image::imageops::crop_imm(&full, w - 340, ht - 80, 340, 80).to_image();
+        let zoom = image::imageops::resize(&crop, 1020, 240, image::imageops::FilterType::Nearest);
+        zoom.save(out_dir().join(format!("{dir}/transport_desktop_lyrics_locked_zoom_{suffix}.png"))).unwrap();
+        h.set_size(Vec2::new(760.0, 640.0));
+        shoot(&mut h, &format!("{dir}/transport_desktop_lyrics_760_{suffix}"));
+        h.set_size(Vec2::new(745.0, 640.0));
+        shoot(&mut h, &format!("{dir}/transport_desktop_lyrics_745_{suffix}"));
+        h.set_size(Vec2::new(1280.0, 3000.0));
+        with_app(&mut h, |a| {
+            a.ui.right_panel = None;
+            a.navigate(Page::Settings);
+        });
+        shoot(&mut h, &format!("{dir}/settings_desktop_lyrics_{suffix}"));
+    }
+}
+

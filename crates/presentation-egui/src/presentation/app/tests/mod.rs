@@ -134,7 +134,9 @@ fn gui_app_smoke_transport_and_pages() {
         .engine_snapshot
         .as_ref()
         .is_some_and(|s| s.state != lrc_player_application::infrastructure::audio::engine::EngineState::Stopped);
-    if engine_active {
+    // (Under heavy load the 1 s track can already have played out and advanced to `b`;
+    // the gapless successor is only defined while the first track is current.)
+    if engine_active && app.current_queue_index == Some(0) {
         assert_eq!(app.pending_next, Some((1, b.clone())));
     }
 

@@ -349,6 +349,8 @@ impl GuiApp {
                 self.config.lyric_font_size = size.clamp(14.0, 56.0);
                 self.save_config();
             }
+            UiAction::ToggleDesktopLyrics => self.toggle_desktop_lyrics(ctx),
+            UiAction::SetDesktopLyricsLocked(locked) => self.set_desktop_lyrics_locked(ctx, locked),
 
             // ----- EQ -----
             UiAction::SetEq(eq) => self.set_eq(eq),
