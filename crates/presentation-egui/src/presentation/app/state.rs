@@ -159,6 +159,12 @@ impl GuiApp {
     pub fn new(cc: &CreationContext<'_>) -> Self {
         super::startup_cloak::cloak(cc);
         let mut app = Self::with_options(&cc.egui_ctx, AppOptions::default());
+        // The binary does not create the window maximized on Windows (winit would show it
+        // before it is cloaked); maximize it now, while it is still hidden.
+        if cfg!(windows) && app.ui.window.as_ref().is_some_and(|w| w.maximized) {
+            cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            super::startup_cloak::expect_maximized();
+        }
         app.wait_for_fonts(&cc.egui_ctx);
         app
     }

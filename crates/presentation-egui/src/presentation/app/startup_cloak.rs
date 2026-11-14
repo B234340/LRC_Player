@@ -24,7 +24,7 @@ pub(crate) fn ready(frames: u64, stable_frames: u64, elapsed: Duration) -> bool 
 }
 
 #[cfg(windows)]
-pub(crate) use imp::{cloak, reveal_when_ready};
+pub(crate) use imp::{cloak, expect_maximized, reveal_when_ready};
 
 /// No-op off Windows (other platforms do not show an empty white window).
 #[cfg(not(windows))]
@@ -32,6 +32,10 @@ pub(crate) fn cloak(_cc: &eframe::CreationContext<'_>) {}
 
 #[cfg(not(windows))]
 pub(crate) fn reveal_when_ready(_ctx: &eframe::egui::Context) {}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub(crate) fn expect_maximized() {}
 
 #[cfg(windows)]
 mod imp {
@@ -49,6 +53,8 @@ mod imp {
         frames: u64,
         stable_frames: u64,
         last_size: Option<egui::Vec2>,
+        /// A maximize was requested: stay hidden until the window reports it is maximized.
+        expect_maximized: bool,
     }
 
     static STATE: Mutex<Option<Cloaked>> = Mutex::new(None);
@@ -83,15 +89,27 @@ mod imp {
             frames: 0,
             stable_frames: 0,
             last_size: None,
+            expect_maximized: false,
         });
+    }
+
+    /// The window is being maximized while cloaked; reveal only once it is.
+    pub(crate) fn expect_maximized() {
+        if let Some(c) = STATE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            c.expect_maximized = true;
+        }
     }
 
     /// Call once per painted frame (from `App::ui`).
     pub(crate) fn reveal_when_ready(ctx: &egui::Context) {
         let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(c) = st.as_mut() else { return };
-        let size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
-        c.stable_frames = if size.is_some() && size == c.last_size { c.stable_frames + 1 } else { 0 };
+        let (size, maximized) = ctx.input(|i| {
+            let vp = i.viewport();
+            (vp.inner_rect.map(|r| r.size()), vp.maximized == Some(true))
+        });
+        let settled = size.is_some() && size == c.last_size && (maximized || !c.expect_maximized);
+        c.stable_frames = if settled { c.stable_frames + 1 } else { 0 };
         c.last_size = size;
         c.frames += 1;
         if super::ready(c.frames, c.stable_frames, c.since.elapsed()) {
