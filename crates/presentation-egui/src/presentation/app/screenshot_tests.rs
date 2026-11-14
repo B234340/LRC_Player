@@ -836,3 +836,177 @@ fn real_app_lyrics_shift_popover() {
         shoot(&mut h, &format!("lyrics_panel_search_online_{suffix}"));
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Sound quality: Settings → 音質, the EQ popover's parametric tab and the signal path.
+// ---------------------------------------------------------------------------------------
+
+use lrc_player_application::infrastructure::audio::engine::{
+    CrossfeedLevel, DeviceInfo, EngineSnapshot, EngineState, GainSource, ResamplerKind, SignalPath,
+};
+
+/// An AutoEq profile in the shape AutoEq publishes (`ParametricEQ.txt`).
+const AUTOEQ_PROFILE: &str = "Preamp: -6.4 dB\n\
+Filter 1: ON LSC Fc 105 Hz Gain 6.0 dB Q 0.70\n\
+Filter 2: ON PK Fc 52 Hz Gain 1.1 dB Q 1.20\n\
+Filter 3: ON PK Fc 180 Hz Gain -2.3 dB Q 0.53\n\
+Filter 4: ON PK Fc 1365 Hz Gain -1.4 dB Q 1.90\n\
+Filter 5: ON PK Fc 3062 Hz Gain -3.0 dB Q 3.62\n\
+Filter 6: ON PK Fc 4655 Hz Gain 2.5 dB Q 2.35\n\
+Filter 7: ON PK Fc 6164 Hz Gain -3.5 dB Q 4.51\n\
+Filter 8: ON PK Fc 8063 Hz Gain 3.2 dB Q 2.52\n\
+Filter 9: ON PK Fc 11000 Hz Gain -1.9 dB Q 1.43\n\
+Filter 10: ON HSC Fc 10000 Hz Gain 2.5 dB Q 0.70\n";
+
+fn snapshot(signal: SignalPath, path: &str) -> EngineSnapshot {
+    EngineSnapshot {
+        state: EngineState::Playing,
+        path: Some(PathBuf::from(path)),
+        position_ms: 24_100,
+        duration_ms: Some(SONGS[0].3),
+        device: Some(signal.output.clone()),
+        underruns: 0,
+        volume: signal.volume,
+        muted: false,
+        signal: Some(signal),
+    }
+}
+
+/// FLAC 44.1/16 resampled to a shared 48 kHz device with every stage on.
+fn processed_chain() -> SignalPath {
+    SignalPath {
+        codec: "flac".into(),
+        source_rate: 44_100,
+        source_bits: Some(16),
+        source_channels: 2,
+        resampled: true,
+        resampler: Some(ResamplerKind::Fft),
+        channels_mapped: false,
+        output: DeviceInfo {
+            name: "スピーカー (Realtek(R) High Definition Audio)".into(),
+            sample_rate: 48_000,
+            channels: 2,
+            sample_format: "F32".into(),
+            buffer_frames: Some(2400),
+            follows_default: true,
+            exclusive: false,
+            dither: false,
+        },
+        eq: true,
+        parametric_eq: true,
+        crossfeed: Some(CrossfeedLevel::Medium),
+        normalization_db: -6.3,
+        normalization_source: GainSource::Hint,
+        headroom_db: -4.2,
+        volume: 0.6,
+        volume_active: true,
+        limiter_engaged: false,
+        bit_perfect: false,
+    }
+}
+
+/// FLAC 96/24 to an exclusive 24-bit USB DAC, everything off.
+fn bit_perfect_chain(exclusive: bool) -> SignalPath {
+    SignalPath {
+        codec: "flac".into(),
+        source_rate: 96_000,
+        source_bits: Some(24),
+        source_channels: 2,
+        resampled: false,
+        resampler: None,
+        channels_mapped: false,
+        output: DeviceInfo {
+            name: "USB DAC (Topping E30)".into(),
+            sample_rate: 96_000,
+            channels: 2,
+            sample_format: if exclusive { "I24".into() } else { "F32".into() },
+            buffer_frames: None,
+            follows_default: false,
+            exclusive,
+            dither: exclusive,
+        },
+        eq: false,
+        parametric_eq: false,
+        crossfeed: None,
+        normalization_db: 0.0,
+        normalization_source: GainSource::None,
+        headroom_db: 0.0,
+        volume: 1.0,
+        volume_active: false,
+        limiter_engaged: false,
+        bit_perfect: true,
+    }
+}
+
+/// `APP_SCREENS_DIR=<dir> cargo test -p lrc_player --lib app::screenshot_tests::sound_quality -- --ignored --test-threads=1`
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn sound_quality() {
+    let fx = fixture();
+    for dark in [true, false] {
+        let suffix = if dark { "dark" } else { "light" };
+        let mut h = start(&fx, dark, Language::Ja);
+        let path = fx.paths[0].clone();
+        with_app(&mut h, |a| {
+            a.engine_snapshot = Some(snapshot(processed_chain(), &path));
+            a.config.crossfeed_enabled = true;
+            a.config.normalization_preamp_db = -2.0;
+            a.loudness_analysis_progress();
+        });
+        // Settings → 音質, scrolled into view.
+        for (w, ht, panel) in [(1280.0, 800.0, None), (1280.0, 800.0, Some(RightPanel::Queue)), (1000.0, 700.0, Some(RightPanel::Queue))] {
+            h.set_size(Vec2::new(w, ht));
+            with_app(&mut h, |a| {
+                a.ui.right_panel = panel;
+                a.navigate(Page::Settings);
+                a.ui.scroll_to_sound = 3;
+            });
+            let pname = if panel.is_some() { "panel" } else { "nopanel" };
+            shoot(&mut h, &format!("sound_settings_{w}x{ht}_{pname}_{suffix}"));
+        }
+        // Lower part of the section (signal path) on a tall window.
+        h.set_size(Vec2::new(1000.0, 1500.0));
+        with_app(&mut h, |a| {
+            a.navigate(Page::Settings);
+            a.ui.scroll_to_sound = 3;
+        });
+        shoot(&mut h, &format!("sound_settings_1000x1500_panel_{suffix}"));
+
+        // EQ popover, parametric tab with a loaded AutoEq profile.
+        h.set_size(SIZE);
+        with_app(&mut h, |a| {
+            a.ui.right_panel = None;
+            a.navigate(Page::Library);
+            a.ui.toasts = Default::default();
+            assert!(a.import_autoeq_text(AUTOEQ_PROFILE));
+            a.ui.eq_tab = crate::presentation::ui::views::EqTab::Parametric;
+            a.ui.eq_open = true;
+        });
+        shoot(&mut h, &format!("eq_parametric_1280x800_{suffix}"));
+        for (w, ht, collapsed) in [(1000.0, 700.0, false), (560.0, 700.0, true), (400.0, 640.0, true)] {
+            h.set_size(Vec2::new(w, ht));
+            with_app(&mut h, |a| a.ui.sidebar.collapsed = collapsed);
+            shoot(&mut h, &format!("eq_parametric_{w}x{ht}_{suffix}"));
+        }
+        h.set_size(SIZE);
+        with_app(&mut h, |a| {
+            a.ui.sidebar.collapsed = false;
+            a.ui.eq_tab = crate::presentation::ui::views::EqTab::Graphic;
+        });
+        shoot(&mut h, &format!("eq_graphic_with_graph_{suffix}"));
+
+        // Signal path popover: processed, untouched (shared) and bit-perfect (exclusive).
+        with_app(&mut h, |a| {
+            a.ui.eq_open = false;
+            a.ui.toasts = Default::default();
+            a.ui.signal_open = true;
+        });
+        shoot(&mut h, &format!("signal_processed_{suffix}"));
+        with_app(&mut h, |a| a.engine_snapshot = Some(snapshot(bit_perfect_chain(false), &path)));
+        shoot(&mut h, &format!("signal_untouched_{suffix}"));
+        with_app(&mut h, |a| a.engine_snapshot = Some(snapshot(bit_perfect_chain(true), &path)));
+        shoot(&mut h, &format!("signal_bit_perfect_{suffix}"));
+        h.set_size(Vec2::new(760.0, 640.0));
+        shoot(&mut h, &format!("signal_bit_perfect_760x640_{suffix}"));
+    }
+}

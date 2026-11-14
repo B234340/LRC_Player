@@ -66,6 +66,8 @@ pub enum Icon {
     ArrowDownToLine,
     /// Pencil (rename / edit).
     Edit,
+    /// Waveform (signal path / sound quality).
+    Waveform,
 }
 
 impl Icon {
@@ -396,6 +398,18 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             polyline(painter, g.pts(&[(6.0, 6.5), (7.0, 20.0), (17.0, 20.0), (18.0, 6.5)]), st);
             seg(painter, g.p(10.0, 10.0), g.p(10.3, 16.5), Stroke::new(w * 0.8, color));
             seg(painter, g.p(14.0, 10.0), g.p(13.7, 16.5), Stroke::new(w * 0.8, color));
+        }
+        Icon::Waveform => {
+            // One sine period between two short stems (a signal passing through).
+            let pts: Vec<Pos2> = (0..=24)
+                .map(|i| {
+                    let t = i as f32 / 24.0;
+                    g.p(5.0 + 14.0 * t, 12.0 - 5.5 * (t * TAU).sin())
+                })
+                .collect();
+            polyline(painter, pts, st);
+            seg(painter, g.p(2.5, 12.0), g.p(5.0, 12.0), st);
+            seg(painter, g.p(19.0, 12.0), g.p(21.5, 12.0), st);
         }
         Icon::Edit => {
             polyline(painter, g.pts(&[(5.0, 19.0), (5.6, 15.4), (15.8, 5.2), (18.8, 8.2), (8.6, 18.4), (5.0, 19.0)]), st);

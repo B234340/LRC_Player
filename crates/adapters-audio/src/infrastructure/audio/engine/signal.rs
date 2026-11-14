@@ -120,7 +120,7 @@ mod tests {
             |s| s.channels_mapped = true,
             |s| s.eq = true,
             |s| s.parametric_eq = true,
-            |s| s.crossfeed = Some(CrossfeedLevel::Low),
+            |s| s.crossfeed = Some(CrossfeedLevel::Strong),
             |s| s.normalization_db = -3.0,
             |s| s.headroom_db = -1.0,
             |s| s.volume = 0.5,

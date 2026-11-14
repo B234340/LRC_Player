@@ -101,6 +101,83 @@ pub enum NormalizationModeSetting {
     Album,
 }
 
+/// Headphone crossfeed strength, named by audible strength (`"weak"` | `"medium"` |
+/// `"strong"`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CrossfeedLevelSetting {
+    Weak,
+    #[default]
+    Medium,
+    Strong,
+}
+
+/// Dither policy for integer output formats (`"auto"` | `"off"`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DitherSetting {
+    /// TPDF dither on 16/24-bit integer output, only while the sound is processed.
+    #[default]
+    Auto,
+    Off,
+}
+
+/// Parametric-EQ filter type (`"peak"` | `"low_shelf"` | `"high_shelf"` | `"low_pass"` |
+/// `"high_pass"`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PeqFilterKindSetting {
+    #[default]
+    Peak,
+    LowShelf,
+    HighShelf,
+    LowPass,
+    HighPass,
+}
+
+/// One parametric-EQ filter (`gain_db` is ignored by the pass filters).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct PeqFilterSetting {
+    #[serde(default)]
+    pub kind: PeqFilterKindSetting,
+    #[serde(default = "default_peq_freq")]
+    pub freq_hz: f32,
+    #[serde(default)]
+    pub gain_db: f32,
+    #[serde(default = "default_peq_q")]
+    pub q: f32,
+}
+
+impl Default for PeqFilterSetting {
+    fn default() -> Self {
+        Self {
+            kind: PeqFilterKindSetting::Peak,
+            freq_hz: default_peq_freq(),
+            gain_db: 0.0,
+            q: default_peq_q(),
+        }
+    }
+}
+
+fn default_peq_freq() -> f32 {
+    1000.0
+}
+
+fn default_peq_q() -> f32 {
+    std::f32::consts::FRAC_1_SQRT_2
+}
+
+/// Parametric EQ (in series after the 10-band EQ). Off and empty by default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ParametricEqSetting {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub preamp_db: f32,
+    #[serde(default)]
+    pub filters: Vec<PeqFilterSetting>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceSettings {
     pub resampler_taps: usize,
@@ -162,6 +239,21 @@ pub struct Config {
     /// full scale.
     #[serde(default = "default_true")]
     pub prevent_clipping: bool,
+    /// Headphone crossfeed on/off (stereo output only).
+    #[serde(default)]
+    pub crossfeed_enabled: bool,
+    #[serde(default)]
+    pub crossfeed_level: CrossfeedLevelSetting,
+    /// Lower the level by the EQs' largest boost so boosts do not clip.
+    #[serde(default = "default_true")]
+    pub auto_headroom: bool,
+    #[serde(default)]
+    pub dither: DitherSetting,
+    /// WASAPI exclusive output (Windows only; ignored elsewhere).
+    #[serde(default)]
+    pub exclusive_mode: bool,
+    #[serde(default)]
+    pub parametric_eq: ParametricEqSetting,
 }
 
 fn default_accent() -> String {
@@ -199,6 +291,12 @@ impl Default for Config {
             normalization_mode: NormalizationModeSetting::default(),
             normalization_preamp_db: 0.0,
             prevent_clipping: true,
+            crossfeed_enabled: false,
+            crossfeed_level: CrossfeedLevelSetting::default(),
+            auto_headroom: true,
+            dither: DitherSetting::default(),
+            exclusive_mode: false,
+            parametric_eq: ParametricEqSetting::default(),
         }
     }
 }
@@ -272,6 +370,13 @@ mod tests {
         assert_eq!(cfg.normalization_mode, NormalizationModeSetting::Track);
         assert_eq!(cfg.normalization_preamp_db, 0.0);
         assert!(cfg.prevent_clipping);
+        assert!(!cfg.crossfeed_enabled);
+        assert_eq!(cfg.crossfeed_level, CrossfeedLevelSetting::Medium);
+        assert!(cfg.auto_headroom);
+        assert_eq!(cfg.dither, DitherSetting::Auto);
+        assert!(!cfg.exclusive_mode);
+        assert_eq!(cfg.parametric_eq, ParametricEqSetting::default());
+        assert!(!cfg.parametric_eq.enabled && cfg.parametric_eq.filters.is_empty());
         let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.resampler_taps, 64);
     }
@@ -296,5 +401,66 @@ mod tests {
             assert_eq!(v, mode);
         }
         assert_eq!(Config::default().normalization_mode, NormalizationModeSetting::Track);
+    }
+
+    #[test]
+    fn sound_quality_defaults_match_old_configs() {
+        let d = Config::default();
+        let old: Config = serde_json::from_str(r#"{"resampler_taps": 32, "preferred_output_device": null}"#).unwrap();
+        assert_eq!(old.crossfeed_enabled, d.crossfeed_enabled);
+        assert_eq!(old.crossfeed_level, d.crossfeed_level);
+        assert_eq!(old.auto_headroom, d.auto_headroom);
+        assert_eq!(old.dither, d.dither);
+        assert_eq!(old.exclusive_mode, d.exclusive_mode);
+        assert_eq!(old.parametric_eq, d.parametric_eq);
+        // A partial parametric EQ object (e.g. hand-edited) fills in the rest.
+        let partial: Config = serde_json::from_str(
+            r#"{"resampler_taps": 32, "preferred_output_device": null,
+                "parametric_eq": {"enabled": true, "filters": [{"kind": "low_shelf", "gain_db": 3.0}, {}]}}"#,
+        )
+        .unwrap();
+        assert!(partial.parametric_eq.enabled);
+        assert_eq!(partial.parametric_eq.preamp_db, 0.0);
+        let f = partial.parametric_eq.filters[0];
+        assert_eq!(f.kind, PeqFilterKindSetting::LowShelf);
+        assert_eq!((f.freq_hz, f.gain_db), (1000.0, 3.0));
+        assert!((f.q - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        assert_eq!(partial.parametric_eq.filters[1], PeqFilterSetting::default());
+    }
+
+    #[test]
+    fn sound_quality_settings_round_trip() {
+        let cfg = Config {
+            crossfeed_enabled: true,
+            crossfeed_level: CrossfeedLevelSetting::Strong,
+            auto_headroom: false,
+            dither: DitherSetting::Off,
+            exclusive_mode: true,
+            parametric_eq: ParametricEqSetting {
+                enabled: true,
+                preamp_db: -6.2,
+                filters: vec![
+                    PeqFilterSetting { kind: PeqFilterKindSetting::Peak, freq_hz: 105.0, gain_db: 4.2, q: 0.7 },
+                    PeqFilterSetting { kind: PeqFilterKindSetting::HighShelf, freq_hz: 10_000.0, gain_db: -3.0, q: 0.71 },
+                    PeqFilterSetting { kind: PeqFilterKindSetting::HighPass, freq_hz: 20.0, gain_db: 0.0, q: 0.5 },
+                ],
+            },
+            ..Config::default()
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json["crossfeed_level"], "strong");
+        assert_eq!(json["dither"], "off");
+        assert_eq!(json["parametric_eq"]["filters"][1]["kind"], "high_shelf");
+        let back: Config = serde_json::from_value(json).unwrap();
+        assert!(back.crossfeed_enabled);
+        assert_eq!(back.crossfeed_level, CrossfeedLevelSetting::Strong);
+        assert!(!back.auto_headroom);
+        assert_eq!(back.dither, DitherSetting::Off);
+        assert!(back.exclusive_mode);
+        assert_eq!(back.parametric_eq, cfg.parametric_eq);
+        for (text, level) in [("weak", CrossfeedLevelSetting::Weak), ("medium", CrossfeedLevelSetting::Medium)] {
+            let v: CrossfeedLevelSetting = serde_json::from_str(&format!("\"{text}\"")).unwrap();
+            assert_eq!(v, level);
+        }
     }
 }

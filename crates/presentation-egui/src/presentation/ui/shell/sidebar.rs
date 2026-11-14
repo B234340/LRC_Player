@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn min_height_matches_documented_value() {
         assert_eq!(SIDEBAR_MIN_HEIGHT, 524.0);
-        assert_eq!(crate::presentation::ui::shell::MIN_WINDOW_SIZE, [708.0, 616.0]);
+        assert_eq!(crate::presentation::ui::shell::MIN_WINDOW_SIZE, [741.0, 616.0]);
     }
 
     #[test]

@@ -208,6 +208,7 @@ impl GuiApp {
 
         let volume = state.volume.clamp(0.0, 1.0);
         let eq = eq_from_dto(&state.eq);
+        let peq = super::audio_quality::peq_from_config(&cfg.parametric_eq);
         let engine = if opts.engine { create_engine(&ctx, &cfg, volume, state.muted, eq) } else { None };
         let device_names = if opts.engine { AudioEngine::output_device_names() } else { Vec::new() };
 
@@ -263,6 +264,9 @@ impl GuiApp {
             volume,
             muted: state.muted,
             eq,
+            peq,
+            exclusive_unavailable: None,
+            config_save_due: None,
 
             pending_seek_ms: None,
             seek_last_change_at: None,
@@ -319,6 +323,11 @@ impl GuiApp {
                 right_panel: right_panel_from_key(state.right_panel.as_deref()),
                 sidebar: SidebarState { collapsed: state.sidebar_collapsed },
                 eq_open: false,
+                eq_tab: Default::default(),
+                eq_curve: None,
+                signal_open: false,
+                scroll_to_sound: 0,
+                autoeq_picker: None,
                 toasts: Toasts::new(),
                 library_table: Default::default(),
                 library_query: String::new(),

@@ -497,6 +497,50 @@ pub(crate) fn auto_headroom_db(eq: &EqSettings, peq: &ParametricEq, sample_rate:
     }
 }
 
+// ----- response preview (UI) ----------------------------------------------------------------
+
+/// Combined magnitude response (dB) of the graphic EQ and the parametric EQ at each of
+/// `freqs`, including both preamps (each only when its EQ is active), evaluated from the exact
+/// coefficients the renderer uses at `sample_rate`. Auto headroom is not included (see
+/// [`auto_headroom_preview_db`]). A disabled/flat EQ contributes 0 dB. Frequencies at or above
+/// Nyquist are evaluated as-is (the biquad response there is still defined).
+pub fn combined_response_db(
+    eq: &EqSettings,
+    peq: &ParametricEq,
+    sample_rate: u32,
+    freqs: &[f32],
+) -> Vec<f32> {
+    let sample_rate = sample_rate.max(1);
+    let eqc = EqCoeffs::from_settings(eq, sample_rate);
+    let peqc = PeqCoeffs::from_settings(peq, sample_rate);
+    let filters: Vec<BiquadCoeffs> = eqc
+        .bands
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| eqc.active && eqc.band_mask & (1 << i) != 0)
+        .map(|(_, b)| *b)
+        .chain(peqc.filters[..peqc.count].iter().copied())
+        .collect();
+    let pre = |active: bool, lin: f32| if active { 20.0 * lin.log10() } else { 0.0 };
+    let preamps = pre(eqc.active, eqc.preamp) + pre(peqc.active, peqc.preamp);
+    freqs
+        .iter()
+        .map(|&f| {
+            preamps
+                + filters
+                    .iter()
+                    .map(|b| b.magnitude_db(f, sample_rate))
+                    .sum::<f32>()
+        })
+        .collect()
+}
+
+/// The gain (dB, <= 0) automatic headroom would apply for these EQ settings at `sample_rate`
+/// (what the engine applies when auto headroom is on).
+pub fn auto_headroom_preview_db(eq: &EqSettings, peq: &ParametricEq, sample_rate: u32) -> f32 {
+    auto_headroom_db(eq, peq, sample_rate.max(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +577,68 @@ mod tests {
         }
         let gain_db = 20.0 * (peak / 0.25).log10();
         assert!((gain_db - 6.0).abs() < 0.2, "gain {gain_db}");
+    }
+
+    #[test]
+    fn combined_response_sums_eq_peq_and_preamps() {
+        use super::super::peq::PeqFilter;
+        let fs = 48_000;
+        let freqs = [20.0, 100.0, 1000.0, 5000.0, 20_000.0];
+        // Everything off: flat.
+        let flat = combined_response_db(&EqSettings::default(), &ParametricEq::default(), fs, &freqs);
+        assert_eq!(flat, vec![0.0; freqs.len()]);
+        // Graphic EQ: +6 dB at 1 kHz, preamp -2 dB.
+        let mut eq = EqSettings {
+            enabled: true,
+            preamp_db: -2.0,
+            ..Default::default()
+        };
+        eq.bands_db[5] = 6.0;
+        let r = combined_response_db(&eq, &ParametricEq::default(), fs, &freqs);
+        assert!((r[2] - 4.0).abs() < 0.1, "{r:?}");
+        assert!((r[0] + 2.0).abs() < 0.1, "{r:?}");
+        // Plus a PEQ peak of -4 dB at 1 kHz with a -1 dB preamp, and a 5 kHz high-pass.
+        let peq = ParametricEq {
+            enabled: true,
+            preamp_db: -1.0,
+            filters: vec![
+                PeqFilter {
+                    kind: FilterKind::Peak,
+                    freq_hz: 1000.0,
+                    gain_db: -4.0,
+                    q: 1.0,
+                },
+                PeqFilter {
+                    kind: FilterKind::HighPass,
+                    freq_hz: 5000.0,
+                    gain_db: 0.0,
+                    q: std::f32::consts::FRAC_1_SQRT_2,
+                },
+            ],
+        };
+        let r = combined_response_db(&eq, &peq, fs, &freqs);
+        // 1 kHz: +6 - 2 - 4 - 1 = -1 dB, minus the high-pass skirt (~-28 dB two octaves down).
+        let hp_1k = r[2] - (-1.0);
+        assert!(hp_1k < -20.0 && hp_1k > -35.0, "{r:?}");
+        // At the cutoff a Butterworth high-pass is -3 dB.
+        let hp_only = ParametricEq {
+            enabled: true,
+            preamp_db: -1.0,
+            filters: vec![peq.filters[1]],
+        };
+        let at_fc = combined_response_db(&EqSettings::default(), &hp_only, fs, &[5000.0])[0];
+        assert!((at_fc - (-1.0 - 3.01)).abs() < 0.05, "{at_fc}");
+        // A disabled PEQ contributes nothing, preamp included.
+        let off = ParametricEq {
+            enabled: false,
+            ..peq.clone()
+        };
+        let r2 = combined_response_db(&eq, &off, fs, &freqs);
+        assert!((r2[2] - 4.0).abs() < 0.1, "{r2:?}");
+        // Matches the per-biquad sum used by auto headroom.
+        let boost = max_boost_db(&eq, &ParametricEq::default(), fs);
+        assert!((boost - 6.0).abs() < 0.1);
+        assert!((auto_headroom_preview_db(&eq, &ParametricEq::default(), fs) + 4.0).abs() < 0.1);
     }
 
     #[test]

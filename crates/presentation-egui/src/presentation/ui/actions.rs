@@ -2,11 +2,11 @@
 //!
 //! Components never call into the application; they return [`UiAction`]s that the app
 //! interprets. All payloads are plain data so the enum stays independent of other crates
-//! (except [`EqSettings`], whose API is stable).
+//! (except the engine's [`EqSettings`] / [`ParametricEq`], whose APIs are stable).
 
 use std::path::PathBuf;
 
-pub use lrc_player_application::infrastructure::audio::engine::EqSettings;
+pub use lrc_player_application::infrastructure::audio::engine::{EqSettings, ParametricEq};
 
 /// Top-level pages reachable from the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -174,6 +174,16 @@ pub enum UiAction {
 
     // ----- EQ -----
     SetEq(EqSettings),
+    /// New parametric-EQ settings (full replacement).
+    SetParametricEq(ParametricEq),
+    /// Switch the EQ popover tab.
+    SetEqTab(crate::presentation::ui::views::EqTab),
+    /// Open the AutoEq / Equalizer APO profile file dialog.
+    ImportAutoEqFile,
+    /// Import an AutoEq / Equalizer APO profile from text (clipboard paste).
+    ImportAutoEqText(String),
+    /// Toggle the signal-path popover (transport quality indicator).
+    ToggleSignalPath,
 
     // ----- folders / scan -----
     AddFolder,

@@ -738,7 +738,8 @@ impl GuiApp {
             // Measure what is playing now (the next poll re-requests current / next).
             self.loudness.reset_current_and_next();
         }
-        self.save_config();
+        // Debounced: the preamp slider calls this on every drag step.
+        self.save_config_soon();
     }
 
     /// Queues every library track for loudness analysis (background priority; tagged and

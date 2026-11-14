@@ -19,8 +19,8 @@ const ROOT_MARGIN_Y: f32 = 16.0;
 /// Minimum window width: the transport bar spans the whole window (the sidebar and pages
 /// sit above it), so the window must fit the bar with every control shown —
 /// [`transport::MIN_WIDTH_ALL_CONTROLS`] (`2 × 14 pad + 160 artwork/title + 16 + 256
-/// controls/seek bar + 16 + 216 lyrics/queue/EQ/volume = 692`) + [`ROOT_MARGIN_X`] (16)
-/// = 708. That leaves 708 − 16 − 216 − 8 = 468 px for pages with the sidebar expanded.
+/// controls/seek bar + 16 + 249 lyrics/queue/EQ/quality/volume = 725`) + [`ROOT_MARGIN_X`] (16)
+/// = 741. That leaves 741 − 16 − 216 − 8 = 501 px for pages with the sidebar expanded.
 pub const MIN_WINDOW_WIDTH: f32 = transport::MIN_WIDTH_ALL_CONTROLS + ROOT_MARGIN_X;
 
 /// Minimum window height: the sidebar's minimum ([`sidebar::SIDEBAR_MIN_HEIGHT`] = brand,

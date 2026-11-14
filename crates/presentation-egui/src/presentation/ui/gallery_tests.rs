@@ -305,6 +305,8 @@ fn mock_shell(ui: &mut Ui, s: &mut ShellState, page: MockPage, right: Option<Rig
                     queue_len: 12,
                     no_output: false,
                     favorite: Some(false),
+                    quality: Some(crate::presentation::ui::views::QualityBadge::Untouched),
+                    signal_open: false,
                     tr,
                 },
             );
@@ -613,6 +615,8 @@ fn transport_widths() {
                         queue_len: 12,
                         no_output: false,
                         favorite: Some(false),
+                        quality: Some(crate::presentation::ui::views::QualityBadge::Untouched),
+                        signal_open: false,
                         tr: Tr::JA,
                     },
                 );
@@ -713,7 +717,8 @@ fn components_page(ui: &mut Ui, query: &mut String, tr: Tr) {
             });
             widgets::card(&mut cols[1], |ui| {
                 let mut eq = EqSettings { enabled: true, preamp_db: -3.0, bands_db: [4.5, 3.5, 2.0, -0.5, -1.5, -0.5, 1.5, 3.0, 4.0, 4.5] };
-                for a in eq_panel(ui, &EqPanelProps { settings: eq, tr }) {
+                let peq = Default::default();
+                for a in eq_panel(ui, &EqPanelProps { settings: eq, peq: &peq, tab: Default::default(), curve: None, max_height: 600.0, importing: false, tr }) {
                     if let super::UiAction::SetEq(s) = a {
                         eq = s;
                     }
@@ -736,6 +741,11 @@ fn eq_popover() {
                         ui,
                         &EqPanelProps {
                             settings: EqSettings { enabled: true, preamp_db: -2.0, bands_db: [-1.0, 1.0, 2.5, 3.5, 2.5, 0.0, -1.0, -1.0, 0.5, 1.0] },
+                            peq: &Default::default(),
+                            tab: Default::default(),
+                            curve: None,
+                            max_height: 600.0,
+                            importing: false,
                             tr: Tr::JA,
                         },
                     );
@@ -787,5 +797,5 @@ const ALL_ICONS: &[Icon] = &[
     Icon::HeartFilled, Icon::Note, Icon::NowPlaying, Icon::ChevronLeft, Icon::ChevronRight,
     Icon::ChevronDown, Icon::ChevronUp, Icon::Check, Icon::Trash, Icon::Refresh, Icon::Grip,
     Icon::SidebarToggle, Icon::Save, Icon::Info, Icon::Warning, Icon::Error, Icon::Success,
-    Icon::TextSmaller, Icon::TextLarger, Icon::Undo, Icon::ArrowDownToLine, Icon::Speaker, Icon::Edit,
+    Icon::TextSmaller, Icon::TextLarger, Icon::Undo, Icon::ArrowDownToLine, Icon::Speaker, Icon::Edit, Icon::Waveform,
 ];

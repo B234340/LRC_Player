@@ -211,7 +211,12 @@ impl GuiApp {
                 }
                 self.save_state();
             }
-            UiAction::ToggleEq => self.ui.eq_open = !self.ui.eq_open,
+            UiAction::ToggleEq => {
+                self.ui.eq_open = !self.ui.eq_open;
+                if self.ui.eq_open {
+                    self.ui.signal_open = false;
+                }
+            }
             UiAction::FocusSearch => {
                 let has_search = (self.ui.page == Page::Library)
                     || (self.ui.page == Page::Artists && self.ui.artist_detail.is_none());
@@ -347,6 +352,18 @@ impl GuiApp {
 
             // ----- EQ -----
             UiAction::SetEq(eq) => self.set_eq(eq),
+            UiAction::SetParametricEq(peq) => self.set_parametric_eq(peq),
+            UiAction::SetEqTab(tab) => self.ui.eq_tab = tab,
+            UiAction::ImportAutoEqFile => self.pick_autoeq_file(ctx),
+            UiAction::ImportAutoEqText(text) => {
+                self.import_autoeq_text(&text);
+            }
+            UiAction::ToggleSignalPath => {
+                self.ui.signal_open = !self.ui.signal_open;
+                if self.ui.signal_open {
+                    self.ui.eq_open = false;
+                }
+            }
 
             // ----- folders / scan -----
             UiAction::AddFolder => self.pick_folder(ctx, false),

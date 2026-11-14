@@ -13,6 +13,7 @@ use crate::presentation::ui::{
     text,
     icons::{icon_button, icon_button_ex, play_button, Icon, IconButtonStyle},
     theme::{self, metrics},
+    views::QualityBadge,
     widgets::{artwork::paint_artwork, seek_bar, volume_control, Tex},
 };
 
@@ -40,6 +41,10 @@ pub struct TransportProps<'a> {
     pub no_output: bool,
     /// Favorite state of the playing track (`None` hides the heart).
     pub favorite: Option<bool>,
+    /// Signal-path verdict of the audible track (`None`: nothing playing / no device).
+    pub quality: Option<QualityBadge>,
+    /// The signal-path popover is open.
+    pub signal_open: bool,
     pub tr: Tr,
 }
 
@@ -71,15 +76,16 @@ const CONTROLS_ROW_W: f32 = 36.0 + 2.0 * 34.0 + 2.0 * 6.0 + 2.0 * (34.0 + 10.0);
 const TIME_W: f32 = 40.0;
 const SEEK_MIN: f32 = 160.0;
 const CENTER_MIN: f32 = if CONTROLS_ROW_W > SEEK_MIN + 2.0 * (TIME_W + 8.0) { CONTROLS_ROW_W } else { SEEK_MIN + 2.0 * (TIME_W + 8.0) };
-/// Right: lyrics, queue, EQ (≈ 31 px each, 2 px gaps), 6 px gap, mute (36) + volume
-/// slider (≥ 64) + small slack = 216.
+/// Right: lyrics, queue, EQ, sound quality (≈ 31 px each, 2 px gaps), 6 px gap, mute (36) +
+/// volume slider (≥ 64) + small slack = 249.
 const SLIDER_MIN: f32 = 64.0;
 const SLIDER_MAX: f32 = 96.0;
-const RIGHT_FIXED: f32 = 3.0 * 31.0 + 3.0 * 2.0 + 6.0 + 36.0 + 2.0 + 9.0;
+const TOGGLES: f32 = 4.0;
+const RIGHT_FIXED: f32 = TOGGLES * 31.0 + TOGGLES * 2.0 + 6.0 + 36.0 + 2.0 + 9.0;
 const RIGHT_MIN: f32 = RIGHT_FIXED + SLIDER_MIN;
 const RIGHT_MAX: f32 = 330.0;
 
-/// Narrowest bar that shows every control: `2 × 14 + 160 + 16 + 256 + 16 + 216 = 692`.
+/// Narrowest bar that shows every control: `2 × 14 + 160 + 16 + 256 + 16 + 249 = 725`.
 /// The bar spans the whole window (the sidebar sits above it), so this is also the
 /// window's minimum width apart from the root margin (see `shell::MIN_WINDOW_WIDTH`).
 pub const MIN_WIDTH_ALL_CONTROLS: f32 = 2.0 * PAD + LEFT_MIN + REGION_GAP + CENTER_MIN + REGION_GAP + RIGHT_MIN;
@@ -300,6 +306,23 @@ pub fn transport_bar(ui: &mut Ui, props: &TransportProps<'_>) -> Vec<UiAction> {
         }
         if medium {
             rui.add_space(6.0);
+            if wide {
+                // Sound-quality indicator: a colored dot for bit-perfect / untouched output.
+                let tip = match props.quality {
+                    Some(q) => tr.f("transport.signal_tip", &[&q.label(tr)]),
+                    None => tr.t("transport.signal").to_owned(),
+                };
+                let style = IconButtonStyle { active: props.signal_open, ..Default::default() };
+                let qb = icon_button_ex(&mut rui, Icon::Waveform, 17.0, style, &tip);
+                if let Some(q) = props.quality.filter(|q| *q != QualityBadge::Processed) {
+                    let c = pos2(qb.rect.right() - 7.0, qb.rect.top() + 8.0);
+                    rui.painter().circle_filled(c, 4.5, pal.bg);
+                    rui.painter().circle_filled(c, 3.2, q.color(&pal));
+                }
+                if qb.clicked() {
+                    actions.push(UiAction::ToggleSignalPath);
+                }
+            }
             if wide
                 && icon_button(&mut rui, Icon::Eq, 17.0, props.eq_open || props.eq_enabled, tr.t("transport.eq")).clicked()
             {
@@ -330,8 +353,9 @@ mod tests {
     #[test]
     fn all_controls_fit_at_and_above_the_minimum() {
         assert_eq!(CENTER_MIN, 256.0);
-        assert_eq!(MIN_WIDTH_ALL_CONTROLS, 692.0);
-        for w in [MIN_WIDTH_ALL_CONTROLS, 700.0, 760.0, 900.0, 1264.0, 2000.0] {
+        assert_eq!(RIGHT_MIN, 249.0);
+        assert_eq!(MIN_WIDTH_ALL_CONTROLS, 725.0);
+        for w in [MIN_WIDTH_ALL_CONTROLS, 730.0, 760.0, 900.0, 1264.0, 2000.0] {
             let l = transport_layout(w);
             assert!(l.all_controls, "w={w}");
             let center = w - 2.0 * PAD - l.left_w - l.right_w - 2.0 * REGION_GAP;

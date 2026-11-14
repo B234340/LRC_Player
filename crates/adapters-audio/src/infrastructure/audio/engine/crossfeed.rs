@@ -16,25 +16,27 @@
 //! exactly at unity at every frequency, so the result is fully mono compatible. One one-pole
 //! filter per stereo frame: negligible CPU.
 
-/// Crossfeed strength presets (libbs2b's presets).
+/// Crossfeed strength presets (libbs2b's presets), named by audible strength: the feed level is
+/// how far the crossfed signal sits below the direct one, so a *smaller* dB value is a
+/// *stronger* crossfeed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CrossfeedLevel {
-    /// 700 Hz, 4.5 dB (libbs2b "default").
-    #[default]
-    Low,
+    /// 650 Hz, 9.5 dB (libbs2b "Jan Meier"): the subtlest.
+    Weak,
     /// 700 Hz, 6.0 dB (libbs2b "Chu Moy").
+    #[default]
     Medium,
-    /// 650 Hz, 9.5 dB (libbs2b "Jan Meier").
-    High,
+    /// 700 Hz, 4.5 dB (libbs2b "default"): the strongest.
+    Strong,
 }
 
 impl CrossfeedLevel {
     /// (low-pass cutoff in Hz, feed level in dB).
     pub fn params(self) -> (f32, f32) {
         match self {
-            CrossfeedLevel::Low => (700.0, 4.5),
+            CrossfeedLevel::Strong => (700.0, 4.5),
             CrossfeedLevel::Medium => (700.0, 6.0),
-            CrossfeedLevel::High => (650.0, 9.5),
+            CrossfeedLevel::Weak => (650.0, 9.5),
         }
     }
 }
@@ -118,9 +120,9 @@ mod tests {
     #[test]
     fn centre_signal_stays_at_unity() {
         for level in [
-            CrossfeedLevel::Low,
+            CrossfeedLevel::Strong,
             CrossfeedLevel::Medium,
-            CrossfeedLevel::High,
+            CrossfeedLevel::Weak,
         ] {
             let c = CrossfeedCoeffs::new(
                 &Crossfeed {
@@ -150,9 +152,9 @@ mod tests {
     fn hard_panned_levels_match_bs2b_feed() {
         let fs = 48_000.0;
         for level in [
-            CrossfeedLevel::Low,
+            CrossfeedLevel::Strong,
             CrossfeedLevel::Medium,
-            CrossfeedLevel::High,
+            CrossfeedLevel::Weak,
         ] {
             let c = CrossfeedCoeffs::new(
                 &Crossfeed {
@@ -182,6 +184,17 @@ mod tests {
             let (l, r) = measure(12_000.0);
             assert!(l > 0.49 && r < 0.02, "{level:?}: hf {l} {r}");
         }
+    }
+
+    /// Names follow audible strength: a stronger level feeds more of the opposite channel.
+    #[test]
+    fn level_names_follow_audible_strength() {
+        let gain = |level: CrossfeedLevel| {
+            let (_, feed_db) = level.params();
+            1.0 / (1.0 + 10f32.powf(feed_db / 20.0))
+        };
+        assert!(gain(CrossfeedLevel::Weak) < gain(CrossfeedLevel::Medium));
+        assert!(gain(CrossfeedLevel::Medium) < gain(CrossfeedLevel::Strong));
     }
 
     #[test]

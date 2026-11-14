@@ -133,6 +133,10 @@ pub(crate) struct EngineThread {
     device_error_reported: bool,
     eq: EqSettings,
     norm: Normalization,
+    /// Sequence number of the last entry known to have been rendered to the device (0 = none).
+    /// A loudness hint that arrives after its track started does not change that track's gain
+    /// (no audible jump mid-track); it applies from the next time the track starts.
+    heard_seq: u64,
     /// Loudness hints from the application (bounded, see `MAX_HINTS`).
     hints: HashMap<PathBuf, LoudnessHint>,
     peq: ParametricEq,
@@ -222,6 +226,7 @@ impl EngineThread {
             device_error_reported: false,
             eq: EqSettings::default(),
             norm: Normalization::default(),
+            heard_seq: 0,
             hints: HashMap::new(),
             peq: ParametricEq::default(),
             xfeed: Crossfeed::default(),
@@ -974,6 +979,7 @@ impl EngineThread {
     }
 
     fn track_progress(&mut self) {
+        self.front_was_heard();
         let clock = self.rt.clock.read();
         if clock.gen == self.gen && self.entries.iter().any(|e| e.seq == clock.track_seq) {
             while self.entries.len() > 1 && self.entries[0].seq != clock.track_seq {
@@ -1283,12 +1289,17 @@ impl EngineThread {
 
     /// Recomputes every queued entry's gain and sends the changed ones (the renderer ramps the
     /// audible track's gain; queued tracks switch at their boundary).
+    ///
+    /// `only` is set for a loudness hint (a measurement that finished): it never changes the
+    /// track already being heard, which would be an audible volume jump shortly after the start.
+    /// Settings changes (`only == None`) apply to it with a ramp.
     fn refresh_gains(&mut self, only: Option<&std::path::Path>) {
         let rate = self.output.as_ref().map(|o| o.feeder.rate());
+        let keep_front = only.is_some() && self.front_was_heard();
         let mut cmds: Vec<RtCommand> = Vec::new();
         for i in 0..self.entries.len() {
             let e = &self.entries[i];
-            if only.is_some_and(|p| p != e.path) {
+            if only.is_some_and(|p| p != e.path) || (i == 0 && keep_front) {
                 continue;
             }
             let g = self.track_gain(&e.path, &e.meta);
@@ -1310,6 +1321,23 @@ impl EngineThread {
         for c in cmds {
             self.rt_cmd(c);
         }
+    }
+
+    /// Whether the front entry has been rendered to the device (sticky per entry, so a seek
+    /// that resets the clock's segment does not make it "unheard").
+    fn front_was_heard(&mut self) -> bool {
+        let Some(front) = self.entries.front() else {
+            return false;
+        };
+        if self.heard_seq == front.seq {
+            return true;
+        }
+        let clock = self.rt.clock.read();
+        let heard = clock.gen == self.gen && clock.track_seq == front.seq && clock.pos_end > clock.base;
+        if heard {
+            self.heard_seq = front.seq;
+        }
+        heard
     }
 
     fn set_normalization(&mut self, n: Normalization) {

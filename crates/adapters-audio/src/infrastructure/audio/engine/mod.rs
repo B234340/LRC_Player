@@ -54,7 +54,10 @@ use crossbeam_channel::{Receiver, Sender};
 pub use convert::ResamplerKind;
 pub use crossfeed::{Crossfeed, CrossfeedLevel};
 pub use dither::DitherMode;
-pub use dsp::{EqSettings, EQ_BANDS, EQ_FREQUENCIES_HZ, EQ_MAX_GAIN_DB};
+pub use dsp::{
+    auto_headroom_preview_db, combined_response_db, EqSettings, EQ_BANDS, EQ_FREQUENCIES_HZ,
+    EQ_MAX_GAIN_DB,
+};
 pub use normalization::{GainSource, LoudnessHint, Normalization, NormalizationMode};
 pub use peq::{
     parse_autoeq, FilterKind, ParametricEq, PeqFilter, PEQ_MAX_FILTERS, PEQ_MAX_GAIN_DB,

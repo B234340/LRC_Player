@@ -19,6 +19,7 @@
 //! [`UiAction`]: crate::presentation::ui::UiAction
 
 mod artwork;
+mod audio_quality;
 mod artwork_loader;
 mod dispatch;
 mod drop;
@@ -54,7 +55,7 @@ use crossbeam_channel::Receiver;
 use eframe::{egui, App};
 use lrc_player_application::config::Config;
 use lrc_player_application::dto::PlaylistDto;
-use lrc_player_application::infrastructure::audio::engine::{AudioEngine, EngineSnapshot, EqSettings};
+use lrc_player_application::infrastructure::audio::engine::{AudioEngine, EngineSnapshot, EqSettings, ParametricEq};
 use lrc_player_application::infrastructure::lyrics::{LyricsCandidate, LyricsTimeline};
 use lrc_player_application::infrastructure::persistence::{SharedMetaCache, StateSaver};
 use lrc_player_application::usecases::queue_navigation::QueueNavigator;
@@ -67,10 +68,11 @@ pub use state::{initial_window, AppOptions};
 
 pub use artwork_loader::ArtworkMode;
 pub(crate) use artwork_loader::ArtworkLoader;
+pub(crate) use audio_quality::EXCLUSIVE_SUPPORTED;
 
 use crate::presentation::ui::{
     shell::SidebarState,
-    views::{Column, LyricsViewState, NowPlayingState, TrackTableState},
+    views::{Column, EqCurve, EqTab, LyricsViewState, NowPlayingState, TrackTableState},
     widgets::Toasts,
     Accent, Lang, Page, RightPanel, ThemeMode, Tr,
 };
@@ -121,6 +123,16 @@ pub(crate) struct UiShell {
     pub(crate) right_panel: Option<RightPanel>,
     pub(crate) sidebar: SidebarState,
     pub(crate) eq_open: bool,
+    /// Tab shown in the EQ popover.
+    pub(crate) eq_tab: EqTab,
+    /// Cached frequency response for the EQ popover graph.
+    pub(crate) eq_curve: Option<EqCurve>,
+    /// Signal-path popover (opened from the transport's quality indicator).
+    pub(crate) signal_open: bool,
+    /// Frames left in which Settings scrolls its 音質 section into view.
+    pub(crate) scroll_to_sound: u8,
+    /// Pending AutoEq file picker (see `app/audio_quality.rs`).
+    pub(crate) autoeq_picker: Option<Receiver<audio_quality::AutoEqPick>>,
     pub(crate) toasts: Toasts,
     pub(crate) library_table: TrackTableState,
     pub(crate) library_query: String,
@@ -196,6 +208,13 @@ pub struct GuiApp {
     pub(crate) volume: f32,
     pub(crate) muted: bool,
     pub(crate) eq: EqSettings,
+    /// Parametric EQ (mirrors `config.parametric_eq`).
+    pub(crate) peq: ParametricEq,
+    /// Last `ExclusiveUnavailable` reason while exclusive mode is requested (shown in
+    /// Settings; one toast per distinct reason).
+    pub(crate) exclusive_unavailable: Option<String>,
+    /// A debounced `config.json` write is pending (see `GuiApp::save_config_soon`).
+    pub(crate) config_save_due: Option<Instant>,
 
     // ---- Seeking ----
     pub(crate) pending_seek_ms: Option<u64>,
@@ -298,6 +317,7 @@ impl GuiApp {
             self.media.sync(&view, self.play_cover_path.as_deref());
         }
         self.maybe_submit_state();
+        self.flush_config_if_due(false);
         self.schedule_repaint(ctx);
     }
 
@@ -321,12 +341,17 @@ impl GuiApp {
             ctx.request_repaint_after(seek::SEEK_DEBOUNCE);
             return;
         }
-        if self.ui.folder_picker.is_some() || self.ui.fonts_rx.is_some() || self.ui.drop_rx.is_some() {
+        if self.ui.folder_picker.is_some() || self.ui.fonts_rx.is_some() || self.ui.drop_rx.is_some() || self.ui.autoeq_picker.is_some() {
             // Results also wake the UI; this is only a safety net.
             ctx.request_repaint_after(Duration::from_millis(500));
         }
+        if let Some(due) = self.config_save_due {
+            ctx.request_repaint_after(due.saturating_duration_since(Instant::now()));
+        }
         match self.playback_state {
             PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
+                // The signal path (Settings → 音質, transport popover) and the transport time
+                // are refreshed by the ~4 fps tick below; nothing extra is scheduled for them.
                 let time_based_visible = self.ui.page == Page::NowPlaying
                     || self.ui.right_panel == Some(RightPanel::Lyrics);
                 if time_based_visible {
@@ -376,6 +401,7 @@ impl App for GuiApp {
         self.poll_library();
         self.poll_loudness();
         self.poll_folder_picker();
+        self.poll_autoeq_picker();
         self.poll_lyric_alignment(ctx);
         self.poll_lyrics_fetch(ctx);
         self.poll_dropped();

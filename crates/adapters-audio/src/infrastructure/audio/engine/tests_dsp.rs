@@ -207,9 +207,10 @@ fn gapless_boundary_switches_normalization_gain_exactly() {
     assert_eq!(engine.snapshot().underruns, 0);
 }
 
-/// A hint for the track that is already playing ramps the gain over ~300 ms (no jump).
+/// A hint that arrives while its track is already playing does not change that track's gain
+/// (no volume jump shortly after the start); a settings change applies it, ramped over ~300 ms.
 #[test]
-fn late_hint_ramps_the_playing_track_smoothly() {
+fn late_hint_keeps_the_playing_track_gain() {
     let dir = TempDir::new("norm_late");
     let path = dir.file("dc.wav");
     let rate = 48_000u32;
@@ -229,6 +230,20 @@ fn late_hint_ramps_the_playing_track_smoothly() {
     assert_eq!(*out.last().unwrap(), level);
 
     engine.set_loudness_hint(path.clone(), Some(hint(-12.0)));
+    engine.sync();
+    let start = out.len() / 2;
+    for _ in 0..50 {
+        out.extend(render(&engine, 2, 480));
+    }
+    assert!(
+        out.chunks(2).skip(start).all(|f| f[0] == level),
+        "a late hint changed the playing track's gain"
+    );
+    let s = engine.snapshot().signal.unwrap();
+    assert_eq!(s.normalization_source, GainSource::None);
+
+    // A settings change recomputes the playing track's gain (now with the hint), smoothly.
+    engine.set_normalization(track_mode());
     engine.sync();
     let start = out.len() / 2;
     for _ in 0..50 {
@@ -261,8 +276,8 @@ fn late_hint_ramps_the_playing_track_smoothly() {
     assert_eq!(s.normalization_source, GainSource::Hint);
     assert!((s.normalization_db + 12.0).abs() < 1e-4);
     assert!(!s.bit_perfect);
-    // Removing the hint ramps back up, also smoothly.
-    engine.set_loudness_hint(path, None);
+    // Turning normalization off ramps back up, also smoothly.
+    engine.set_normalization(Normalization::default());
     engine.sync();
     let start = out.len() / 2;
     for _ in 0..40 {
@@ -296,7 +311,7 @@ fn crossfeed_keeps_centre_signal_at_unity() {
     let engine = manual_engine(rate, 2);
     engine.set_crossfeed(Crossfeed {
         enabled: true,
-        level: CrossfeedLevel::High,
+        level: CrossfeedLevel::Weak,
     });
     engine.load(path, 0, true);
     let out = render_to_end(&engine, 2, 512, frames * 3);
@@ -487,11 +502,11 @@ fn bit_perfect_only_when_everything_is_off() {
 
     engine.set_crossfeed(Crossfeed {
         enabled: true,
-        level: CrossfeedLevel::Low,
+        level: CrossfeedLevel::Strong,
     });
     assert_eq!(
         check(false, "crossfeed").crossfeed,
-        Some(CrossfeedLevel::Low)
+        Some(CrossfeedLevel::Strong)
     );
     engine.set_crossfeed(Crossfeed::default());
     check(true, "crossfeed off");
@@ -499,6 +514,8 @@ fn bit_perfect_only_when_everything_is_off() {
     engine.set_normalization(track_mode());
     check(true, "normalization without data");
     engine.set_loudness_hint(p48.clone(), Some(hint(-3.0)));
+    // (a hint for the playing track applies on the next settings change)
+    engine.set_normalization(track_mode());
     // (wait for the 300 ms ramp to settle into a steady gain)
     for _ in 0..40 {
         render(&engine, 2, 480);
