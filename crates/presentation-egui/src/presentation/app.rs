@@ -40,6 +40,7 @@ mod shell;
 mod spectrum;
 mod state;
 mod track_info;
+mod startup_cloak;
 mod window_scale;
 
 #[cfg(test)]
@@ -417,6 +418,7 @@ impl App for GuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.draw_shell(ui);
+        startup_cloak::reveal_when_ready(&ctx);
         // Again after drawing, so actions from this frame's UI are reflected right away.
         self.after_frame(&ctx);
         self.artwork.end_frame();

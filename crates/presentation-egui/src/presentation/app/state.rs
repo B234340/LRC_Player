@@ -157,6 +157,7 @@ pub fn initial_window() -> Option<WindowStateDto> {
 impl GuiApp {
     /// The real application (persistent state, audio engine, system fonts).
     pub fn new(cc: &CreationContext<'_>) -> Self {
+        super::startup_cloak::cloak(cc);
         let mut app = Self::with_options(&cc.egui_ctx, AppOptions::default());
         app.wait_for_fonts(&cc.egui_ctx);
         app
