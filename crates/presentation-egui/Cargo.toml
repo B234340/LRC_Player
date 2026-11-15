@@ -50,8 +50,9 @@ winit = { version = "0.30", default-features = false, features = ["wayland-dlope
 
 [target.'cfg(windows)'.dependencies.winapi]
 version = "0.3.9"
-# windef/minwindef: window procedure subclassing in app/window_scale.rs.
-features = ["winuser", "windef", "minwindef"]
+# windef/minwindef/commctrl/basetsd: window procedure subclassing in app/window_scale.rs.
+# dwmapi: cloaking the window until its first frames are drawn (app/startup_cloak.rs).
+features = ["winuser", "windef", "minwindef", "dwmapi", "commctrl", "basetsd"]
 
 [dev-dependencies]
 tempfile = "3"

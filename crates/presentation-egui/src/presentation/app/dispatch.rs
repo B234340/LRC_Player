@@ -211,7 +211,12 @@ impl GuiApp {
                 }
                 self.save_state();
             }
-            UiAction::ToggleEq => self.ui.eq_open = !self.ui.eq_open,
+            UiAction::ToggleEq => {
+                self.ui.eq_open = !self.ui.eq_open;
+                if self.ui.eq_open {
+                    self.ui.signal_open = false;
+                }
+            }
             UiAction::FocusSearch => {
                 let has_search = (self.ui.page == Page::Library)
                     || (self.ui.page == Page::Artists && self.ui.artist_detail.is_none());
@@ -338,13 +343,29 @@ impl GuiApp {
             UiAction::LyricShiftLines(d) => self.set_lyrics_shift(self.lyrics_shift.lines + d, self.lyrics_shift.chars),
             UiAction::LyricShiftChars(d) => self.set_lyrics_shift(self.lyrics_shift.lines, self.lyrics_shift.chars + d),
             UiAction::LyricShiftReset => self.set_lyrics_shift(0, 0),
+            UiAction::GenerateLyricTiming => self.start_lyric_alignment(ctx),
+            UiAction::FetchLyricsOnline => self.start_lyrics_fetch(ctx, true),
             UiAction::SetLyricFontSize(size) => {
                 self.config.lyric_font_size = size.clamp(14.0, 56.0);
                 self.save_config();
             }
+            UiAction::ToggleDesktopLyrics => self.toggle_desktop_lyrics(ctx),
+            UiAction::SetDesktopLyricsLocked(locked) => self.set_desktop_lyrics_locked(ctx, locked),
 
             // ----- EQ -----
             UiAction::SetEq(eq) => self.set_eq(eq),
+            UiAction::SetParametricEq(peq) => self.set_parametric_eq(peq),
+            UiAction::SetEqTab(tab) => self.ui.eq_tab = tab,
+            UiAction::ImportAutoEqFile => self.pick_autoeq_file(ctx),
+            UiAction::ImportAutoEqText(text) => {
+                self.import_autoeq_text(&text);
+            }
+            UiAction::ToggleSignalPath => {
+                self.ui.signal_open = !self.ui.signal_open;
+                if self.ui.signal_open {
+                    self.ui.eq_open = false;
+                }
+            }
 
             // ----- folders / scan -----
             UiAction::AddFolder => self.pick_folder(ctx, false),

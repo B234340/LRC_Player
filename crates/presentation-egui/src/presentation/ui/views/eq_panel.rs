@@ -1,17 +1,25 @@
-//! Graphic equalizer panel: enable switch, presets, preamp, 10 vertical band sliders.
+//! EQ popover contents: graphic (10-band: enable switch, presets, preamp, vertical band
+//! sliders) and parametric (filter list, AutoEq import) tabs over a shared frequency-response
+//! graph (`eq_graph.rs`).
 
 use eframe::egui::{
     self, pos2, vec2, Align, Color32, CursorIcon, FontId, Id, Layout, Rect, Sense, Stroke, Ui,
 };
 
 use crate::presentation::ui::{
-    actions::{EqSettings, UiAction},
+    actions::{EqSettings, ParametricEq, UiAction},
     i18n::Tr,
-    icons::Icon,
+    icons::{icon_button, Icon},
     theme,
+    views::{
+        eq_graph::{hz_text, response_graph, EqCurve},
+        settings::{fit_segmented, with_max_width},
+    },
     widgets::{button, slider::wheel_notches, toggle_switch, ButtonKind},
 };
-use lrc_player_application::infrastructure::audio::engine::{EQ_FREQUENCIES_HZ, EQ_MAX_GAIN_DB};
+use lrc_player_application::infrastructure::audio::engine::{
+    FilterKind, PeqFilter, EQ_FREQUENCIES_HZ, EQ_MAX_GAIN_DB, PEQ_MAX_FILTERS, PEQ_MAX_GAIN_DB,
+};
 
 /// A named preset.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,8 +49,26 @@ pub fn matching_preset(s: &EqSettings) -> Option<&'static EqPreset> {
     })
 }
 
-pub struct EqPanelProps {
+/// Tabs of the EQ popover.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum EqTab {
+    /// The 10-band graphic EQ.
+    #[default]
+    Graphic,
+    /// The parametric EQ (with AutoEq import).
+    Parametric,
+}
+
+pub struct EqPanelProps<'a> {
     pub settings: EqSettings,
+    pub peq: &'a ParametricEq,
+    pub tab: EqTab,
+    /// Cached response curve (`None` draws the empty grid).
+    pub curve: Option<&'a EqCurve>,
+    /// Height the panel may use (the filter list scrolls within it).
+    pub max_height: f32,
+    /// The AutoEq file dialog is open.
+    pub importing: bool,
     pub tr: Tr,
 }
 
@@ -80,45 +106,84 @@ const GAP_MAX: f32 = 14.0;
 /// dB values with a grid line (and a scale label).
 const GRID_DB: [f32; 5] = [12.0, 6.0, 0.0, -6.0, -12.0];
 
-/// Draw the EQ panel. Emits `SetEq` with the full new settings on every change.
+/// Draw the EQ popover contents: a title with the グラフィック / パラメトリック tabs, the
+/// combined frequency-response graph and the selected tab. Emits `SetEq` /
+/// `SetParametricEq` with the full new settings on every change, `SetEqTab` on a tab switch
+/// and the AutoEq import actions.
 ///
-/// Layout (fits any width; below ~340 px the slider block scrolls horizontally):
-/// header row (title … "enabled" + switch), preset row (label, combo … reset), then the
-/// preamp slider, a separator, a dB scale and the 10 band sliders over 0 / ±6 / ±12 dB grid
-/// lines. Columns and gaps compress with the width.
-pub fn eq_panel(ui: &mut Ui, props: &EqPanelProps) -> Vec<UiAction> {
+/// Layout (fits any width): header (title … tabs), graph, then for the graphic tab the
+/// enable / preset / reset row and the slider block (columns compress, below ~340 px it
+/// scrolls horizontally); for the parametric tab the enable / preamp row, the import
+/// buttons (as many rows as needed), the filter list (scrolls inside `max_height`; rows stack below
+/// ~446 px) and "add filter" … "remove all".
+pub fn eq_panel(ui: &mut Ui, props: &EqPanelProps<'_>) -> Vec<UiAction> {
     egui::Frame::new().inner_margin(PANEL_PADDING).show(ui, |ui| eq_panel_contents(ui, props)).inner
 }
 
-fn eq_panel_contents(ui: &mut Ui, props: &EqPanelProps) -> Vec<UiAction> {
+fn eq_panel_contents(ui: &mut Ui, props: &EqPanelProps<'_>) -> Vec<UiAction> {
     let pal = theme::palette(ui);
     let tr = props.tr;
-    let mut s = props.settings;
-    let mut changed = false;
+    let mut actions = Vec::new();
+    let top = ui.cursor().top();
 
-    // header: title … "enabled" + switch
+    // header: title … tabs
     ui.horizontal(|ui| {
-        ui.set_min_height(28.0);
+        ui.set_min_height(30.0);
         ui.label(theme::title(ui, tr.t("eq.title")).color(pal.text));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let mut on = s.enabled;
-            if toggle_switch(ui, &mut on).on_hover_text(tr.t("eq.enabled")).changed() {
-                s.enabled = on;
-                changed = true;
+            let labels = [tr.t("eq.tab_graphic"), tr.t("eq.tab_parametric")];
+            let current = usize::from(props.tab == EqTab::Parametric);
+            let w = ui.available_width();
+            if let Some(i) = with_max_width(ui, w, |ui| fit_segmented(ui, Id::new("eq_tabs"), &labels, current)) {
+                actions.push(UiAction::SetEqTab(if i == 0 { EqTab::Graphic } else { EqTab::Parametric }));
             }
-            ui.add_space(2.0);
-            ui.label(theme::muted(ui, tr.t("eq.enabled")));
         });
     });
     ui.add_space(8.0);
+    let graph_h = if props.max_height < 470.0 { 76.0 } else { 112.0 };
+    response_graph(ui, props.curve, graph_h, tr);
+    ui.add_space(10.0);
 
-    // preset combo … reset. The combo shrinks so the reset button always fits.
+    match props.tab {
+        EqTab::Graphic => {
+            if let Some(s) = graphic_tab(ui, props.settings, tr) {
+                actions.push(UiAction::SetEq(s));
+            }
+        }
+        EqTab::Parametric => {
+            let used = ui.cursor().top() - top;
+            actions.extend(parametric_tab(ui, props, (props.max_height - used).max(0.0)));
+        }
+    }
+    actions
+}
+
+/// "Enabled" switch with its label (left to right).
+fn enable_switch(ui: &mut Ui, on: &mut bool, tr: Tr) -> bool {
+    let changed = toggle_switch(ui, on).on_hover_text(tr.t("eq.enabled")).changed();
+    ui.label(theme::muted(ui, tr.t("eq.enabled")));
+    changed
+}
+
+fn graphic_tab(ui: &mut Ui, settings: EqSettings, tr: Tr) -> Option<EqSettings> {
+    let mut s = settings;
+    let mut changed = false;
+
+    // switch, preset combo … reset. The combo shrinks so the reset button always fits.
     ui.horizontal(|ui| {
         ui.set_min_height(32.0);
-        ui.label(theme::muted(ui, tr.t("eq.preset")));
+        let mut on = s.enabled;
+        if enable_switch(ui, &mut on, tr) {
+            s.enabled = on;
+            changed = true;
+        }
+        ui.add_space(10.0);
         let reset_label = tr.t("eq.reset");
         // Width of the ghost button with icon (see `widgets::button`): text + icon + padding.
         let reset_w = ui.painter().layout_no_wrap(reset_label.to_owned(), FontId::proportional(theme::size::BODY), Color32::PLACEHOLDER).size().x + 22.0 + 28.0;
+        if ui.available_width() > reset_w + 72.0 + 90.0 {
+            ui.label(theme::muted(ui, tr.t("eq.preset")));
+        }
         let combo_w = (ui.available_width() - reset_w - ui.spacing().item_spacing.x * 2.0).clamp(72.0, 170.0);
         let current = matching_preset(&s).map(|p| tr.t(p.key)).unwrap_or(tr.t("eq.preset.custom"));
         egui::ComboBox::from_id_salt("eq_preset")
@@ -170,10 +235,274 @@ fn eq_panel_contents(ui: &mut Ui, props: &EqPanelProps) -> Vec<UiAction> {
         for b in &mut s.bands_db {
             *b = b.clamp(-EQ_MAX_GAIN_DB, EQ_MAX_GAIN_DB);
         }
-        vec![UiAction::SetEq(s)]
+        Some(s)
     } else {
-        Vec::new()
+        None
     }
+}
+
+// ----- parametric tab -------------------------------------------------------------------------
+
+/// Filter types in combo order, with their label keys.
+pub const PEQ_KINDS: [(FilterKind, &str); 5] = [
+    (FilterKind::Peak, "peq.kind.peak"),
+    (FilterKind::LowShelf, "peq.kind.low_shelf"),
+    (FilterKind::HighShelf, "peq.kind.high_shelf"),
+    (FilterKind::LowPass, "peq.kind.low_pass"),
+    (FilterKind::HighPass, "peq.kind.high_pass"),
+];
+
+fn kind_label(kind: FilterKind, tr: Tr) -> &'static str {
+    PEQ_KINDS.iter().find(|(k, _)| *k == kind).map(|(_, key)| tr.t(key)).unwrap_or("?")
+}
+
+fn is_pass(kind: FilterKind) -> bool {
+    matches!(kind, FilterKind::LowPass | FilterKind::HighPass)
+}
+
+/// A new filter: a neutral 1 kHz peak (Q 1).
+pub fn new_filter() -> PeqFilter {
+    PeqFilter { kind: FilterKind::Peak, freq_hz: 1000.0, gain_db: 0.0, q: 1.0 }
+}
+
+/// Parses "1200", "1.2k", "1.2 kHz", "850 Hz".
+fn parse_hz(s: &str) -> Option<f64> {
+    let t = s.trim().to_ascii_lowercase().replace(' ', "");
+    let t = t.strip_suffix("hz").unwrap_or(&t);
+    match t.strip_suffix('k') {
+        Some(k) => k.parse::<f64>().ok().map(|v| v * 1000.0),
+        None => t.parse::<f64>().ok(),
+    }
+}
+
+/// Paste events meant for the PEQ: after the paste button (`awaiting`), or Ctrl+V of an
+/// AutoEq-looking text while no text field has focus.
+fn pasted_profile(ui: &Ui, awaiting: bool) -> Option<String> {
+    let focused = ui.ctx().memory(|m| m.focused().is_some());
+    ui.input(|i| {
+        i.events.iter().find_map(|e| match e {
+            egui::Event::Paste(text) if awaiting || (!focused && text.to_ascii_lowercase().contains("filter")) => Some(text.clone()),
+            _ => None,
+        })
+    })
+}
+
+fn parametric_tab(ui: &mut Ui, props: &EqPanelProps<'_>, max_height: f32) -> Vec<UiAction> {
+    let tr = props.tr;
+    let pal = theme::palette(ui);
+    let mut peq = props.peq.clone();
+    let mut changed = false;
+    let mut actions = Vec::new();
+    let start = ui.cursor().top();
+
+    // Clipboard paste (button -> RequestPaste -> Event::Paste, or plain Ctrl+V).
+    let await_id = Id::new("peq_await_paste");
+    let awaiting = ui.data(|d| d.get_temp::<f64>(await_id)).is_some_and(|t| ui.input(|i| i.time) - t < 2.0);
+    if let Some(text) = pasted_profile(ui, awaiting) {
+        ui.data_mut(|d| d.remove::<f64>(await_id));
+        actions.push(UiAction::ImportAutoEqText(text));
+    }
+
+    // switch … preamp
+    ui.horizontal(|ui| {
+        ui.set_min_height(32.0);
+        let mut on = peq.enabled;
+        if enable_switch(ui, &mut on, tr) {
+            peq.enabled = on;
+            changed = true;
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let mut pre = peq.preamp_db;
+            let dv = egui::DragValue::new(&mut pre)
+                .range(-PEQ_MAX_GAIN_DB..=PEQ_MAX_GAIN_DB)
+                .speed(0.05)
+                .fixed_decimals(1)
+                .suffix(" dB");
+            if ui.add(dv).on_hover_text(tr.t("peq.preamp_hint")).changed() {
+                peq.preamp_db = pre;
+                changed = true;
+            }
+            ui.label(theme::muted(ui, tr.t("eq.preamp")));
+        });
+    });
+    ui.add_space(6.0);
+
+    // import / paste, packed into as few rows as fit (a wrapping layout does not
+    // wrap the enabled/disabled scopes the buttons need).
+    let import_label = if props.importing { tr.t("peq.importing") } else { tr.t("peq.import_file") };
+    let buttons: [(Option<Icon>, &str); 2] = [(Some(Icon::Folder), import_label), (None, tr.t("peq.paste"))];
+    let gap = 6.0;
+    let avail = ui.available_width();
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut x = 0.0;
+    for (i, (icon, text)) in buttons.iter().enumerate() {
+        let w = button_width(ui, text, icon.is_some());
+        if x > 0.0 && x + gap + w > avail {
+            rows.push(Vec::new());
+            x = 0.0;
+        }
+        x += if x > 0.0 { gap + w } else { w };
+        rows.last_mut().expect("non-empty").push(i);
+    }
+    for (r, row) in rows.iter().enumerate() {
+        if r > 0 {
+            ui.add_space(gap);
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for &i in row {
+                let (icon, text) = buttons[i];
+                match i {
+                    0 => {
+                        let r = ui.add_enabled_ui(!props.importing, |ui| button(ui, ButtonKind::Secondary, icon, text)).inner;
+                        if r.on_hover_text(tr.t("peq.import_hint")).clicked() {
+                            actions.push(UiAction::ImportAutoEqFile);
+                        }
+                    }
+                    _ => {
+                        if button(ui, ButtonKind::Secondary, icon, text).on_hover_text(tr.t("peq.paste_hint")).clicked() {
+                            ui.data_mut(|d| d.insert_temp(await_id, ui.input(|i| i.time)));
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                        }
+                    }
+                }
+            }
+        });
+    }
+    ui.add_space(8.0);
+
+    // filter list
+    let footer_h = 56.0;
+    let list_max = (max_height - (ui.cursor().top() - start) - footer_h).max(84.0);
+    if peq.filters.is_empty() {
+        ui.add(egui::Label::new(theme::muted(ui, tr.t("peq.empty"))).wrap());
+    } else {
+        let mut remove = None;
+        egui::ScrollArea::vertical()
+            .id_salt("peq_filters")
+            .max_height(list_max)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                for (i, f) in peq.filters.iter_mut().enumerate() {
+                    let (c, r) = filter_row(ui, i, f, tr, &pal);
+                    changed |= c;
+                    if r {
+                        remove = Some(i);
+                    }
+                }
+            });
+        if let Some(i) = remove {
+            peq.filters.remove(i);
+            changed = true;
+        }
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.set_min_height(32.0);
+        let full = peq.filters.len() >= PEQ_MAX_FILTERS;
+        let add = ui.add_enabled_ui(!full, |ui| button(ui, ButtonKind::Secondary, Some(Icon::Plus), tr.t("peq.add"))).inner;
+        if add.clicked() {
+            peq.filters.push(new_filter());
+            if !peq.enabled {
+                peq.enabled = true;
+            }
+            changed = true;
+        }
+        ui.label(theme::muted(ui, format!("{} / {}", peq.filters.len(), PEQ_MAX_FILTERS)));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let clear = ui.add_enabled_ui(!peq.filters.is_empty(), |ui| button(ui, ButtonKind::Ghost, Some(Icon::Trash), tr.t("peq.clear"))).inner;
+            if clear.clicked() {
+                peq.filters.clear();
+                changed = true;
+            }
+        });
+    });
+
+    if changed {
+        actions.push(UiAction::SetParametricEq(peq));
+    }
+    actions
+}
+
+/// Width of a [`button`] with this label (see `widgets::button`).
+fn button_width(ui: &Ui, text: &str, icon: bool) -> f32 {
+    let w = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(theme::size::BODY), Color32::PLACEHOLDER).size().x;
+    w + if icon { 22.0 } else { 0.0 } + 28.0
+}
+
+/// One filter row. Returns (changed, remove clicked).
+fn filter_row(ui: &mut Ui, i: usize, f: &mut PeqFilter, tr: Tr, pal: &theme::Palette) -> (bool, bool) {
+    let mut changed = false;
+    let mut remove = false;
+    let avail = ui.available_width();
+    let wide = avail >= 446.0;
+    let index = |ui: &mut Ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(18.0, 24.0), Sense::hover());
+        let g = ui.painter().layout_no_wrap(format!("{}", i + 1), FontId::proportional(11.0), pal.text_faint);
+        ui.painter().galley(pos2(r.right() - g.size().x, r.center().y - g.size().y / 2.0), g, pal.text_faint);
+    };
+    let kind_combo = |ui: &mut Ui, f: &mut PeqFilter, w: f32| {
+        let mut c = false;
+        egui::ComboBox::from_id_salt(("peq_kind", i))
+            .selected_text(kind_label(f.kind, tr))
+            .width(w)
+            .truncate()
+            .show_ui(ui, |ui| {
+                for (k, key) in PEQ_KINDS {
+                    if ui.selectable_label(f.kind == k, tr.t(key)).clicked() && f.kind != k {
+                        f.kind = k;
+                        c = true;
+                    }
+                }
+            });
+        c
+    };
+    let values = |ui: &mut Ui, f: &mut PeqFilter, w: f32| {
+        let mut c = false;
+        let speed = (f.freq_hz as f64 * 0.004).max(0.05);
+        let freq = egui::DragValue::new(&mut f.freq_hz)
+            .range(20.0..=20_000.0)
+            .speed(speed)
+            .custom_formatter(|v, _| hz_text(v as f32))
+            .custom_parser(parse_hz);
+        c |= ui.add_sized(vec2(w * 1.25, 24.0), freq).on_hover_text(tr.t("peq.freq")).changed();
+        let pass = is_pass(f.kind);
+        let gain = egui::DragValue::new(&mut f.gain_db).range(-PEQ_MAX_GAIN_DB..=PEQ_MAX_GAIN_DB).speed(0.05).fixed_decimals(1).suffix(" dB");
+        let tip = if pass { tr.t("peq.gain_pass") } else { tr.t("peq.gain") };
+        c |= ui.add_enabled_ui(!pass, |ui| ui.add_sized(vec2(w, 24.0), gain)).inner.on_hover_text(tip).on_disabled_hover_text(tip).changed();
+        let q = egui::DragValue::new(&mut f.q).range(0.1..=10.0).speed(0.01).fixed_decimals(2).prefix("Q ");
+        c |= ui.add_sized(vec2(w * 0.85, 24.0), q).on_hover_text(tr.t("peq.q")).changed();
+        c
+    };
+    let remove_btn = |ui: &mut Ui| icon_button(ui, Icon::Close, 13.0, false, tr.t("peq.remove")).clicked();
+
+    if wide {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            index(ui);
+            changed |= kind_combo(ui, f, 128.0);
+            let w = ((avail - 18.0 - 134.0 - 30.0 - 5.0 * 6.0) / 3.1).clamp(56.0, 84.0);
+            changed |= values(ui, f, w);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| remove = remove_btn(ui));
+        });
+    } else {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            index(ui);
+            let w = (ui.available_width() - 30.0 - 6.0).clamp(80.0, 160.0);
+            changed |= kind_combo(ui, f, w);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| remove = remove_btn(ui));
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.add_space(24.0);
+            let w = ((ui.available_width() - 12.0) / 3.1).max(48.0);
+            changed |= values(ui, f, w);
+        });
+        ui.add_space(2.0);
+    }
+    (changed, remove)
 }
 
 /// Total width of the slider block: 11 columns, separator, optional scale and the gaps.
@@ -330,5 +659,11 @@ mod tests {
             let s = EqSettings { enabled: true, preamp_db: p.preamp_db, bands_db: p.bands_db };
             assert_eq!(matching_preset(&s).map(|m| m.key), Some(p.key));
         }
+        assert_eq!(parse_hz("1.2k"), Some(1200.0));
+        assert_eq!(parse_hz("1.5 kHz"), Some(1500.0));
+        assert_eq!(parse_hz("850 Hz"), Some(850.0));
+        assert_eq!(parse_hz("abc"), None);
+        assert!(is_pass(FilterKind::HighPass) && !is_pass(FilterKind::LowShelf));
+        assert_eq!(PEQ_KINDS.len(), 5);
     }
 }

@@ -19,10 +19,16 @@
 //! [`UiAction`]: crate::presentation::ui::UiAction
 
 mod artwork;
+mod audio_quality;
 mod artwork_loader;
+pub(crate) mod desktop_lyrics;
 mod dispatch;
 mod drop;
 pub(crate) mod library_index;
+mod loudness;
+mod lyric_align;
+mod lyric_batch;
+mod lyric_fetch;
 mod lyrics;
 mod media_controls;
 mod pages;
@@ -36,6 +42,8 @@ mod shell;
 mod spectrum;
 mod state;
 mod track_info;
+mod frame_pacer;
+mod startup_cloak;
 mod window_scale;
 
 #[cfg(test)]
@@ -51,7 +59,7 @@ use crossbeam_channel::Receiver;
 use eframe::{egui, App};
 use lrc_player_application::config::Config;
 use lrc_player_application::dto::PlaylistDto;
-use lrc_player_application::infrastructure::audio::engine::{AudioEngine, EngineSnapshot, EqSettings};
+use lrc_player_application::infrastructure::audio::engine::{AudioEngine, EngineSnapshot, EqSettings, ParametricEq};
 use lrc_player_application::infrastructure::lyrics::{LyricsCandidate, LyricsTimeline};
 use lrc_player_application::infrastructure::persistence::{SharedMetaCache, StateSaver};
 use lrc_player_application::usecases::queue_navigation::QueueNavigator;
@@ -64,10 +72,11 @@ pub use state::{initial_window, AppOptions};
 
 pub use artwork_loader::ArtworkMode;
 pub(crate) use artwork_loader::ArtworkLoader;
+pub(crate) use audio_quality::EXCLUSIVE_SUPPORTED;
 
 use crate::presentation::ui::{
     shell::SidebarState,
-    views::{Column, LyricsViewState, NowPlayingState, TrackTableState},
+    views::{Column, EqCurve, EqTab, LyricsViewState, NowPlayingState, TrackTableState},
     widgets::Toasts,
     Accent, Lang, Page, RightPanel, ThemeMode, Tr,
 };
@@ -76,6 +85,8 @@ use crate::presentation::ui::{
 const REPAINT_TIME_BASED: Duration = Duration::from_millis(33);
 /// Repaint interval while playing elsewhere (enough for the transport time label).
 const REPAINT_IDLE_PLAYING: Duration = Duration::from_millis(250);
+/// Wake-up while minimized and playing (logic only: media overlay position, state saving).
+const REPAINT_BACKGROUND_PLAYING: Duration = Duration::from_secs(1);
 /// How long a hot-path state change may stay unsaved before it is handed to the saver.
 const STATE_SUBMIT_INTERVAL: Duration = Duration::from_millis(1000);
 /// While playing, the position is persisted this often so a crash resumes nearby.
@@ -116,6 +127,16 @@ pub(crate) struct UiShell {
     pub(crate) right_panel: Option<RightPanel>,
     pub(crate) sidebar: SidebarState,
     pub(crate) eq_open: bool,
+    /// Tab shown in the EQ popover.
+    pub(crate) eq_tab: EqTab,
+    /// Cached frequency response for the EQ popover graph.
+    pub(crate) eq_curve: Option<EqCurve>,
+    /// Signal-path popover (opened from the transport's quality indicator).
+    pub(crate) signal_open: bool,
+    /// Frames left in which Settings scrolls its 音質 section into view.
+    pub(crate) scroll_to_sound: u8,
+    /// Pending AutoEq file picker (see `app/audio_quality.rs`).
+    pub(crate) autoeq_picker: Option<Receiver<audio_quality::AutoEqPick>>,
     pub(crate) toasts: Toasts,
     pub(crate) library_table: TrackTableState,
     pub(crate) library_query: String,
@@ -142,10 +163,22 @@ pub(crate) struct UiShell {
     pub(crate) fonts_rx: Option<Receiver<egui::FontDefinitions>>,
     /// Pending folder expansion of dropped files (play now?, result channel).
     pub(crate) drop_rx: Option<(bool, Receiver<Vec<String>>)>,
+    /// Running online lyrics lookup (see `app/lyric_fetch.rs`).
+    pub(crate) fetch_job: Option<lyric_fetch::FetchJob>,
+    /// Tracks already looked up automatically this session.
+    pub(crate) fetch_tried: std::collections::HashSet<String>,
+    /// Bulk lyrics download for library tracks without lyrics (see `app/lyric_batch.rs`).
+    pub(crate) lyric_batch: lyric_batch::LyricBatch,
+    /// Running external lyric-timing job (see `app/lyric_align.rs`).
+    pub(crate) align_job: Option<lyric_align::AlignJob>,
+    /// Settings "Check" for the timing command.
+    pub(crate) align_check: Option<Receiver<Result<String, lyric_align::AlignError>>>,
     pub(crate) exclude_input: String,
     /// Last (message, time) toast, to drop identical repeats.
     pub(crate) last_toast: Option<(String, Instant)>,
     pub(crate) window: Option<lrc_player_application::dto::WindowStateDto>,
+    /// Desktop lyrics window (see `app/desktop_lyrics.rs`).
+    pub(crate) desktop_lyrics: desktop_lyrics::DesktopLyrics,
     /// Rows of the current detail page (album / artist / playlist), rebuilt on change.
     pub(crate) detail_rows: pages::DetailRows,
 }
@@ -183,6 +216,13 @@ pub struct GuiApp {
     pub(crate) volume: f32,
     pub(crate) muted: bool,
     pub(crate) eq: EqSettings,
+    /// Parametric EQ (mirrors `config.parametric_eq`).
+    pub(crate) peq: ParametricEq,
+    /// Last `ExclusiveUnavailable` reason while exclusive mode is requested (shown in
+    /// Settings; one toast per distinct reason).
+    pub(crate) exclusive_unavailable: Option<String>,
+    /// A debounced `config.json` write is pending (see `GuiApp::save_config_soon`).
+    pub(crate) config_save_due: Option<Instant>,
 
     // ---- Seeking ----
     pub(crate) pending_seek_ms: Option<u64>,
@@ -197,6 +237,8 @@ pub struct GuiApp {
     pub(crate) play_album: Option<String>,
     /// Background probe + lyrics discovery for the current track.
     pub(crate) track_info: track_info::TrackInfoLoader,
+    /// EBU R128 measurement of untagged files -> engine loudness hints (`app/loudness.rs`).
+    pub(crate) loudness: loudness::LoudnessAnalyzer,
 
     pub(crate) play_artwork_handle: Option<egui::TextureHandle>,
     pub(crate) play_backdrop_handle: Option<egui::TextureHandle>,
@@ -213,6 +255,8 @@ pub struct GuiApp {
     /// Bumped when `loaded_timeline` is replaced (lyrics view galley cache key).
     pub(crate) lyrics_revision: u64,
     pub(crate) lyrics_offset_ms: i64,
+    /// Track whose lyrics discovery (worker) has finished.
+    pub(crate) lyrics_discovered_for: String,
     /// Lyric text shift of the current track.
     pub(crate) lyrics_shift: lrc_player_application::dto::LyricsShiftDto,
     /// Per-track lyric text shifts (persisted).
@@ -274,25 +318,50 @@ impl GuiApp {
     }
 
     /// Repaint policy: event-driven with a low-rate tick only while audio plays.
+    /// Media overlay sync, state saving and the next wake-up (after logic and after ui).
+    fn after_frame(&mut self, ctx: &egui::Context) {
+        if self.media.is_active() {
+            let view = self.playback_view();
+            self.media.sync(&view, self.play_cover_path.as_deref());
+        }
+        self.maybe_submit_state();
+        self.flush_config_if_due(false);
+        // Also from `logic`, so the desktop lyrics window lives on while this one is minimized.
+        self.sync_desktop_lyrics(ctx);
+        self.schedule_repaint(ctx);
+    }
+
     fn schedule_repaint(&self, ctx: &egui::Context) {
         let minimized = ctx.input(|i| {
             let vp = i.viewport();
             vp.minimized.unwrap_or(false) || vp.occluded.unwrap_or(false)
         });
         if minimized {
-            // Engine events still wake the UI through the waker.
+            // Only `logic` runs. Engine events, workers and media keys wake it; a pending seek
+            // (media keys) needs its debounce, and while playing a slow tick keeps the OS media
+            // overlay position and the saved state current.
+            if self.pending_seek_ms.is_some() {
+                ctx.request_repaint_after(seek::SEEK_DEBOUNCE);
+            } else if self.playback_state == PlaybackState::Playing {
+                ctx.request_repaint_after(REPAINT_BACKGROUND_PLAYING);
+            }
             return;
         }
         if self.pending_seek_ms.is_some() {
             ctx.request_repaint_after(seek::SEEK_DEBOUNCE);
             return;
         }
-        if self.ui.folder_picker.is_some() || self.ui.fonts_rx.is_some() || self.ui.drop_rx.is_some() {
+        if self.ui.folder_picker.is_some() || self.ui.fonts_rx.is_some() || self.ui.drop_rx.is_some() || self.ui.autoeq_picker.is_some() {
             // Results also wake the UI; this is only a safety net.
             ctx.request_repaint_after(Duration::from_millis(500));
         }
+        if let Some(due) = self.config_save_due {
+            ctx.request_repaint_after(due.saturating_duration_since(Instant::now()));
+        }
         match self.playback_state {
             PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Seeking => {
+                // The signal path (Settings → 音質, transport popover) and the transport time
+                // are refreshed by the ~4 fps tick below; nothing extra is scheduled for them.
                 let time_based_visible = self.ui.page == Page::NowPlaying
                     || self.ui.right_panel == Some(RightPanel::Lyrics);
                 if time_based_visible {
@@ -328,33 +397,48 @@ impl GuiApp {
 }
 
 impl App for GuiApp {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-
-        self.poll_fonts(&ctx);
-        crate::presentation::ui::theme::sync(&ctx, self.ui.theme, self.ui.accent);
+    /// Everything that is not drawing. eframe calls this before every `ui`, and also while the
+    /// window is minimized / hidden (then `ui` is skipped) whenever a repaint was requested
+    /// (engine events, workers and media keys request one). So playback keeps advancing,
+    /// the gapless successor is queued and the OS media overlay stays current in the
+    /// background.
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        frame_pacer::pace();
+        self.poll_fonts(ctx);
+        crate::presentation::ui::theme::sync(ctx, self.ui.theme, self.ui.accent);
         self.poll_scan_status();
         self.poll_engine();
         self.poll_track_info();
         self.poll_library();
+        self.poll_loudness();
         self.poll_folder_picker();
+        self.poll_autoeq_picker();
+        self.poll_lyric_alignment(ctx);
+        self.poll_lyrics_fetch(ctx);
+        self.poll_lyric_batch();
         self.poll_dropped();
-        self.artwork.poll(&ctx);
+        self.artwork.poll(ctx);
         self.ensure_play_artwork();
-        self.media.ensure_attached(frame, &ctx);
+        self.media.ensure_attached(frame, ctx);
         self.poll_media_controls();
         window_scale::install(frame);
-        self.track_window_geometry(&ctx);
+        self.track_window_geometry(ctx);
+        self.after_frame(ctx);
+    }
 
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.draw_shell(ui);
-
-        if self.media.is_active() {
-            let view = self.playback_view();
-            self.media.sync(&view, self.play_cover_path.as_deref());
-        }
+        startup_cloak::reveal_when_ready(&ctx);
+        // Again after drawing, so actions from this frame's UI are reflected right away.
+        self.after_frame(&ctx);
         self.artwork.end_frame();
-        self.maybe_submit_state();
-        self.schedule_repaint(&ctx);
+    }
+
+    /// Transparent, so the desktop lyrics window (same GL context) can be see-through; the main
+    /// window paints its whole area itself.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

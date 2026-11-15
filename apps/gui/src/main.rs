@@ -167,16 +167,26 @@ fn main() -> Result<()> {
     if let Some(window) = lrc_player::presentation::app::initial_window() {
         viewport = viewport
             .with_inner_size([window.width.max(min_w), window.height.max(min_h)])
-            .with_maximized(window.maximized);
+            // On Windows, winit shows a window created maximized at once (`SW_MAXIMIZE`), before
+            // the app can hide it, which flashes white; the app maximizes it itself once the
+            // window is cloaked (see `startup_cloak`).
+            .with_maximized(window.maximized && !cfg!(windows));
         let on_screen = |v: f32| (-4_000.0..16_000.0).contains(&v);
         if let (Some(x), Some(y)) = (window.x.filter(|v| on_screen(*v)), window.y.filter(|v| on_screen(*v))) {
             viewport = viewport.with_position([x, y]);
         }
     }
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
+    // Windows: no vsync. With vsync every window's buffer swap waits for a display refresh on
+    // the one UI thread, so the desktop-lyrics window and the main window take turns and the
+    // main window becomes sluggish. DWM never shows torn frames of a windowed app; the app
+    // paces its frames itself (`frame_pacer`).
+    if cfg!(windows) {
+        options.glow_options.vsync = false;
+    }
     if let Err(err) = eframe::run_native(
         "LRC Player",
         options,

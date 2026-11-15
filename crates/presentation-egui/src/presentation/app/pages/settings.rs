@@ -2,6 +2,7 @@
 
 use eframe::egui::{self, vec2, Align, Layout, Sense, Ui, Vec2};
 use lrc_player_application::config::{Language, LogLevel, ResamplerSetting};
+use lrc_player_application::infrastructure::audio::engine::{Crossfeed, CrossfeedLevel, DitherMode, Normalization, NormalizationMode};
 
 use crate::presentation::app::GuiApp;
 use crate::presentation::ui::{
@@ -11,7 +12,7 @@ use crate::presentation::ui::{
     theme,
     views::{
         settings::{combo_truncates, combo_width, fit_segmented, page_column, slider_width, with_max_width, SECTION_MAX_WIDTH},
-        settings_row, settings_section,
+        settings_row, settings_section, signal_path_view,
     },
     widgets::{badge, button, section_header, toggle_switch, ButtonKind},
     Accent, Icon, ThemeMode, UiAction,
@@ -167,12 +168,56 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
             });
         });
 
+        // ---------------- sound quality ----------------
+        if app.ui.scroll_to_sound > 0 {
+            // Opened from the signal-path popover (a few frames: the rows settle their layout).
+            app.ui.scroll_to_sound -= 1;
+            ui.scroll_to_cursor(Some(Align::Min));
+        }
+        settings_section(ui, tr.t("settings.sound"), Some(tr.t("settings.sound_hint")), |ui| {
+            sound_quality_rows(app, ui, tr);
+        });
+
         // ---------------- lyrics ----------------
         settings_section(ui, tr.t("settings.lyrics"), None, |ui| {
             settings_row(ui, true, tr.t("settings.karaoke"), Some(tr.t("settings.karaoke_hint")), |ui| {
                 if toggle_switch(ui, &mut app.config.karaoke).changed() {
                     app.save_config();
+                    app.reload_lyrics_display();
                 }
+            });
+            settings_row(ui, false, tr.t("settings.estimate_karaoke"), Some(tr.t("settings.estimate_karaoke_hint")), |ui| {
+                ui.add_enabled_ui(app.config.karaoke, |ui| {
+                    if toggle_switch(ui, &mut app.config.estimate_karaoke).changed() {
+                        app.save_config();
+                        app.reload_lyrics_display();
+                    }
+                });
+            });
+            settings_row(ui, false, tr.t("settings.fetch_lyrics"), Some(tr.t("settings.fetch_lyrics_hint")), |ui| {
+                if toggle_switch(ui, &mut app.config.fetch_lyrics_online).changed() {
+                    app.save_config();
+                }
+            });
+            crate::presentation::app::lyric_batch::lyrics_batch_row(app, ui, tr);
+            settings_row(ui, false, tr.t("settings.align_command"), Some(tr.t("settings.align_command_hint")), |ui| {
+                ui.horizontal(|ui| {
+                    let checking = app.align_check_running();
+                    let label = if checking { tr.t("settings.align_checking") } else { tr.t("settings.align_check") };
+                    let button_w = 72.0;
+                    let edit = egui::TextEdit::singleline(&mut app.config.align_command)
+                        .hint_text("lrc-align")
+                        .desired_width((ui.available_width() - button_w - 8.0).clamp(80.0, 220.0));
+                    if ui.add(edit).lost_focus() {
+                        app.save_config();
+                    }
+                    let check = ui.add_enabled(!checking, egui::Button::new(label).min_size(vec2(button_w, 0.0)));
+                    if check.on_hover_text(tr.t("settings.align_check_hint")).clicked() {
+                        app.save_config();
+                        let ctx = ui.ctx().clone();
+                        app.start_align_check(&ctx);
+                    }
+                });
             });
             settings_row(ui, false, tr.t("settings.spectrum"), Some(tr.t("settings.spectrum_hint")), |ui| {
                 if toggle_switch(ui, &mut app.config.show_spectrum).changed() {
@@ -183,6 +228,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
             settings_row(ui, false, tr.t("settings.offsets"), Some(tr.t("settings.offsets_hint")), |ui| {
                 ui.label(theme::muted(ui, format!("{}", app.lyrics_offsets.len())));
             });
+            desktop_lyrics_rows(app, ui, tr);
         });
 
         // ---------------- shortcuts ----------------
@@ -229,5 +275,220 @@ fn accent_key(a: Accent) -> &'static str {
         Accent::Rose => "accent.rose",
         Accent::Amber => "accent.amber",
         Accent::Green => "accent.green",
+    }
+}
+
+const NORM_MODES: [NormalizationMode; 3] = [NormalizationMode::Off, NormalizationMode::Track, NormalizationMode::Album];
+const XFEED_LEVELS: [CrossfeedLevel; 3] = [CrossfeedLevel::Weak, CrossfeedLevel::Medium, CrossfeedLevel::Strong];
+
+/// Settings → 音質: normalization (+ library analysis), crossfeed, auto headroom, dither,
+/// exclusive mode and the live signal path.
+fn sound_quality_rows(app: &mut GuiApp, ui: &mut Ui, tr: Tr) {
+    let pal = theme::palette(ui);
+    let norm = app.normalization();
+
+    // ---- normalization ----
+    settings_row(ui, true, tr.t("settings.normalization"), Some(tr.t("settings.normalization_hint")), |ui| {
+        let labels = [tr.t("settings.norm_off"), tr.t("settings.norm_track"), tr.t("settings.norm_album")];
+        let current = NORM_MODES.iter().position(|m| *m == norm.mode).unwrap_or(1);
+        if let Some(i) = fit_segmented(ui, egui::Id::new("settings_norm_mode"), &labels, current) {
+            app.set_normalization(Normalization { mode: NORM_MODES[i], ..norm });
+        }
+    });
+    let norm_on = norm.mode != NormalizationMode::Off;
+    settings_row(ui, false, tr.t("settings.norm_preamp"), Some(tr.t("settings.norm_preamp_hint")), |ui| {
+        ui.add_enabled_ui(norm_on, |ui| {
+            let mut pre = norm.preamp_db;
+            ui.spacing_mut().slider_width = slider_width(ui, 160.0);
+            let resp = ui.add(egui::Slider::new(&mut pre, -15.0..=15.0).step_by(0.5).fixed_decimals(1).suffix(" dB"));
+            if resp.changed() {
+                app.set_normalization(Normalization { preamp_db: pre, ..norm });
+            }
+        });
+    });
+    settings_row(ui, false, tr.t("settings.prevent_clipping"), Some(tr.t("settings.prevent_clipping_hint")), |ui| {
+        ui.add_enabled_ui(norm_on, |ui| {
+            let mut on = norm.prevent_clipping;
+            if toggle_switch(ui, &mut on).changed() {
+                app.set_normalization(Normalization { prevent_clipping: on, ..norm });
+            }
+        });
+    });
+    settings_row(ui, false, tr.t("settings.analyze"), Some(tr.t("settings.analyze_hint")), |ui| {
+        match app.loudness_analysis_progress() {
+            Some((done, total)) => {
+                let rtl = ui.layout().prefer_right_to_left();
+                let cancel = |ui: &mut Ui, app: &mut GuiApp| {
+                    if button(ui, ButtonKind::Ghost, Some(Icon::Close), tr.t("settings.analyze_cancel")).clicked() {
+                        app.cancel_loudness_analysis();
+                    }
+                };
+                let progress = |ui: &mut Ui| {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.label(egui::RichText::new(format!("{done} / {total}")).color(pal.text_muted).monospace());
+                };
+                if rtl {
+                    cancel(ui, app);
+                    progress(ui);
+                } else {
+                    progress(ui);
+                    cancel(ui, app);
+                }
+            }
+            None => {
+                let has_tracks = !app.library.rows.is_empty();
+                let r = ui.add_enabled_ui(has_tracks, |ui| button(ui, ButtonKind::Secondary, Some(Icon::Refresh), tr.t("settings.analyze_button"))).inner;
+                if r.clicked() {
+                    app.analyze_library_loudness();
+                }
+            }
+        }
+    });
+
+    // ---- crossfeed ----
+    let xf = app.crossfeed();
+    settings_row(ui, false, tr.t("settings.crossfeed"), Some(tr.t("settings.crossfeed_hint")), |ui| {
+        let rtl = ui.layout().prefer_right_to_left();
+        let levels = |ui: &mut Ui| -> Option<CrossfeedLevel> {
+            ui.add_enabled_ui(xf.enabled, |ui| {
+                let labels = [tr.t("crossfeed.weak"), tr.t("crossfeed.medium"), tr.t("crossfeed.strong")];
+                let current = XFEED_LEVELS.iter().position(|l| *l == xf.level).unwrap_or(1);
+                fit_segmented(ui, egui::Id::new("settings_xfeed"), &labels, current).map(|i| XFEED_LEVELS[i])
+            })
+            .inner
+        };
+        let switch = |ui: &mut Ui| -> Option<bool> {
+            let mut on = xf.enabled;
+            toggle_switch(ui, &mut on).changed().then_some(on)
+        };
+        let (level, on) = if rtl {
+            let l = levels(ui);
+            ui.add_space(8.0);
+            (l, switch(ui))
+        } else {
+            let o = switch(ui);
+            ui.add_space(8.0);
+            (levels(ui), o)
+        };
+        let next = Crossfeed { enabled: on.unwrap_or(xf.enabled), level: level.unwrap_or(xf.level) };
+        app.set_crossfeed(next);
+    });
+
+    // ---- auto headroom ----
+    settings_row(ui, false, tr.t("settings.auto_headroom"), Some(tr.t("settings.auto_headroom_hint")), |ui| {
+        let mut on = app.auto_headroom();
+        if toggle_switch(ui, &mut on).changed() {
+            app.set_auto_headroom(on);
+        }
+    });
+
+    // ---- dither ----
+    settings_row(ui, false, tr.t("settings.dither"), Some(tr.t("settings.dither_hint")), |ui| {
+        let labels = [tr.t("settings.dither_auto"), tr.t("settings.dither_off")];
+        let current = usize::from(app.dither() == DitherMode::Off);
+        if let Some(i) = fit_segmented(ui, egui::Id::new("settings_dither"), &labels, current) {
+            app.set_dither(if i == 0 { DitherMode::Auto } else { DitherMode::Off });
+        }
+    });
+
+    // ---- exclusive mode ----
+    let supported = crate::presentation::app::EXCLUSIVE_SUPPORTED;
+    let hint = if supported { tr.t("settings.exclusive_hint") } else { tr.t("settings.exclusive_unsupported") };
+    settings_row(ui, false, tr.t("settings.exclusive"), Some(hint), |ui| {
+        ui.add_enabled_ui(supported, |ui| {
+            let mut on = app.exclusive_switch_state();
+            if toggle_switch(ui, &mut on).changed() {
+                app.set_exclusive(on);
+            }
+        });
+    });
+    if let Some(reason) = app.exclusive_unavailable_reason().map(str::to_owned).filter(|_| supported) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+            paint_icon(ui.painter(), r, Icon::Warning, pal.warning);
+            ui.add(egui::Label::new(theme::muted(ui, tr.f("settings.exclusive_failed", &[&reason]))).wrap());
+        });
+        ui.add_space(12.0);
+    }
+
+    // ---- signal path ----
+    let r = ui.available_rect_before_wrap();
+    ui.painter().hline(r.x_range(), r.top(), egui::Stroke::new(1.0, pal.border));
+    ui.add_space(12.0);
+    ui.label(egui::RichText::new(tr.t("settings.signal_path")).color(pal.text));
+    ui.add_space(2.0);
+    ui.add(egui::Label::new(theme::caption(ui, tr.t("settings.signal_path_hint"))).wrap());
+    ui.add_space(10.0);
+    let signal = app.signal_path().cloned();
+    signal_path_view(ui, signal.as_ref(), tr);
+    ui.add_space(14.0);
+}
+
+/// Settings → 歌詞 → 「デスクトップ歌詞」 (the window itself: `app/desktop_lyrics.rs`).
+fn desktop_lyrics_rows(app: &mut GuiApp, ui: &mut Ui, tr: Tr) {
+    use lrc_player_application::config::DESKTOP_LYRICS_FONT_RANGE;
+    let pal = theme::palette(ui);
+    let r = ui.available_rect_before_wrap();
+    ui.painter().hline(r.x_range(), r.top(), egui::Stroke::new(1.0, pal.border));
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+        paint_icon(ui.painter(), r, Icon::DesktopLyrics, pal.text_muted);
+        ui.label(egui::RichText::new(tr.t("settings.desktop_lyrics")).color(pal.text).strong());
+    });
+    ui.add_space(2.0);
+    ui.add(egui::Label::new(theme::caption(ui, tr.t("settings.desktop_lyrics_hint"))).wrap());
+    ui.add_space(4.0);
+
+    let ctx = ui.ctx().clone();
+    let enabled = app.config.desktop_lyrics.enabled;
+    settings_row(ui, true, tr.t("desktop_lyrics.toggle"), None, |ui| {
+        let mut on = enabled;
+        if toggle_switch(ui, &mut on).changed() {
+            app.toggle_desktop_lyrics(&ctx);
+        }
+    });
+    let mut changed = false;
+    let mut save_now = false;
+    let dl = &mut app.config.desktop_lyrics;
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_font"), None, |ui| {
+        ui.spacing_mut().slider_width = slider_width(ui, 160.0);
+        let resp = ui.add(egui::Slider::new(&mut dl.font_size, DESKTOP_LYRICS_FONT_RANGE).step_by(1.0).fixed_decimals(0).suffix(" pt"));
+        changed |= resp.changed();
+        save_now |= resp.drag_stopped() || (resp.changed() && !resp.dragged());
+    });
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_opacity"), None, |ui| {
+        let mut pct = (dl.opacity * 100.0).round();
+        ui.spacing_mut().slider_width = slider_width(ui, 160.0);
+        let resp = ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix(" %"));
+        if resp.changed() {
+            dl.opacity = pct / 100.0;
+            changed = true;
+        }
+        save_now |= resp.drag_stopped() || (resp.changed() && !resp.dragged());
+    });
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_next_line"), None, |ui| {
+        save_now |= toggle_switch(ui, &mut dl.show_next_line).changed();
+    });
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_title"), None, |ui| {
+        save_now |= toggle_switch(ui, &mut dl.show_title).changed();
+    });
+    let mut lock = dl.locked;
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_lock"), Some(tr.t("settings.desktop_lyrics_lock_hint")), |ui| {
+        if toggle_switch(ui, &mut lock).changed() {
+            app.set_desktop_lyrics_locked(&ctx, lock);
+        }
+    });
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_reset"), Some(tr.t("settings.desktop_lyrics_reset_hint")), |ui| {
+        if button(ui, ButtonKind::Secondary, Some(Icon::Undo), tr.t("settings.desktop_lyrics_reset")).clicked() {
+            app.reset_desktop_lyrics_position(&ctx);
+        }
+    });
+    if save_now {
+        app.save_config();
+    } else if changed {
+        app.save_config_soon();
     }
 }

@@ -183,6 +183,11 @@ pub fn active() -> bool {
     PASS.get().cjk
 }
 
+/// Whether the bold family is usable in the pass currently running on this thread.
+pub fn bold_active() -> bool {
+    PASS.get().bold
+}
+
 /// Changes whenever the string → family mapping may change (fonts became live / were replaced,
 /// Japanese font coverage changed). Include it in custom galley-cache keys.
 pub fn epoch() -> u64 {

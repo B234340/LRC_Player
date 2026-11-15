@@ -33,6 +33,8 @@ pub struct NowPlayingProps<'a> {
     pub lyrics: Option<LyricsProps<'a>>,
     /// Favorite state of the track (`None` hides the heart).
     pub favorite: Option<bool>,
+    /// "Search lyrics online" under the no-lyrics message: `Some(searching)`, `None` = hidden.
+    pub lyrics_search: Option<bool>,
     pub tr: Tr,
 }
 
@@ -431,7 +433,30 @@ fn lyrics_column(
                 Color32::from_white_alpha(140),
                 rect.width().min(360.0),
             );
+            let hint_h = hint.size().y;
             painter.galley(pos2(c.x - hint.size().x / 2.0, c.y + 18.0), hint, Color32::WHITE);
+            if let Some(searching) = props.lyrics_search {
+                let label = if searching { tr.t("lyrics.searching_online") } else { tr.t("lyrics.search_online") };
+                let r = Rect::from_center_size(pos2(c.x, c.y + 18.0 + hint_h + 28.0), vec2(220.0, 32.0));
+                let resp = ui
+                    .interact(r, ui.id().with("lyrics_search_online"), Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                let fill = if searching {
+                    Color32::from_white_alpha(18)
+                } else if resp.hovered() {
+                    Color32::from_white_alpha(46)
+                } else {
+                    Color32::from_white_alpha(30)
+                };
+                painter.rect_filled(r, 16.0, fill);
+                let g = painter.layout_no_wrap(label.to_owned(), FontId::proportional(13.0), Color32::from_white_alpha(if searching { 150 } else { 235 }));
+                let ir = Rect::from_center_size(pos2(r.left() + 22.0, r.center().y), Vec2::splat(14.0));
+                paint_icon(&painter, ir, Icon::Search, Color32::from_white_alpha(200));
+                painter.galley(pos2(r.center().x - g.size().x / 2.0 + 9.0, r.center().y - g.size().y / 2.0), g, Color32::WHITE);
+                if resp.clicked() && !searching {
+                    actions.push(UiAction::FetchLyricsOnline);
+                }
+            }
         }
     }
 }

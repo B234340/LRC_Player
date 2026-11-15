@@ -22,16 +22,25 @@
 
 pub(crate) mod channel_map;
 mod convert;
+mod crossfeed;
 mod device_watch;
+mod dither;
 mod dsp;
 mod engine_thread;
+pub mod loudness;
+mod normalization;
 mod output;
+mod output_wasapi;
+mod peq;
 pub(crate) mod priority;
 mod renderer;
+mod signal;
 pub(crate) mod source;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_dsp;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -43,8 +52,18 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 
 pub use convert::ResamplerKind;
-pub use dsp::{EqSettings, EQ_BANDS, EQ_FREQUENCIES_HZ, EQ_MAX_GAIN_DB};
+pub use crossfeed::{Crossfeed, CrossfeedLevel};
+pub use dither::DitherMode;
+pub use dsp::{
+    auto_headroom_preview_db, combined_response_db, EqSettings, EQ_BANDS, EQ_FREQUENCIES_HZ,
+    EQ_MAX_GAIN_DB,
+};
+pub use normalization::{GainSource, LoudnessHint, Normalization, NormalizationMode};
+pub use peq::{
+    parse_autoeq, FilterKind, ParametricEq, PeqFilter, PEQ_MAX_FILTERS, PEQ_MAX_GAIN_DB,
+};
 pub use renderer::SpectrumTap;
+pub use signal::SignalPath;
 pub use source::{probe_track, TrackInfo};
 
 use engine_thread::{Command, EngineThread, EntryInfo, SharedInfo};
@@ -88,6 +107,10 @@ pub struct EngineConfig {
     ///
     /// Stream errors and stalls trigger reopening regardless of this interval.
     pub device_poll_ms: u32,
+    /// Windows: open the device in WASAPI exclusive mode (bit-perfect, other apps are muted
+    /// while we hold it). Falls back to the shared cpal output automatically, reporting
+    /// [`EngineEvent::ExclusiveUnavailable`]. Ignored (with that event) on other OSes.
+    pub exclusive: bool,
 }
 
 impl Default for EngineConfig {
@@ -102,6 +125,7 @@ impl Default for EngineConfig {
             resampler: ResamplerKind::Fft,
             volume: 1.0,
             device_poll_ms: 1000,
+            exclusive: false,
         }
     }
 }
@@ -128,6 +152,12 @@ pub struct DeviceInfo {
     pub buffer_frames: Option<u32>,
     /// True when the engine follows the system default device.
     pub follows_default: bool,
+    /// The device is held in exclusive mode (WASAPI exclusive; no system mixer in the path).
+    pub exclusive: bool,
+    /// TPDF dither is armed: integer format of <= 24 bits and [`DitherMode::Auto`]. It is
+    /// applied only while the signal is processed (gain, EQ, resampling...), so untouched
+    /// audio stays bit-perfect.
+    pub dither: bool,
 }
 
 /// Cheap, consistent view of the engine for per-frame UI use.
@@ -143,6 +173,8 @@ pub struct EngineSnapshot {
     pub underruns: u64,
     pub volume: f32,
     pub muted: bool,
+    /// Signal chain of the audible track (`None` when stopped or without a device).
+    pub signal: Option<SignalPath>,
 }
 
 /// Notifications from the engine.
@@ -173,6 +205,12 @@ pub enum EngineEvent {
     },
     StateChanged {
         state: EngineState,
+    },
+    /// Exclusive mode was requested but could not be used; playback continues on the shared
+    /// output. `reason` is user-presentable (device in use, format unsupported, unsupported
+    /// OS...). Repeated identical reasons are reported once.
+    ExclusiveUnavailable {
+        reason: String,
     },
 }
 
@@ -302,9 +340,53 @@ impl AudioEngine {
         self.send(Command::SetEq(eq));
     }
 
+    /// Loudness normalization (ReplayGain tags, else hints from [`Self::set_loudness_hint`]).
+    /// A change ramps the audible track's gain smoothly.
+    pub fn set_normalization(&self, n: Normalization) {
+        self.send(Command::SetNormalization(n));
+    }
+
+    /// Loudness data for a file without ReplayGain tags (e.g. an EBU R128 scan); `None`
+    /// forgets it. Tags in the file always win. If `path` is playing, its gain ramps to the
+    /// new value over ~300 ms; queued tracks pick it up at their gapless boundary. The engine
+    /// keeps a bounded map of the most recent hints.
+    pub fn set_loudness_hint(&self, path: PathBuf, hint: Option<LoudnessHint>) {
+        self.send(Command::SetLoudnessHint(path, hint));
+    }
+
+    /// Parametric EQ (in series after the 10-band EQ; both may be active). Changes are
+    /// crossfaded. Only the first [`PEQ_MAX_FILTERS`] filters are used.
+    pub fn set_parametric_eq(&self, eq: ParametricEq) {
+        self.send(Command::SetParametricEq(eq));
+    }
+
+    /// Headphone crossfeed (stereo output only; bypassed otherwise).
+    pub fn set_crossfeed(&self, c: Crossfeed) {
+        self.send(Command::SetCrossfeed(c));
+    }
+
+    /// Automatic headroom (default on): lowers the level by the active EQs' largest boost net
+    /// of their preamps, so boosts do not drive the limiter.
+    pub fn set_auto_headroom(&self, on: bool) {
+        self.send(Command::SetAutoHeadroom(on));
+    }
+
     /// `None` follows the system default device (changes are picked up automatically).
     pub fn set_output_device(&self, name: Option<String>) {
         self.send(Command::SetDevice(name));
+    }
+
+    /// Windows: switch WASAPI exclusive mode on/off (reopens the output; the audible track
+    /// resumes where it was). Failures fall back to the shared output and are reported with
+    /// [`EngineEvent::ExclusiveUnavailable`]. Other OSes: a no-op that reports
+    /// `ExclusiveUnavailable` when turning it on.
+    pub fn set_exclusive(&self, on: bool) {
+        self.send(Command::SetExclusive(on));
+    }
+
+    /// Dither policy for integer output formats (see [`DitherMode`]); applies immediately.
+    pub fn set_dither(&self, mode: DitherMode) {
+        self.send(Command::SetDither(mode));
     }
 
     /// `position_ms` never decreases while the same track segment plays (it may hold still for
@@ -321,6 +403,7 @@ impl AudioEngine {
             Err(p) => p.into_inner(),
         };
         let mut segment = None;
+        let mut audible: Option<&EntryInfo> = None;
         let (path, position_ms, duration_ms) = if info.state == EngineState::Stopped {
             match &info.last {
                 Some(e) => (Some(e.path.clone()), 0, e.duration_ms),
@@ -331,6 +414,7 @@ impl AudioEngine {
                 .entries
                 .iter()
                 .find(|e| e.seq == clock.track_seq && clock.gen >= e.gen);
+            audible = live.or(info.entries.first());
             match (live, info.entries.first()) {
                 (Some(e), _) => {
                     segment = Some((clock.gen, clock.track_seq));
@@ -358,6 +442,16 @@ impl AudioEngine {
             underruns,
             volume,
             muted,
+            signal: audible.and_then(|e| {
+                signal_path(
+                    e,
+                    &info,
+                    volume,
+                    muted,
+                    self.rt.limiter_ns.load(Ordering::Relaxed),
+                    now,
+                )
+            }),
         }
     }
 
@@ -448,6 +542,43 @@ impl Drop for AudioEngine {
     }
 }
 
+/// Builds the audible track's [`SignalPath`] (`None` without a device).
+fn signal_path(
+    e: &EntryInfo,
+    info: &SharedInfo,
+    volume: f32,
+    muted: bool,
+    limiter_ns: u64,
+    now_ns: u64,
+) -> Option<SignalPath> {
+    let device = info.device.as_ref()?;
+    let dsp = &info.dsp;
+    let resampled = e.meta.sample_rate != 0 && e.meta.sample_rate != device.sample_rate;
+    let volume = if muted { 0.0 } else { volume };
+    let mut s = SignalPath {
+        codec: e.meta.codec.to_string(),
+        source_rate: e.meta.sample_rate,
+        source_bits: e.meta.bits,
+        source_channels: e.meta.channels,
+        resampled,
+        resampler: resampled.then_some(dsp.resampler),
+        channels_mapped: e.meta.channels != 0 && e.meta.channels != device.channels,
+        output: device.clone(),
+        eq: dsp.eq,
+        parametric_eq: dsp.peq,
+        crossfeed: dsp.crossfeed,
+        normalization_db: e.gain.db,
+        normalization_source: e.gain.source,
+        headroom_db: dsp.headroom_db,
+        volume,
+        volume_active: volume != 1.0,
+        limiter_engaged: limiter_ns != 0 && now_ns.saturating_sub(limiter_ns) < 1_000_000_000,
+        bit_perfect: false,
+    };
+    s.bit_perfect = s.compute_bit_perfect();
+    Some(s)
+}
+
 impl From<&engine_thread::Entry> for EntryInfo {
     fn from(e: &engine_thread::Entry) -> Self {
         EntryInfo {
@@ -456,6 +587,8 @@ impl From<&engine_thread::Entry> for EntryInfo {
             path: e.path.clone(),
             duration_ms: e.duration_ms,
             base_ms: e.base_ms,
+            meta: e.meta,
+            gain: e.gain,
         }
     }
 }

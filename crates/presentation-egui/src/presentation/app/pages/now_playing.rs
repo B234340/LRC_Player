@@ -50,6 +50,9 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
         line_shift: app.lyrics_shift.lines,
         char_shift: app.lyrics_shift.chars,
         can_char_shift: app.loaded_timeline.as_ref().is_some_and(|t| t.karaoke_char_count() > 1),
+        can_generate_timing: !app.config.align_command.trim().is_empty() && app.selected_lyrics_index.is_some(),
+        generating_timing: app.lyric_alignment_running(),
+        desktop_lyrics: app.config.desktop_lyrics.enabled,
         tr,
     });
     let show_spectrum = app.config.show_spectrum && has_track;
@@ -70,6 +73,7 @@ pub(super) fn show(app: &mut GuiApp, ui: &mut Ui, tr: Tr) -> Vec<UiAction> {
         seed: &seed,
         lyrics,
         favorite: has_track.then(|| app.is_favorite_path(&app.play_path)),
+        lyrics_search: (has_track && app.lyrics_candidates.is_empty()).then(|| app.lyrics_fetch_running()),
         tr,
     };
     let actions = now_playing(&mut child, &props, &mut app.ui.now);

@@ -7,6 +7,7 @@ use std::path::Path;
 
 use eframe::egui::{self, vec2, Align2, CentralPanel, Id, Panel};
 use lrc_player_application::dto::{volume_to_linear, RepeatMode as DtoRepeat};
+use lrc_player_application::infrastructure::audio::engine::{EngineState, SignalPath};
 use lrc_player_domain::model::PlaybackState;
 
 use crate::presentation::app::{library_index::file_title, lyrics::lyric_lines, playlists, GuiApp, Modal};
@@ -17,7 +18,8 @@ use crate::presentation::ui::{
     shortcuts,
     theme::{self, metrics},
     views::{
-        eq_panel, lyrics_view, queue_panel, EqPanelProps, LyricsProps, QueueItem, QueueProps, TrackRow,
+        eq_panel, lyrics_view, quality_badge, queue_panel, signal_path_view, EqCurve, EqPanelProps, LyricsProps, QueueItem,
+        QueueProps, TrackRow,
     },
     format::format_count,
     widgets::{button, dialog, dialog_error, dialog_text, dialog_text_field, empty_state, ButtonKind, DialogButton, DialogResult, DialogSpec, Tex},
@@ -82,8 +84,9 @@ impl GuiApp {
         if !dialog_open {
             actions.extend(shortcuts::global_shortcuts(&ctx, volume_to_linear(self.volume)));
             let esc = !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape));
-            if esc && self.ui.eq_open {
+            if esc && (self.ui.eq_open || self.ui.signal_open) {
                 self.ui.eq_open = false;
+                self.ui.signal_open = false;
             }
         }
 
@@ -117,6 +120,10 @@ impl GuiApp {
                         queue_len: self.queue.len(),
                         no_output: self.no_output_device,
                         favorite: (!self.play_path.is_empty()).then(|| self.is_favorite_path(&self.play_path)),
+                        quality: self.signal_path().map(quality_badge),
+                        signal_open: self.ui.signal_open,
+                        desktop_lyrics: self.config.desktop_lyrics.enabled,
+                        desktop_lyrics_locked: self.config.desktop_lyrics.locked,
                         tr,
                     },
                 ));
@@ -177,6 +184,9 @@ impl GuiApp {
         if self.ui.eq_open {
             actions.extend(self.eq_popover(&ctx, tr));
         }
+        if self.ui.signal_open {
+            self.signal_popover(&ctx, tr);
+        }
         actions.extend(self.dialogs_ui(&ctx, tr));
         actions.extend(self.ui.toasts.show(&ctx, shell::transport::HEIGHT + 8.0, &tr));
         if let Some(a) = shell::file_drop(&ctx, &tr) {
@@ -233,7 +243,13 @@ impl GuiApp {
         ui.add_space(6.0);
         let Some(timeline) = self.loaded_timeline.as_ref().filter(|t| !t.is_empty()) else {
             let hint = if self.play_path.is_empty() { tr.t("now.no_track") } else { tr.t("now.no_lyrics_hint") };
-            empty_state(ui, Icon::Lyrics, tr.t("now.no_lyrics"), hint, None);
+            let search = (!self.play_path.is_empty() && self.lyrics_candidates.is_empty()).then(|| {
+                if self.lyrics_fetch_running() { tr.t("lyrics.searching_online") } else { tr.t("lyrics.search_online") }
+            });
+            let clicked = empty_state(ui, Icon::Lyrics, tr.t("now.no_lyrics"), hint, search.map(|l| (Icon::Search, l)));
+            if clicked && !self.lyrics_fetch_running() {
+                return vec![UiAction::FetchLyricsOnline];
+            }
             return Vec::new();
         };
         let lines = lyric_lines(timeline, self.config.karaoke);
@@ -252,42 +268,128 @@ impl GuiApp {
             line_shift: self.lyrics_shift.lines,
             char_shift: self.lyrics_shift.chars,
             can_char_shift: self.loaded_timeline.as_ref().is_some_and(|t| t.karaoke_char_count() > 1),
+            can_generate_timing: !self.config.align_command.trim().is_empty() && self.selected_lyrics_index.is_some(),
+            generating_timing: self.lyric_alignment_running(),
+            desktop_lyrics: self.config.desktop_lyrics.enabled,
             tr,
         };
         lyrics_view(ui, &props, &mut self.ui.side_lyrics)
+    }
+
+    /// Signal path of the audible track (`None` when stopped / no device).
+    pub(crate) fn signal_path(&self) -> Option<&SignalPath> {
+        self.engine_snapshot.as_ref().filter(|s| s.state != EngineState::Stopped).and_then(|s| s.signal.as_ref())
+    }
+
+    /// Sample rate the EQ graph is evaluated at: the device's, else 48 kHz.
+    fn graph_sample_rate(&self) -> u32 {
+        self.engine_snapshot
+            .as_ref()
+            .and_then(|s| s.device.as_ref())
+            .map(|d| d.sample_rate)
+            .filter(|r| *r >= 8_000)
+            .unwrap_or(48_000)
+    }
+
+    /// The EQ graph curve, recomputed only when the settings (or the rate) changed.
+    fn eq_curve(&mut self) -> &EqCurve {
+        let rate = self.graph_sample_rate();
+        let auto = self.config.auto_headroom;
+        let fresh = self.ui.eq_curve.as_ref().is_some_and(|c| c.is_for(&self.eq, &self.peq, auto, rate));
+        if !fresh {
+            self.ui.eq_curve = Some(EqCurve::compute(&self.eq, &self.peq, auto, rate));
+        }
+        self.ui.eq_curve.as_ref().expect("set above")
+    }
+
+    /// Frame of the popovers anchored above the transport's right side.
+    fn popover_frame(pal: &theme::Palette) -> egui::Frame {
+        egui::Frame::new()
+            .fill(pal.elevated)
+            .stroke(egui::Stroke::new(1.0, pal.border))
+            .corner_radius(theme::radius::LG)
+            .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 28, spread: 0, color: pal.shadow })
+            .inner_margin(16)
     }
 
     fn eq_popover(&mut self, ctx: &egui::Context, tr: Tr) -> Vec<UiAction> {
         let pal = theme::palette_for(ctx, ctx.global_style().visuals.dark_mode);
         let mut actions = Vec::new();
         let mut close = false;
+        self.eq_curve();
+        let screen = ctx.content_rect();
+        // Room above the transport bar: margins (8 + 16 top), frame margins (2 × 16), the close row.
+        let max_height = (screen.height() - shell::transport::HEIGHT - 8.0 - 16.0 - 32.0 - 44.0).max(200.0);
+        let props = EqPanelProps {
+            settings: self.eq,
+            peq: &self.peq,
+            tab: self.ui.eq_tab,
+            curve: self.ui.eq_curve.as_ref(),
+            max_height,
+            importing: self.ui.autoeq_picker.is_some(),
+            tr,
+        };
         egui::Area::new(Id::new("eq_popover"))
             .order(egui::Order::Foreground)
             .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -(shell::transport::HEIGHT + 8.0)))
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(pal.elevated)
-                    .stroke(egui::Stroke::new(1.0, pal.border))
-                    .corner_radius(theme::radius::LG)
-                    .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 28, spread: 0, color: pal.shadow })
-                    .inner_margin(16)
-                    .show(ui, |ui| {
-                        ui.set_width(540.0f32.min(ctx.content_rect().width() - 64.0));
-                        actions.extend(eq_panel(ui, &EqPanelProps { settings: self.eq, tr }));
-                        ui.add_space(6.0);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // Same 8 px inset as the EQ panel's own content.
-                            ui.add_space(8.0);
-                            if button(ui, ButtonKind::Ghost, None, tr.t("dialog.close")).clicked() {
-                                close = true;
-                            }
-                        });
+                Self::popover_frame(&pal).show(ui, |ui| {
+                    ui.set_width(540.0f32.min(screen.width() - 64.0));
+                    actions.extend(eq_panel(ui, &props));
+                    ui.add_space(6.0);
+                    // A fixed-height row: a bare right-to-left layout would take (and center
+                    // in) all the height left in the area.
+                    let row = vec2(ui.available_width(), 32.0);
+                    ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Same 8 px inset as the EQ panel's own content.
+                        ui.add_space(8.0);
+                        if button(ui, ButtonKind::Ghost, None, tr.t("dialog.close")).clicked() {
+                            close = true;
+                        }
                     });
+                });
             });
         if close {
             self.ui.eq_open = false;
         }
         actions
+    }
+
+    /// Signal-path popover (transport quality indicator).
+    fn signal_popover(&mut self, ctx: &egui::Context, tr: Tr) {
+        let pal = theme::palette_for(ctx, ctx.global_style().visuals.dark_mode);
+        let mut close = false;
+        let mut open_settings = false;
+        let signal = self.signal_path().cloned();
+        egui::Area::new(Id::new("signal_popover"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -(shell::transport::HEIGHT + 8.0)))
+            .show(ctx, |ui| {
+                Self::popover_frame(&pal).show(ui, |ui| {
+                    ui.set_width(380.0f32.min(ctx.content_rect().width() - 64.0));
+                    ui.label(theme::title(ui, tr.t("signal.title")).color(pal.text));
+                    ui.add_space(8.0);
+                    signal_path_view(ui, signal.as_ref(), tr);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if button(ui, ButtonKind::Ghost, Some(Icon::Settings), tr.t("signal.open_settings")).clicked() {
+                            open_settings = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if button(ui, ButtonKind::Ghost, None, tr.t("dialog.close")).clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                });
+            });
+        if close || open_settings {
+            self.ui.signal_open = false;
+        }
+        if open_settings {
+            self.navigate(Page::Settings);
+            self.ui.scroll_to_sound = 3;
+        }
     }
 
     fn dialogs_ui(&mut self, ctx: &egui::Context, tr: Tr) -> Vec<UiAction> {

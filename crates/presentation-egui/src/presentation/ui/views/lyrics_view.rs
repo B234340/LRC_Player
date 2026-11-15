@@ -56,6 +56,12 @@ pub struct LyricsProps<'a> {
     pub char_shift: i32,
     /// The lyrics have per-character (karaoke) timing, so a character shift is possible.
     pub can_char_shift: bool,
+    /// The external timing command is configured and an `.lrc` is selected.
+    pub can_generate_timing: bool,
+    /// The external timing command is running for this track.
+    pub generating_timing: bool,
+    /// The desktop lyrics window is shown (toggle in the ⋮ popover).
+    pub desktop_lyrics: bool,
     pub tr: Tr,
 }
 
@@ -106,7 +112,7 @@ impl LyricsViewState {
 const SMALL_RATIO: f32 = 0.72;
 const CONTROLS_H: f32 = 40.0;
 
-fn line_text(t: &str) -> String {
+pub(crate) fn line_text(t: &str) -> String {
     if t.trim().is_empty() {
         "♪".to_owned()
     } else {
@@ -311,8 +317,8 @@ pub fn lyrics_view(ui: &mut Ui, props: &LyricsProps<'_>, state: &mut LyricsViewS
 }
 
 /// Paint `galley` dimmed, then bright up to `chars` (fractional), row by row, with a soft
-/// leading edge.
-fn paint_karaoke(painter: &egui::Painter, pos: egui::Pos2, galley: &Arc<Galley>, chars: f32, dim: Color32, bright: Color32, alpha: f32) {
+/// leading edge. Shared with the desktop lyrics window.
+pub(crate) fn paint_karaoke(painter: &egui::Painter, pos: egui::Pos2, galley: &Arc<Galley>, chars: f32, dim: Color32, bright: Color32, alpha: f32) {
     painter.galley(pos, galley.clone(), theme::with_alpha(dim, alpha));
     let mut remaining = chars.max(0.0);
     for placed in &galley.rows {
@@ -392,6 +398,30 @@ fn shift_popover(ui: &mut Ui, props: &LyricsProps<'_>, actions: &mut Vec<UiActio
     if !props.can_char_shift {
         ui.label(theme::caption(ui, tr.t("lyrics.shift_chars_unavailable")));
     }
+    ui.separator();
+    // Real per-character timing from the audio (external tool, see settings).
+    let label = if props.generating_timing { tr.t("lyrics.generating_timing") } else { tr.t("lyrics.generate_timing") };
+    let gen = ui.add_enabled(
+        props.can_generate_timing && !props.generating_timing,
+        egui::Button::new(label).min_size(vec2(ui.available_width(), 28.0)),
+    );
+    if gen.clicked() {
+        actions.push(UiAction::GenerateLyricTiming);
+    }
+    if !props.can_generate_timing {
+        ui.add(egui::Label::new(theme::caption(ui, tr.t("lyrics.generate_timing_setup"))).wrap());
+    }
+    ui.separator();
+    // Desktop lyrics window (also on the transport bar and in Settings).
+    let mut on = props.desktop_lyrics;
+    ui.horizontal(|ui| {
+        ui.set_min_height(28.0);
+        let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+        paint_icon(ui.painter(), r, Icon::DesktopLyrics, if on { pal.accent_fg } else { pal.text_muted });
+        if ui.checkbox(&mut on, tr.t("desktop_lyrics.toggle")).changed() {
+            actions.push(UiAction::ToggleDesktopLyrics);
+        }
+    });
     ui.separator();
     let any = props.line_shift != 0 || props.char_shift != 0;
     ui.horizontal(|ui| {

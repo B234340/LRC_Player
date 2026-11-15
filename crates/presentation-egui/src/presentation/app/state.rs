@@ -22,7 +22,7 @@ use lrc_player_domain::model::PlaybackState;
 
 use crate::presentation::app::playback::{create_engine, eq_from_dto, eq_to_dto};
 use crate::presentation::app::{
-    library_index::LibraryIndex, media_controls::MediaControlsBridge, playlists, scan_status,
+    library_index::LibraryIndex, loudness, media_controls::MediaControlsBridge, playlists, scan_status,
     spectrum::FftAnalyzer, track_info, ArtworkLoader, GuiApp, UiShell,
 };
 use crate::presentation::ui::views::album_grid::{ALBUM_CARD_DEFAULT, ALBUM_CARD_MAX, ALBUM_CARD_MIN};
@@ -157,7 +157,41 @@ pub fn initial_window() -> Option<WindowStateDto> {
 impl GuiApp {
     /// The real application (persistent state, audio engine, system fonts).
     pub fn new(cc: &CreationContext<'_>) -> Self {
-        Self::with_options(&cc.egui_ctx, AppOptions::default())
+        super::startup_cloak::cloak(cc);
+        // The binary turns vsync off on Windows (see `frame_pacer`); pace the main window.
+        if cfg!(windows) {
+            super::frame_pacer::enable();
+        }
+        let mut app = Self::with_options(&cc.egui_ctx, AppOptions::default());
+        // The binary does not create the window maximized on Windows (winit would show it
+        // before it is cloaked); maximize it now, while it is still hidden.
+        if cfg!(windows) && app.ui.window.as_ref().is_some_and(|w| w.maximized) {
+            cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            super::startup_cloak::expect_maximized();
+        }
+        app.wait_for_fonts(&cc.egui_ctx);
+        app
+    }
+
+    /// Installs the system fonts before the first frame. eframe keeps the window hidden until
+    /// that frame is painted, so waiting here avoids a first frame drawn with the built-in
+    /// fonts (no Japanese glyphs) that is then redrawn: a visible flash at startup. The fonts
+    /// were being built on the worker while the rest of the app started; if that takes
+    /// unusually long, the window opens anyway and they are installed when ready.
+    fn wait_for_fonts(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.ui.fonts_rx else { return };
+        let started = std::time::Instant::now();
+        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(defs) => {
+                crate::presentation::ui::fonts::install_definitions(ctx, defs);
+                self.ui.fonts_rx = None;
+                tracing::debug!("fonts ready after {:?} at startup", started.elapsed());
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => self.ui.fonts_rx = None,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                tracing::warn!("fonts not ready after 3 s; opening the window without them");
+            }
+        }
     }
 
     /// Builds the app with explicit options (tests and screenshots use temp data).
@@ -208,6 +242,7 @@ impl GuiApp {
 
         let volume = state.volume.clamp(0.0, 1.0);
         let eq = eq_from_dto(&state.eq);
+        let peq = super::audio_quality::peq_from_config(&cfg.parametric_eq);
         let engine = if opts.engine { create_engine(&ctx, &cfg, volume, state.muted, eq) } else { None };
         let device_names = if opts.engine { AudioEngine::output_device_names() } else { Vec::new() };
 
@@ -263,6 +298,9 @@ impl GuiApp {
             volume,
             muted: state.muted,
             eq,
+            peq,
+            exclusive_unavailable: None,
+            config_save_due: None,
 
             pending_seek_ms: None,
             seek_last_change_at: None,
@@ -274,6 +312,7 @@ impl GuiApp {
             play_artist: None,
             play_album: None,
             track_info: track_info::TrackInfoLoader::new(ctx.clone()),
+            loudness: loudness::LoudnessAnalyzer::new(ctx.clone(), opts.persist.then(loudness::default_cache_path).flatten()),
 
             play_artwork_handle: None,
             play_backdrop_handle: None,
@@ -285,6 +324,7 @@ impl GuiApp {
             loaded_timeline: None,
             lyrics_revision: 1,
             lyrics_offset_ms,
+            lyrics_discovered_for: String::new(),
             lyrics_shift,
             lyrics_shifts: state.lyrics_shifts.clone(),
             lyrics_offsets: state.lyrics_offsets.clone(),
@@ -317,6 +357,11 @@ impl GuiApp {
                 right_panel: right_panel_from_key(state.right_panel.as_deref()),
                 sidebar: SidebarState { collapsed: state.sidebar_collapsed },
                 eq_open: false,
+                eq_tab: Default::default(),
+                eq_curve: None,
+                signal_open: false,
+                scroll_to_sound: 0,
+                autoeq_picker: None,
                 toasts: Toasts::new(),
                 library_table: Default::default(),
                 library_query: String::new(),
@@ -336,9 +381,15 @@ impl GuiApp {
                 folder_picker: None,
                 fonts_rx,
                 drop_rx: None,
+                align_job: None,
+                align_check: None,
+                fetch_job: None,
+                fetch_tried: Default::default(),
+                lyric_batch: Default::default(),
                 exclude_input: String::new(),
                 last_toast: None,
                 window: state.window,
+                desktop_lyrics: super::desktop_lyrics::DesktopLyrics::new(state.desktop_lyrics_window),
                 detail_rows: Default::default(),
             },
             media: MediaControlsBridge::new(opts.media_controls),
@@ -393,6 +444,7 @@ impl GuiApp {
             window: self.ui.window,
             library_columns: self.ui.library_columns.iter().filter_map(|c| column_key(*c)).map(str::to_string).collect(),
             album_card_size: Some(self.ui.album_card_size),
+            desktop_lyrics_window: self.ui.desktop_lyrics.window_for_save(),
         }
     }
 

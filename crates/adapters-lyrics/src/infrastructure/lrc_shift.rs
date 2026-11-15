@@ -36,6 +36,7 @@ impl LyricsTimeline {
     pub fn karaoke_char_count(&self) -> usize {
         self.lines
             .iter()
+            .filter(|l| !l.estimated)
             .flat_map(|l| l.segments.iter())
             .map(|s| s.char_range.end - s.char_range.start)
             .sum()
@@ -61,7 +62,7 @@ impl LyricsTimeline {
         }
         for line in &self.lines {
             let _ = write!(out, "[{}]", ts(line.start_ms));
-            if line.segments.is_empty() {
+            if line.segments.is_empty() || line.estimated {
                 out.push_str(&line.text);
             } else {
                 let mut at = 0usize;
@@ -128,6 +129,7 @@ fn shift_lines(lines: &[TimedLine], k: i32) -> Vec<TimedLine> {
                 text: String::new(),
                 char_count: 0,
                 segments: Vec::new(),
+                estimated: false,
             },
             [one] => {
                 let src = &lines[*one];
@@ -147,6 +149,7 @@ fn shift_lines(lines: &[TimedLine], k: i32) -> Vec<TimedLine> {
                     text: src.text.clone(),
                     char_count: src.char_count,
                     segments,
+                    estimated: src.estimated,
                 }
             }
             many => {
@@ -163,6 +166,7 @@ fn shift_lines(lines: &[TimedLine], k: i32) -> Vec<TimedLine> {
                     char_count: text.chars().count(),
                     text,
                     segments: Vec::new(),
+                    estimated: false,
                 }
             }
         })
@@ -183,6 +187,9 @@ fn shift_chars(lines: &mut [TimedLine], k: i32) {
     let mut slots: Vec<CharSlot> = Vec::new();
     let mut stream: Vec<char> = Vec::new();
     for (li, line) in lines.iter().enumerate() {
+        if line.estimated {
+            continue;
+        }
         let chars: Vec<char> = line.text.chars().collect();
         for seg in &line.segments {
             let len = (seg.char_range.end - seg.char_range.start) as u64;
@@ -212,7 +219,7 @@ fn shift_chars(lines: &mut [TimedLine], k: i32) {
     // characters (outside segments) stay; one segment per non-empty slot.
     let mut slot_iter = slots.iter().zip(assigned.iter()).peekable();
     for (li, line) in lines.iter_mut().enumerate() {
-        if line.segments.is_empty() {
+        if line.segments.is_empty() || line.estimated {
             continue;
         }
         let mut text = String::new();

@@ -213,6 +213,9 @@ pub struct StateDto {
     /// Album grid card width in logical px (`None` = default).
     #[serde(default)]
     pub album_card_size: Option<f32>,
+    /// Desktop lyrics window geometry (logical px; `maximized` unused).
+    #[serde(default)]
+    pub desktop_lyrics_window: Option<WindowStateDto>,
 }
 
 impl Default for StateDto {
@@ -249,6 +252,7 @@ impl Default for StateDto {
             window: None,
             library_columns: Vec::new(),
             album_card_size: None,
+            desktop_lyrics_window: None,
         }
     }
 }
@@ -325,6 +329,7 @@ mod tests {
         assert_eq!(state.right_panel, None);
         assert!(!state.sidebar_collapsed);
         assert_eq!(state.window, None);
+        assert_eq!(state.desktop_lyrics_window, None);
     }
 
     #[test]

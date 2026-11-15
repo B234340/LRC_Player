@@ -10,6 +10,8 @@ ringbuf = "0.2"
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac"] }
 rtrb = "0.3"
 rubato = "5"
+# EBU R128 loudness (engine/loudness.rs): integrated loudness + true peak for normalization.
+ebur128 = "0.1.11"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net", "io-util"] }
 crossbeam-channel = "0.5"
 tracing = "0.1"
@@ -17,6 +19,8 @@ lrc_player_ports = { path = "../ports" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+# WASAPI exclusive-mode output (engine/output_wasapi.rs); cpal only does shared mode.
+wasapi = "0.27"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

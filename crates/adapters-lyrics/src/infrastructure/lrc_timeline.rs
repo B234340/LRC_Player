@@ -258,6 +258,9 @@ pub struct TimedLine {
     /// non-blank timed pieces). Empty-text timing segments are not listed but
     /// still bound their neighbours' times.
     pub segments: Vec<TimedSegment>,
+    /// `segments` were estimated for display (see `with_estimated_karaoke`), not read from
+    /// the file: never written back, not shifted.
+    pub estimated: bool,
 }
 
 impl TimedLine {
@@ -415,6 +418,7 @@ impl LyricsTimeline {
                 text,
                 char_count,
                 segments,
+                estimated: false,
             });
         }
 
@@ -550,6 +554,8 @@ fn progress(t: u64, start: u64, end: u64) -> f32 {
 
 #[path = "lrc_shift.rs"]
 mod lrc_shift;
+#[path = "lrc_estimate.rs"]
+mod lrc_estimate;
 
 #[cfg(test)]
 mod tests {

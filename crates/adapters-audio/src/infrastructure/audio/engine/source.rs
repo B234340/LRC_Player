@@ -15,6 +15,7 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::{Time, TimeBase};
 
 use super::convert::SourceFormat;
+use super::normalization::{parse_gain_db, parse_peak, ReplayGainTags};
 
 /// Static information about a track, obtained without decoding audio.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -95,6 +96,73 @@ fn info_from_track(path: &Path, track: &symphonia::core::formats::Track) -> Trac
     }
 }
 
+/// Source properties used by the engine (signal path, normalization).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct TrackMeta {
+    /// symphonia codec short name ("flac", "mp3", "pcm_s16le", ...).
+    pub(crate) codec: &'static str,
+    pub(crate) sample_rate: u32,
+    pub(crate) bits: Option<u32>,
+    pub(crate) channels: u16,
+    pub(crate) replay_gain: ReplayGainTags,
+}
+
+fn meta_from_track(track: &symphonia::core::formats::Track) -> TrackMeta {
+    let p = &track.codec_params;
+    TrackMeta {
+        codec: symphonia::default::get_codecs()
+            .get_codec(p.codec)
+            .map(|d| d.short_name)
+            .unwrap_or("unknown"),
+        sample_rate: p.sample_rate.unwrap_or(0),
+        bits: p.bits_per_sample.or(p.bits_per_coded_sample),
+        channels: p.channels.map(|c| c.count() as u16).unwrap_or(0),
+        replay_gain: ReplayGainTags::default(),
+    }
+}
+
+/// Which ReplayGain field a tag holds: the standard key, else the raw key's last component
+/// (handles `REPLAYGAIN_TRACK_GAIN`, ID3 `TXXX:replaygain_track_gain`, MP4
+/// `----:com.apple.iTunes:replaygain_track_gain`, any case).
+fn replay_gain_field(tag: &symphonia::core::meta::Tag) -> Option<u8> {
+    match tag.std_key {
+        Some(StandardTagKey::ReplayGainTrackGain) => return Some(0),
+        Some(StandardTagKey::ReplayGainTrackPeak) => return Some(1),
+        Some(StandardTagKey::ReplayGainAlbumGain) => return Some(2),
+        Some(StandardTagKey::ReplayGainAlbumPeak) => return Some(3),
+        _ => {}
+    }
+    let key = tag.key.rsplit(':').next().unwrap_or(&tag.key).trim();
+    let key = key.to_ascii_uppercase();
+    match key.as_str() {
+        "REPLAYGAIN_TRACK_GAIN" => Some(0),
+        "REPLAYGAIN_TRACK_PEAK" => Some(1),
+        "REPLAYGAIN_ALBUM_GAIN" => Some(2),
+        "REPLAYGAIN_ALBUM_PEAK" => Some(3),
+        _ => None,
+    }
+}
+
+/// Fills missing ReplayGain values from `tags` (the first valid value of each field wins).
+pub(crate) fn apply_replay_gain<'a>(
+    rg: &mut ReplayGainTags,
+    tags: impl IntoIterator<Item = &'a symphonia::core::meta::Tag>,
+) {
+    for tag in tags {
+        let Some(field) = replay_gain_field(tag) else {
+            continue;
+        };
+        let v = tag.value.to_string();
+        match field {
+            0 if rg.track_gain_db.is_none() => rg.track_gain_db = parse_gain_db(&v),
+            1 if rg.track_peak.is_none() => rg.track_peak = parse_peak(&v),
+            2 if rg.album_gain_db.is_none() => rg.album_gain_db = parse_gain_db(&v),
+            3 if rg.album_peak.is_none() => rg.album_peak = parse_peak(&v),
+            _ => {}
+        }
+    }
+}
+
 fn time_to_ms(t: Time) -> u64 {
     t.seconds
         .saturating_mul(1000)
@@ -130,6 +198,7 @@ pub(crate) struct TrackSource {
     time_base: Option<TimeBase>,
     sample_rate: u32,
     info: TrackInfo,
+    meta: TrackMeta,
     sample_buf: Option<SampleBuffer<f32>>,
     /// Range of `sample_buf.samples()` holding the current block.
     block: (usize, usize),
@@ -145,6 +214,7 @@ impl TrackSource {
         let track = select_track(format.as_ref())?;
         let track_id = track.id;
         let mut info = info_from_track(path, track);
+        let mut meta = meta_from_track(track);
         let time_base = track.codec_params.time_base;
         let sample_rate = track.codec_params.sample_rate.unwrap_or(44_100);
         let decoder = symphonia::default::get_codecs()
@@ -153,11 +223,13 @@ impl TrackSource {
         if let Some(m) = probed_meta.as_mut() {
             if let Some(rev) = m.get().as_ref().and_then(|m| m.current().cloned()) {
                 apply_tags(&mut info, &rev);
+                apply_replay_gain(&mut meta.replay_gain, rev.tags());
             }
         }
         let mut format = format;
         if let Some(rev) = format.metadata().skip_to_latest() {
             apply_tags(&mut info, rev);
+            apply_replay_gain(&mut meta.replay_gain, rev.tags());
         }
         Ok(Self {
             path: path.to_path_buf(),
@@ -167,6 +239,7 @@ impl TrackSource {
             time_base,
             sample_rate,
             info,
+            meta,
             sample_buf: None,
             block: (0, 0),
             discard_until_ts: None,
@@ -181,6 +254,10 @@ impl TrackSource {
 
     pub(crate) fn info(&self) -> &TrackInfo {
         &self.info
+    }
+
+    pub(crate) fn meta(&self) -> &TrackMeta {
+        &self.meta
     }
 
     fn ts_to_frames(&self, ts: u64) -> u64 {
@@ -348,5 +425,57 @@ impl TrackSource {
             Some(sb) => &sb.samples()[self.block.0..self.block.1],
             None => &[],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symphonia::core::meta::{Tag, Value};
+
+    fn tag(std: Option<StandardTagKey>, key: &str, v: &str) -> Tag {
+        Tag::new(std, key, Value::from(v))
+    }
+
+    #[test]
+    fn reads_replay_gain_from_standard_and_raw_keys() {
+        let tags = [
+            tag(
+                Some(StandardTagKey::ReplayGainTrackGain),
+                "REPLAYGAIN_TRACK_GAIN",
+                "-6.53 dB",
+            ),
+            tag(
+                Some(StandardTagKey::ReplayGainTrackPeak),
+                "REPLAYGAIN_TRACK_PEAK",
+                "0.988",
+            ),
+            tag(None, "TXXX:replaygain_album_gain", "-7.10 dB"),
+            tag(
+                None,
+                "----:com.apple.iTunes:REPLAYGAIN_ALBUM_PEAK",
+                "1.000000",
+            ),
+            tag(None, "TITLE", "x"),
+        ];
+        let mut rg = ReplayGainTags::default();
+        apply_replay_gain(&mut rg, tags.iter());
+        assert_eq!(rg.track_gain_db, Some(-6.53));
+        assert_eq!(rg.track_peak, Some(0.988));
+        assert_eq!(rg.album_gain_db, Some(-7.10));
+        assert_eq!(rg.album_peak, Some(1.0));
+    }
+
+    #[test]
+    fn first_valid_replay_gain_value_wins_and_garbage_is_ignored() {
+        let tags = [
+            tag(None, "replaygain_track_gain", "loud"),
+            tag(None, "REPLAYGAIN_TRACK_GAIN", "+1.5 dB"),
+            tag(None, "REPLAYGAIN_TRACK_GAIN", "-9 dB"),
+        ];
+        let mut rg = ReplayGainTags::default();
+        apply_replay_gain(&mut rg, tags.iter());
+        assert_eq!(rg.track_gain_db, Some(1.5));
+        assert_eq!(rg.album_gain_db, None);
     }
 }

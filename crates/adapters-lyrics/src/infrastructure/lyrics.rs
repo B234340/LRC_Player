@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 pub use crate::infrastructure::lrc_file::{
     lrc_backup_path, replace_file_with_backup, save_lrc_offset, shift_lrc_timestamps, LrcOffsetSave,
 };
+pub use crate::infrastructure::lrclib::{fetch as lrclib_fetch, LrclibQuery, LrclibResult};
 pub use crate::infrastructure::lrc_timeline::{
     LrcMetadata, LyricPosition, LyricsTimeline, TimedLine, TimedSegment, DEFAULT_LAST_LINE_MS,
 };

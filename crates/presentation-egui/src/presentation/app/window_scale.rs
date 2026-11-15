@@ -17,7 +17,7 @@
 //! with the same pixels (it cannot be scaled separately).
 //!
 //! Maximized windows (moved with Win+Shift+Arrow) and windows without a caption (fullscreen)
-//! are left to winit. The minimum size stays the physical size egui-winit set at creation,
+//! are left to winit, except the borderless desktop-lyrics window, which is kept too. The minimum size stays the physical size egui-winit set at creation,
 //! consistent with a fixed pixel size. Other platforms are unchanged.
 
 /// `SWP_*` flags winit's `SetWindowPos` should use during a DPI change.
@@ -35,67 +35,85 @@ pub(crate) fn frozen_flags(flags: u32, in_dpi_change: bool, keep_frame: bool) ->
 /// Installs the fixed-pixel-size behaviour on the app window (once; later calls do nothing).
 #[cfg(windows)]
 pub(crate) fn install(frame: &eframe::Frame) {
-    imp::install(frame);
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = frame.window_handle() else { return };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+    imp::install(h.hwnd.get(), false);
 }
 
 #[cfg(not(windows))]
 pub(crate) fn install(_frame: &eframe::Frame) {}
 
+/// Same for another window of this app (the desktop-lyrics window). It has no caption, so
+/// `borderless` keeps its frame too. Idempotent per window.
+#[cfg(windows)]
+pub(crate) fn install_hwnd(hwnd: isize, borderless: bool) {
+    imp::install(hwnd, borderless);
+}
+
 #[cfg(windows)]
 mod imp {
-    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::Mutex;
 
+    use winapi::shared::basetsd::{DWORD_PTR, UINT_PTR};
     use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
     use winapi::shared::windef::HWND;
-    use winapi::um::winuser::{
-        CallWindowProcW, GetWindowLongPtrW, IsZoomed, SetWindowLongPtrW, GWLP_WNDPROC, GWL_STYLE, WINDOWPOS,
-        WM_DPICHANGED, WM_WINDOWPOSCHANGING, WNDPROC, WS_CAPTION,
-    };
+    use winapi::um::commctrl::{DefSubclassProc, SetWindowSubclass};
+    use winapi::um::winuser::{GetWindowLongPtrW, IsZoomed, GWL_STYLE, WINDOWPOS, WM_DPICHANGED, WM_WINDOWPOSCHANGING, WS_CAPTION};
 
-    /// winit's window procedure, which ours forwards to.
-    static ORIGINAL_PROC: AtomicIsize = AtomicIsize::new(0);
-    static INSTALLED: AtomicBool = AtomicBool::new(false);
-    /// True while winit handles a `WM_DPICHANGED` for a window whose frame we keep.
-    static FREEZE_FRAME: AtomicBool = AtomicBool::new(false);
+    /// Subclass id (any constant unique to this procedure).
+    const SUBCLASS_ID: UINT_PTR = 0x4c52_4350; // "LRCP"
+    /// Windows already subclassed.
+    static INSTALLED: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+    /// The window whose `WM_DPICHANGED` winit is handling right now, if its frame is kept
+    /// (0 = none). DPI changes are handled synchronously, one window at a time.
+    static FROZEN: AtomicIsize = AtomicIsize::new(0);
 
-    pub(super) fn install(frame: &eframe::Frame) {
-        if INSTALLED.load(Ordering::Relaxed) {
+    pub(super) fn install(hwnd: isize, borderless: bool) {
+        let mut installed = INSTALLED.lock().unwrap_or_else(|e| e.into_inner());
+        // Forget windows that no longer exist (the desktop-lyrics window is re-created).
+        installed.retain(|&h| unsafe { winapi::um::winuser::IsWindow(h as HWND) } != 0);
+        if installed.contains(&hwnd) {
             return;
         }
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let Ok(handle) = frame.window_handle() else { return };
-        let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
-        let hwnd = h.hwnd.get() as HWND;
-        INSTALLED.store(true, Ordering::Relaxed);
-        // SAFETY: `hwnd` is the live app window owned by this (the UI) thread. The previous
-        // procedure is stored before ours can run, and ours forwards every message to it.
-        let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, fixed_size_proc as *const () as isize) };
-        ORIGINAL_PROC.store(previous, Ordering::SeqCst);
-        tracing::debug!("window: fixed pixel size across monitors enabled");
+        // SAFETY: `hwnd` is a live window of this (the UI) thread; the subclass procedure
+        // forwards every message with DefSubclassProc.
+        let ok = unsafe { SetWindowSubclass(hwnd as HWND, Some(fixed_size_proc), SUBCLASS_ID, DWORD_PTR::from(borderless)) };
+        if ok != 0 {
+            installed.push(hwnd);
+            tracing::debug!("window {hwnd:#x}: fixed pixel size across monitors enabled");
+        }
     }
 
-    unsafe extern "system" fn fixed_size_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        // SAFETY: ORIGINAL_PROC holds winit's WNDPROC (stored before this proc was installed).
-        let original: WNDPROC = unsafe { std::mem::transmute(ORIGINAL_PROC.load(Ordering::SeqCst)) };
+    unsafe extern "system" fn fixed_size_proc(
+        hwnd: HWND,
+        msg: UINT,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: UINT_PTR,
+        borderless: DWORD_PTR,
+    ) -> LRESULT {
         match msg {
             WM_DPICHANGED => {
                 // SAFETY: plain queries on the window this procedure belongs to.
                 let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
-                let keep = unsafe { IsZoomed(hwnd) } == 0 && style & WS_CAPTION == WS_CAPTION;
-                let was = FREEZE_FRAME.swap(keep, Ordering::SeqCst);
+                let framed = style & WS_CAPTION == WS_CAPTION || borderless != 0;
+                let keep = unsafe { IsZoomed(hwnd) } == 0 && framed;
+                let was = FROZEN.swap(if keep { hwnd as isize } else { 0 }, Ordering::SeqCst);
                 // winit updates its scale factor; its resize below is neutralised.
-                let result = unsafe { CallWindowProcW(original, hwnd, msg, wparam, lparam) };
-                FREEZE_FRAME.store(was, Ordering::SeqCst);
+                let result = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                FROZEN.store(was, Ordering::SeqCst);
                 result
             }
-            WM_WINDOWPOSCHANGING if FREEZE_FRAME.load(Ordering::SeqCst) => {
+            WM_WINDOWPOSCHANGING if FROZEN.load(Ordering::SeqCst) == hwnd as isize => {
                 // SAFETY: for WM_WINDOWPOSCHANGING, lparam points to a writable WINDOWPOS.
                 if let Some(pos) = unsafe { (lparam as *mut WINDOWPOS).as_mut() } {
                     pos.flags = super::frozen_flags(pos.flags, true, true);
                 }
-                unsafe { CallWindowProcW(original, hwnd, msg, wparam, lparam) }
+                unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
             }
-            _ => unsafe { CallWindowProcW(original, hwnd, msg, wparam, lparam) },
+            _ => unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) },
         }
     }
 }

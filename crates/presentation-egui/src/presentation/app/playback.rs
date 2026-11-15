@@ -15,7 +15,7 @@
 //! | [`GuiApp::next`], [`GuiApp::previous`] | queue navigation (Previous restarts after 3 s) |
 //! | [`GuiApp::seek_to`], [`GuiApp::seek_relative`] | debounced (~30 ms) seek |
 //! | [`GuiApp::set_volume`], [`GuiApp::toggle_mute`], [`GuiApp::set_muted`] | 0..=1 perceptual volume |
-//! | [`GuiApp::set_eq`] | 10-band EQ |
+//! | [`GuiApp::set_eq`] | 10-band EQ (PEQ, crossfeed, ...: `app/audio_quality.rs`) |
 //! | [`GuiApp::set_shuffle`], [`GuiApp::cycle_repeat`], [`GuiApp::set_repeat`] | play order |
 //! | [`GuiApp::play_queue_index`], [`GuiApp::enqueue`], [`GuiApp::play_now`] | queue |
 //! | [`GuiApp::set_output_device`] | `None` = follow the system default |
@@ -120,6 +120,7 @@ pub(crate) fn create_engine(
         device: cfg.preferred_output_device.clone(),
         resampler,
         volume: volume_to_linear(volume),
+        exclusive: super::audio_quality::exclusive_from_config(cfg),
         ..Default::default()
     }) {
         Ok(engine) => engine,
@@ -130,6 +131,8 @@ pub(crate) fn create_engine(
     };
     engine.set_muted(muted);
     engine.set_eq(eq);
+    engine.set_normalization(super::loudness::normalization_from_config(cfg));
+    super::audio_quality::apply_to_engine(&engine, cfg);
     let waker_ctx = ctx.clone();
     engine.set_waker(Arc::new(move || waker_ctx.request_repaint()));
     Some(engine)
@@ -168,7 +171,7 @@ impl GuiApp {
         }
 
         let Some(engine) = &self.engine else {
-            self.engine_snapshot = None;
+            // No engine: nothing ever set a snapshot (screenshot tests set one by hand).
             self.flush_pending_seek();
             return;
         };
@@ -315,11 +318,13 @@ impl GuiApp {
             }
             EngineEvent::DeviceChanged { device } => {
                 self.no_output_device = device.is_none();
+                self.on_output_device_changed(device.as_ref().is_some_and(|d| d.exclusive));
                 self.active_output_device = device.map(|d| d.name);
             }
             EngineEvent::StateChanged { state } => {
                 self.playback_state = map_engine_state(state);
             }
+            EngineEvent::ExclusiveUnavailable { reason } => self.on_exclusive_unavailable(reason),
         }
     }
 
@@ -342,6 +347,9 @@ impl GuiApp {
             None
         };
         if next != self.pending_next {
+            if let Some((_, p)) = &next {
+                self.prepare_loudness(p, super::loudness::Priority::Next);
+            }
             engine.set_next(next.as_ref().map(|(_, p)| PathBuf::from(p)));
             self.pending_next = next;
         }
@@ -410,6 +418,7 @@ impl GuiApp {
             self.toast_error(tr.t("toast.no_engine").to_string());
             return;
         };
+        self.prepare_loudness(&self.play_path, super::loudness::Priority::Current);
         engine.load(PathBuf::from(&self.play_path), self.play_position_ms, autoplay);
         if autoplay {
             self.warn_if_no_output_device();
@@ -707,6 +716,7 @@ impl GuiApp {
             }
         }
         self.flush_state();
+        self.flush_config_if_due(true);
         // Dropping the engine fades out and joins its thread.
         self.engine = None;
     }
