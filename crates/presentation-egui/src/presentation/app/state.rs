@@ -158,6 +158,10 @@ impl GuiApp {
     /// The real application (persistent state, audio engine, system fonts).
     pub fn new(cc: &CreationContext<'_>) -> Self {
         super::startup_cloak::cloak(cc);
+        // The binary turns vsync off on Windows (see `frame_pacer`); pace the main window.
+        if cfg!(windows) {
+            super::frame_pacer::enable();
+        }
         let mut app = Self::with_options(&cc.egui_ctx, AppOptions::default());
         // The binary does not create the window maximized on Windows (winit would show it
         // before it is cloaked); maximize it now, while it is still hidden.

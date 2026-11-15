@@ -408,7 +408,8 @@ fn minimized_window_still_processes_engine_and_workers() {
     // background too, so the engine moves on by itself at the end of the track. (Actually
     // hearing it advance needs an audio output device, which CI does not have.)
     let active = app.engine_snapshot.as_ref().is_some_and(|s| s.state != lrc_player_application::infrastructure::audio::engine::EngineState::Stopped);
-    if active {
+    // (Under heavy load the 1 s track can already have advanced to `b`.)
+    if active && app.current_queue_index == Some(0) {
         assert_eq!(app.pending_next, Some((1, b.clone())), "next track queued while minimized");
     }
     let _ = a;

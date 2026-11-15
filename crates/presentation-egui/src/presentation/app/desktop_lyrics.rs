@@ -672,7 +672,9 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
         ctx.request_repaint_of(ViewportId::ROOT);
     }
     match next_repaint(feed.playing && feed.sample.advancing, karaoke_line, to_next) {
-        Some(d) if d.is_zero() => ctx.request_repaint(),
+        // Paced (not "as soon as possible"): with vsync off on Windows an immediate request
+        // would spin; ~60 fps is smooth for the karaoke fill.
+        Some(d) if d.is_zero() => ctx.request_repaint_after(super::frame_pacer::FRAME),
         Some(d) => ctx.request_repaint_after(d),
         None => {}
     }

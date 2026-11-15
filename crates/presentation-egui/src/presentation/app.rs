@@ -42,6 +42,7 @@ mod shell;
 mod spectrum;
 mod state;
 mod track_info;
+mod frame_pacer;
 mod startup_cloak;
 mod window_scale;
 
@@ -402,6 +403,7 @@ impl App for GuiApp {
     /// the gapless successor is queued and the OS media overlay stays current in the
     /// background.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        frame_pacer::pace();
         self.poll_fonts(ctx);
         crate::presentation::ui::theme::sync(ctx, self.ui.theme, self.ui.accent);
         self.poll_scan_status();

@@ -176,10 +176,17 @@ fn main() -> Result<()> {
             viewport = viewport.with_position([x, y]);
         }
     }
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
+    // Windows: no vsync. With vsync every window's buffer swap waits for a display refresh on
+    // the one UI thread, so the desktop-lyrics window and the main window take turns and the
+    // main window becomes sluggish. DWM never shows torn frames of a windowed app; the app
+    // paces its frames itself (`frame_pacer`).
+    if cfg!(windows) {
+        options.glow_options.vsync = false;
+    }
     if let Err(err) = eframe::run_native(
         "LRC Player",
         options,
