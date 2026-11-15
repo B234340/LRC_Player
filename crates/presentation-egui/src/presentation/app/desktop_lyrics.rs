@@ -162,7 +162,56 @@ pub(crate) fn ms_to_next_line(timeline: &LyricsTimeline, position_ms: u64) -> Op
     timeline.lines().iter().find(|l| l.start_ms as i64 > t).map(|l| (l.start_ms as i64 - t) as u64)
 }
 
-/// When the overlay should paint again: `Some(ZERO)` = every display frame.
+/// Frame interval of the karaoke fill when the UI thread is idle (~30 fps).
+const KARAOKE_FRAME: Duration = Duration::from_micros(33_333);
+/// Slowest karaoke frame interval under load.
+const KARAOKE_FRAME_MAX: Duration = Duration::from_millis(100);
+
+/// Karaoke frame interval from how late overlay frames arrive (EMA, ms). Every window is drawn
+/// on the one UI thread, and on some Windows systems presenting the transparent overlay waits
+/// for the compositor: at a fixed 60 fps it could take the whole thread, starving the main
+/// window (input lag). Late frames mean the thread is busy, so the overlay backs off.
+pub(crate) fn karaoke_interval(late_ema_ms: f32) -> Duration {
+    let late = if late_ema_ms.is_finite() { late_ema_ms.max(0.0) } else { 0.0 };
+    (KARAOKE_FRAME + Duration::from_secs_f32(late * 3.0 / 1000.0)).min(KARAOKE_FRAME_MAX)
+}
+
+/// Overlay frame pacing state (see [`karaoke_interval`]).
+#[derive(Default)]
+struct Pacing {
+    last_start: Option<Instant>,
+    /// Delay requested at the end of the previous frame (lateness is measured against it).
+    requested: Option<Duration>,
+    late_ema_ms: f32,
+    stats_since: Option<Instant>,
+    stats_frames: u32,
+}
+
+impl Pacing {
+    /// Records the start of a frame; returns the karaoke interval to use.
+    fn frame_start(&mut self, now: Instant) -> Duration {
+        if let (Some(last), Some(req)) = (self.last_start, self.requested.take()) {
+            let late = now.saturating_duration_since(last).saturating_sub(req).as_secs_f32() * 1000.0;
+            self.late_ema_ms = self.late_ema_ms * 0.8 + late.min(500.0) * 0.2;
+        }
+        self.last_start = Some(now);
+        self.stats_frames += 1;
+        let since = *self.stats_since.get_or_insert(now);
+        let elapsed = now.saturating_duration_since(since);
+        if elapsed >= Duration::from_secs(30) {
+            tracing::debug!(
+                "desktop lyrics: {:.1} fps, frames late by {:.1} ms on average",
+                self.stats_frames as f32 / elapsed.as_secs_f32(),
+                self.late_ema_ms
+            );
+            self.stats_since = Some(now);
+            self.stats_frames = 0;
+        }
+        karaoke_interval(self.late_ema_ms)
+    }
+}
+
+/// When the overlay should paint again: `Some(ZERO)` = at the karaoke frame rate.
 pub(crate) fn next_repaint(playing: bool, karaoke_line: bool, to_next_line: Option<u64>) -> Option<Duration> {
     if !playing {
         return None;
@@ -275,6 +324,7 @@ pub(crate) struct Shared {
     shown_pos: Option<u64>,
     /// Frames painted since the window was (re)created.
     frames: u32,
+    pacing: Pacing,
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
@@ -582,6 +632,7 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
     }
 
     let now = Instant::now();
+    let karaoke_frame = sh.pacing.frame_start(now);
     let feed = sh.feed.clone();
     let settings = feed.settings;
     let position = smooth_position(sh.shown_pos, feed.sample.at_time(now));
@@ -676,12 +727,11 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
     if wake_main {
         ctx.request_repaint_of(ViewportId::ROOT);
     }
-    match next_repaint(feed.playing && feed.sample.advancing, karaoke_line, to_next) {
-        // Paced (not "as soon as possible"): with vsync off on Windows an immediate request
-        // would spin; ~60 fps is smooth for the karaoke fill.
-        Some(d) if d.is_zero() => ctx.request_repaint_after(super::frame_pacer::FRAME),
-        Some(d) => ctx.request_repaint_after(d),
-        None => {}
+    let next = next_repaint(feed.playing && feed.sample.advancing, karaoke_line, to_next)
+        .map(|d| if d.is_zero() { karaoke_frame } else { d });
+    lock(shared).pacing.requested = next;
+    if let Some(d) = next {
+        ctx.request_repaint_after(d);
     }
 }
 
@@ -845,9 +895,33 @@ mod tests {
     }
 
     #[test]
+    fn karaoke_frames_back_off_under_load() {
+        assert_eq!(karaoke_interval(0.0), KARAOKE_FRAME);
+        assert!(karaoke_interval(10.0) > Duration::from_millis(60));
+        assert_eq!(karaoke_interval(1000.0), KARAOKE_FRAME_MAX);
+        assert_eq!(karaoke_interval(f32::NAN), KARAOKE_FRAME);
+        // Frames arriving on time keep 30 fps; consistently late ones slow down.
+        let mut p = Pacing::default();
+        let t0 = Instant::now();
+        let mut t = t0;
+        for _ in 0..20 {
+            let d = p.frame_start(t);
+            p.requested = Some(d);
+            t += d;
+        }
+        assert_eq!(karaoke_interval(p.late_ema_ms), KARAOKE_FRAME, "on time");
+        for _ in 0..20 {
+            let d = p.frame_start(t);
+            p.requested = Some(d);
+            t += d + Duration::from_millis(20);
+        }
+        assert!(karaoke_interval(p.late_ema_ms) >= Duration::from_millis(80), "late frames back off");
+    }
+
+    #[test]
     fn repaints_only_while_needed() {
         assert_eq!(next_repaint(false, true, Some(10)), None, "paused: idle");
-        assert_eq!(next_repaint(true, true, Some(10_000)), Some(Duration::ZERO), "karaoke: display rate");
+        assert_eq!(next_repaint(true, true, Some(10_000)), Some(Duration::ZERO), "karaoke: frame rate");
         assert_eq!(next_repaint(true, false, Some(40)), Some(Duration::from_millis(45)));
         assert_eq!(next_repaint(true, false, Some(10_000)), Some(MAX_IDLE));
         assert_eq!(next_repaint(true, false, None), Some(MAX_IDLE));
@@ -997,3 +1071,4 @@ mod tests {
         assert!(!panel, "Ctrl+Shift+L must not also toggle the lyrics panel");
     }
 }
+
