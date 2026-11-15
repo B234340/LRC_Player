@@ -666,6 +666,11 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
             ctx.request_repaint();
         }
         win::keep_layered_visible(WINDOW_TITLE, settings.locked);
+        if sh.frames <= 3 {
+            // Fixed pixel size across monitors with different DPI, like the main window
+            // (a re-created window gets a new handle; installing is idempotent per window).
+            win::keep_fixed_pixel_size(WINDOW_TITLE);
+        }
     }
     drop(sh);
     if wake_main {
@@ -736,6 +741,13 @@ mod win {
         }
     }
 
+    /// See `window_scale`: the overlay keeps its pixel size when it crosses monitors.
+    pub(super) fn keep_fixed_pixel_size(title: &str) {
+        if let Some(hwnd) = overlay_hwnd(title) {
+            crate::presentation::app::window_scale::install_hwnd(hwnd as isize, true);
+        }
+    }
+
     /// Work area (taskbar excluded) of the monitor nearest to `near` (points), in points.
     pub(super) fn work_area(near: Rect, ppp: f32) -> Option<Rect> {
         let ppp = if ppp.is_finite() && ppp > 0.1 { ppp } else { 1.0 };
@@ -771,6 +783,8 @@ mod win {
     use eframe::egui::Rect;
 
     pub(super) fn keep_layered_visible(_title: &str, _locked: bool) {}
+
+    pub(super) fn keep_fixed_pixel_size(_title: &str) {}
 
     /// Monitor positions are not available here; the saved position is only sanity-checked.
     pub(super) fn work_area(_near: Rect, _ppp: f32) -> Option<Rect> {
