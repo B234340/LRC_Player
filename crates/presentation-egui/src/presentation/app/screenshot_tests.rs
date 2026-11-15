@@ -1129,6 +1129,18 @@ enum OverlayCase {
     Instrumental,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum OverlayArt {
+    /// Setting off.
+    Off,
+    /// The synthetic cover.
+    Cover,
+    /// A nearly white cover (edge visibility on the light panel).
+    Pale,
+    /// Track without art: the placeholder tile.
+    Placeholder,
+}
+
 struct OverlayShot {
     name: &'static str,
     case: OverlayCase,
@@ -1137,6 +1149,20 @@ struct OverlayShot {
     hover: bool,
     locked: bool,
     show_title: bool,
+    art: OverlayArt,
+    /// Opacity slider open in the hover bar.
+    slider: bool,
+}
+
+fn pale_cover(size: usize) -> ColorImage {
+    let mut px = Vec::with_capacity(size * size);
+    for y in 0..size {
+        for x in 0..size {
+            let d = ((x as f32 / size as f32 - 0.5).powi(2) + (y as f32 / size as f32 - 0.55).powi(2)).sqrt();
+            px.push(if d < 0.18 { Color32::from_rgb(200, 196, 190) } else { Color32::from_rgb(248, 247, 244) });
+        }
+    }
+    ColorImage::new([size, size], px)
 }
 
 fn overlay_shot(dark: bool, shot: &OverlayShot) {
@@ -1144,8 +1170,9 @@ fn overlay_shot(dark: bool, shot: &OverlayShot) {
     use crate::presentation::ui::views::desktop_lyrics::{
         desktop_lyrics_view, DesktopLyricsContent, DesktopLyricsProps, DesktopLyricsViewState, OverlayLine,
     };
-    let (case, opacity, hover, locked, show_title) = (shot.case, shot.opacity, shot.hover, shot.locked, shot.show_title);
+    let (case, opacity, hover, locked, show_title, art) = (shot.case, shot.opacity, shot.hover, shot.locked, shot.show_title, shot.art);
     let mut state = DesktopLyricsViewState::default();
+    state.set_opacity_slider_open(shot.slider);
     let mut h = Harness::builder()
         .with_size(shot.size)
         .with_pixels_per_point(1.0)
@@ -1160,6 +1187,13 @@ fn overlay_shot(dark: bool, shot: &OverlayShot) {
             let mode = if dark { theme::ThemeMode::Dark } else { theme::ThemeMode::Light };
             theme::sync(&ctx, mode, theme::Accent::Teal);
             paint_desktop(ui);
+            let tex_id = egui::Id::new("overlay_shot_cover");
+            let cover = ctx.data(|d| d.get_temp::<egui::TextureHandle>(tex_id)).unwrap_or_else(|| {
+                let img = if art == OverlayArt::Pale { pale_cover(256) } else { cover_image(2, 256) };
+                let t = ctx.load_texture("overlay_cover", img, egui::TextureOptions::LINEAR);
+                ctx.data_mut(|d| d.insert_temp(tex_id, t.clone()));
+                t
+            });
             let karaoke = OverlayLine { text: "<00:22.00>その一言で全てが分かった", karaoke: true, highlighted_chars: 0.0 };
             let content = match case {
                 OverlayCase::Karaoke => DesktopLyricsContent::Lyrics {
@@ -1194,6 +1228,8 @@ fn overlay_shot(dark: bool, shot: &OverlayShot) {
                 playing: true,
                 has_track: !matches!(case, OverlayCase::NoTrack),
                 force_controls: hover,
+                artwork: matches!(art, OverlayArt::Cover | OverlayArt::Pale).then(|| crate::presentation::ui::widgets::Tex::from(&cover)),
+                show_artwork: art != OverlayArt::Off,
                 tr: crate::presentation::ui::Tr::JA,
             };
             let _ = desktop_lyrics_view(ui, &props, &mut state);
@@ -1216,21 +1252,38 @@ fn overlay_shot(dark: bool, shot: &OverlayShot) {
 fn desktop_lyrics_screens() {
     let wide = super::desktop_lyrics::DEFAULT_SIZE;
     let shots = [
-        OverlayShot { name: "karaoke", case: OverlayCase::Karaoke, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
-        OverlayShot { name: "karaoke_hover", case: OverlayCase::Karaoke, size: wide, opacity: 0.72, hover: true, locked: false, show_title: false },
-        OverlayShot { name: "karaoke_title", case: OverlayCase::Karaoke, size: Vec2::new(640.0, 150.0), opacity: 0.72, hover: false, locked: false, show_title: true },
-        OverlayShot { name: "karaoke_transparent", case: OverlayCase::Karaoke, size: wide, opacity: 0.0, hover: false, locked: false, show_title: false },
-        OverlayShot { name: "plain_long_narrow", case: OverlayCase::Plain, size: Vec2::new(380.0, 120.0), opacity: 0.72, hover: false, locked: false, show_title: false },
-        OverlayShot { name: "narrow_hover", case: OverlayCase::Karaoke, size: Vec2::new(300.0, 110.0), opacity: 0.72, hover: true, locked: false, show_title: false },
-        OverlayShot { name: "intro", case: OverlayCase::Intro, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
-        OverlayShot { name: "interlude", case: OverlayCase::Interlude, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
-        OverlayShot { name: "no_track", case: OverlayCase::NoTrack, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
-        OverlayShot { name: "no_lyrics", case: OverlayCase::NoLyrics, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
-        OverlayShot { name: "instrumental", case: OverlayCase::Instrumental, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false },
-        OverlayShot { name: "locked", case: OverlayCase::Karaoke, size: wide, opacity: 0.72, hover: false, locked: true, show_title: false },
+        OverlayShot { name: "karaoke", case: OverlayCase::Karaoke, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "karaoke_hover", case: OverlayCase::Karaoke, size: wide, opacity: 0.72, hover: true, locked: false, show_title: false, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "karaoke_title", case: OverlayCase::Karaoke, size: Vec2::new(640.0, 150.0), opacity: 0.72, hover: false, locked: false, show_title: true, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "karaoke_transparent", case: OverlayCase::Karaoke, size: wide, opacity: 0.0, hover: false, locked: false, show_title: false, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "plain_long_narrow", case: OverlayCase::Plain, size: Vec2::new(380.0, 120.0), opacity: 0.72, hover: false, locked: false, show_title: false, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "narrow_hover", case: OverlayCase::Karaoke, size: Vec2::new(300.0, 110.0), opacity: 0.72, hover: true, locked: false, show_title: false, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "intro", case: OverlayCase::Intro, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "interlude", case: OverlayCase::Interlude, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "no_track", case: OverlayCase::NoTrack, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "no_lyrics", case: OverlayCase::NoLyrics, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "instrumental", case: OverlayCase::Instrumental, size: wide, opacity: 0.72, hover: false, locked: false, show_title: false, art: OverlayArt::Off, slider: false },
+        OverlayShot { name: "locked", case: OverlayCase::Karaoke, size: wide, opacity: 0.72, hover: false, locked: true, show_title: false, art: OverlayArt::Off, slider: false },
+    ];
+    let art = |name, case, size, opacity, hover, art, slider| OverlayShot { name, case, size, opacity, hover, locked: false, show_title: false, art, slider };
+    let art_shots = [
+        art("art_karaoke", OverlayCase::Karaoke, wide, 0.72, false, OverlayArt::Cover, false),
+        art("art_karaoke_hover", OverlayCase::Karaoke, wide, 0.72, true, OverlayArt::Cover, false),
+        art("art_opacity_slider", OverlayCase::Karaoke, wide, 0.35, true, OverlayArt::Cover, true),
+        art("art_transparent", OverlayCase::Karaoke, wide, 0.0, false, OverlayArt::Cover, false),
+        art("art_pale_cover", OverlayCase::Karaoke, wide, 0.72, false, OverlayArt::Pale, false),
+        art("art_placeholder", OverlayCase::Karaoke, wide, 0.72, false, OverlayArt::Placeholder, false),
+        art("art_placeholder_transparent", OverlayCase::Karaoke, wide, 0.0, false, OverlayArt::Placeholder, false),
+        art("art_no_lyrics", OverlayCase::NoLyrics, wide, 0.72, false, OverlayArt::Cover, false),
+        art("art_instrumental", OverlayCase::Instrumental, wide, 0.72, false, OverlayArt::Cover, false),
+        art("art_plain_430", OverlayCase::Plain, Vec2::new(430.0, 120.0), 0.72, false, OverlayArt::Cover, false),
+        art("art_narrow_300_no_art", OverlayCase::Karaoke, Vec2::new(300.0, 110.0), 0.72, true, OverlayArt::Cover, false),
+        art("art_min_size_slider", OverlayCase::Karaoke, super::desktop_lyrics::MIN_SIZE, 0.5, true, OverlayArt::Cover, true),
+        art("art_430_hover", OverlayCase::Karaoke, Vec2::new(430.0, 144.0), 0.72, true, OverlayArt::Cover, false),
+        art("art_tall", OverlayCase::Karaoke, Vec2::new(720.0, 260.0), 0.72, false, OverlayArt::Cover, false),
     ];
     for dark in [true, false] {
-        for shot in &shots {
+        for shot in shots.iter().chain(&art_shots) {
             overlay_shot(dark, shot);
         }
     }

@@ -804,5 +804,5 @@ const ALL_ICONS: &[Icon] = &[
     Icon::ChevronDown, Icon::ChevronUp, Icon::Check, Icon::Trash, Icon::Refresh, Icon::Grip,
     Icon::SidebarToggle, Icon::Save, Icon::Info, Icon::Warning, Icon::Error, Icon::Success,
     Icon::TextSmaller, Icon::TextLarger, Icon::Undo, Icon::ArrowDownToLine, Icon::Speaker, Icon::Edit, Icon::Waveform,
-    Icon::DesktopLyrics, Icon::Lock, Icon::Unlock, Icon::OpenWindow,
+    Icon::DesktopLyrics, Icon::Lock, Icon::Unlock, Icon::OpenWindow, Icon::Opacity,
 ];

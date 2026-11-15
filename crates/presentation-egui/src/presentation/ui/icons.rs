@@ -76,6 +76,8 @@ pub enum Icon {
     Unlock,
     /// Window with an arrow out of it (bring the main window to the front).
     OpenWindow,
+    /// Circle half solid, half see-through (background opacity).
+    Opacity,
 }
 
 impl Icon {
@@ -526,6 +528,14 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             polyline(painter, g.pts(&[(11.0, 4.5), (6.0, 4.5), (4.5, 6.0), (4.5, 18.0), (6.0, 19.5), (18.0, 19.5), (19.5, 18.0), (19.5, 13.0)]), st);
             seg(painter, g.p(11.0, 13.0), g.p(19.5, 4.5), st);
             polyline(painter, g.pts(&[(14.0, 4.5), (19.5, 4.5), (19.5, 10.0)]), st);
+        }
+        Icon::Opacity => {
+            let c = g.p(12.0, 12.0);
+            let r = g.s(8.5);
+            // Left half solid, right half faint: "how much shows through".
+            fill_fan(painter, c, &arc(c, r, 0.5 * PI, 1.5 * PI, 20), color);
+            fill_fan(painter, c, &arc(c, r, -0.5 * PI, 0.5 * PI, 20), theme::with_alpha(color, 0.3));
+            painter.circle_stroke(c, r, st);
         }
     }
 }

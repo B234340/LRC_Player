@@ -345,6 +345,10 @@ impl GuiApp {
             } else if self.playback_state == PlaybackState::Playing {
                 ctx.request_repaint_after(REPAINT_BACKGROUND_PLAYING);
             }
+            // A debounced config save (e.g. the desktop lyrics' opacity slider) still lands.
+            if let Some(due) = self.config_save_due {
+                ctx.request_repaint_after(due.saturating_duration_since(Instant::now()));
+            }
             return;
         }
         if self.pending_seek_ms.is_some() {

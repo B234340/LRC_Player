@@ -22,7 +22,10 @@
 //! The callback must be `Send + Sync + 'static`, so it reads a snapshot ([`Shared`]) that the
 //! main window refreshes on each of its passes: title, the lyrics timeline (`Arc`, with the
 //! user offset and text shift already applied, exactly what the main lyrics view uses),
-//! settings, and the last playback position with the time it was taken. Between main-window
+//! settings, the album art (a clone of the main window's `TextureHandle`, so the texture stays
+//! alive — and drawable by the overlay — until the feed lets go of it, even when the main
+//! window drops it on a track change; all viewports share one painter, see eframe's
+//! `glow_integration.rs`), and the last playback position with the time it was taken. Between main-window
 //! passes the overlay extrapolates the position with the wall clock, so it animates at the
 //! display rate while the main window ticks slowly (or is minimized). Clicks are queued in
 //! [`Shared::actions`] and the main window is woken to apply them.
@@ -33,8 +36,11 @@
 //!
 //! # Lock (click-through) and how to unlock
 //!
-//! Locking sets `ViewportCommand::MousePassthrough` (via the viewport builder): the window
-//! ignores the mouse entirely, so it cannot unlock itself. Unlock from the main window:
+//! Locking makes the window click-through (`ViewportCommand::MousePassthrough`, sent by the
+//! overlay itself). On Windows it is click-through only while the pointer is over it (a
+//! click-through window is layered: slow to draw with OpenGL and without per-pixel alpha), and
+//! then fades to ~30 %; elsewhere it is click-through all the time. A locked window cannot
+//! unlock itself. Unlock from the main window:
 //! - the transport bar's desktop lyrics button: while locked a click unlocks (it shows a lock
 //!   badge); its right-click menu has show / lock / settings;
 //! - Settings → 歌詞 → デスクトップ歌詞 → ロック;
@@ -70,6 +76,7 @@ use crate::presentation::ui::{
     views::desktop_lyrics::{
         desktop_lyrics_view, DesktopLyricsAction, DesktopLyricsContent, DesktopLyricsProps, DesktopLyricsViewState, OverlayLine,
     },
+    widgets::Tex,
     Accent, ThemeMode, Tr, UiAction,
 };
 
@@ -165,7 +172,7 @@ pub(crate) fn ms_to_next_line(timeline: &LyricsTimeline, position_ms: u64) -> Op
 /// Frame interval of the karaoke fill when the UI thread is idle (~30 fps).
 const KARAOKE_FRAME: Duration = Duration::from_micros(33_333);
 /// Slowest karaoke frame interval under load.
-const KARAOKE_FRAME_MAX: Duration = Duration::from_millis(100);
+const KARAOKE_FRAME_MAX: Duration = Duration::from_millis(66);
 
 /// Karaoke frame interval from how late overlay frames arrive (EMA, ms). Every window is drawn
 /// on the one UI thread, and on some Windows systems presenting the transparent overlay waits
@@ -173,7 +180,7 @@ const KARAOKE_FRAME_MAX: Duration = Duration::from_millis(100);
 /// window (input lag). Late frames mean the thread is busy, so the overlay backs off.
 pub(crate) fn karaoke_interval(late_ema_ms: f32) -> Duration {
     let late = if late_ema_ms.is_finite() { late_ema_ms.max(0.0) } else { 0.0 };
-    (KARAOKE_FRAME + Duration::from_secs_f32(late * 3.0 / 1000.0)).min(KARAOKE_FRAME_MAX)
+    (KARAOKE_FRAME + Duration::from_secs_f32(late * 2.0 / 1000.0)).min(KARAOKE_FRAME_MAX)
 }
 
 /// Overlay frame pacing state (see [`karaoke_interval`]).
@@ -183,6 +190,8 @@ struct Pacing {
     /// Delay requested at the end of the previous frame (lateness is measured against it).
     requested: Option<Duration>,
     late_ema_ms: f32,
+    /// `frame_pacer::slept_total()` at the previous frame.
+    slept: Duration,
     stats_since: Option<Instant>,
     stats_frames: u32,
 }
@@ -190,8 +199,15 @@ struct Pacing {
 impl Pacing {
     /// Records the start of a frame; returns the karaoke interval to use.
     fn frame_start(&mut self, now: Instant) -> Duration {
+        self.frame_start_with(now, super::frame_pacer::slept_total())
+    }
+
+    /// `slept`: total time the main window's frame cap slept so far (not "busy").
+    fn frame_start_with(&mut self, now: Instant, slept: Duration) -> Duration {
+        let slept_since = slept.saturating_sub(self.slept);
+        self.slept = slept;
         if let (Some(last), Some(req)) = (self.last_start, self.requested.take()) {
-            let late = now.saturating_duration_since(last).saturating_sub(req).as_secs_f32() * 1000.0;
+            let late = now.saturating_duration_since(last).saturating_sub(req).saturating_sub(slept_since).as_secs_f32() * 1000.0;
             self.late_ema_ms = self.late_ema_ms * 0.8 + late.min(500.0) * 0.2;
         }
         self.last_start = Some(now);
@@ -220,6 +236,11 @@ pub(crate) fn next_repaint(playing: bool, karaoke_line: bool, to_next_line: Opti
         return Some(Duration::ZERO);
     }
     Some(to_next_line.map_or(MAX_IDLE, |ms| Duration::from_millis(ms + 5).min(MAX_IDLE)))
+}
+
+/// Background opacity from the overlay's slider (`None`: not a number).
+pub(crate) fn opacity_from_slider(v: f32) -> Option<f32> {
+    v.is_finite().then(|| v.clamp(0.0, 1.0))
 }
 
 /// Lyrics that only say "instrumental" (LRCLIB, NetEase-style placeholders).
@@ -291,6 +312,8 @@ pub(crate) struct Feed {
     /// Playing / buffering (play-pause icon).
     pub playing: bool,
     pub settings: DesktopLyricsSetting,
+    /// The current track's artwork (shared handle: freed only once the feed drops it too).
+    pub artwork: Option<egui::TextureHandle>,
     pub tr: Tr,
 }
 
@@ -308,6 +331,7 @@ impl Default for Feed {
             sample: PositionSample { position_ms: 0, at: Instant::now(), advancing: false, duration_ms: None },
             playing: false,
             settings: DesktopLyricsSetting::default(),
+            artwork: None,
             tr: Tr::default(),
         }
     }
@@ -325,6 +349,11 @@ pub(crate) struct Shared {
     /// Frames painted since the window was (re)created.
     frames: u32,
     pacing: Pacing,
+    /// Click-through is currently on (see `overlay_ui`: only while locked *and* the pointer
+    /// is over the window, on Windows).
+    passthrough: bool,
+    /// Re-enable DWM transparency on the next frame (the window stopped being layered).
+    restore_transparency: bool,
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
@@ -344,6 +373,7 @@ struct FeedKey {
     advancing: bool,
     paused_at: Option<u64>,
     settings: DesktopLyricsSetting,
+    artwork: Option<egui::TextureId>,
     lang: crate::presentation::ui::Lang,
     theme: (ThemeMode, Accent),
 }
@@ -433,15 +463,22 @@ impl GuiApp {
 
         let settings = self.config.desktop_lyrics.sanitized();
         if !settings.enabled {
+            super::frame_pacer::set_shared(false);
             if self.ui.desktop_lyrics.open.take().is_some() {
                 // Not shown this pass: egui closes the window at the end of the next one.
                 self.ui.desktop_lyrics.key = None;
+                // Let go of the artwork texture (the overlay reads the feed each pass, so it
+                // never holds a bare id of it).
+                lock(&self.ui.desktop_lyrics.shared).feed.artwork = None;
                 ctx.request_repaint();
             }
             return;
         }
 
         self.update_desktop_lyrics_feed(ctx, settings);
+        // The main window yields frames to the animating overlay (see `frame_pacer`).
+        let overlay_paused = lock(&self.ui.desktop_lyrics.shared).passthrough;
+        super::frame_pacer::set_shared(self.is_playing() && !overlay_paused);
 
         let dl = &mut self.ui.desktop_lyrics;
         if dl.open.is_none() {
@@ -449,6 +486,8 @@ impl GuiApp {
             dl.open = Some(initial_geometry(dl.window, area, main));
             let mut sh = lock(&dl.shared);
             sh.frames = 0;
+            sh.passthrough = false;
+            sh.restore_transparency = false;
             sh.view = DesktopLyricsViewState::default();
             sh.shown_pos = None;
         }
@@ -464,7 +503,6 @@ impl GuiApp {
             .with_has_shadow(false)
             .with_inner_size(size)
             .with_min_inner_size(MIN_SIZE)
-            .with_mouse_passthrough(settings.locked)
             // Shown after its first frames on Windows (see the module docs).
             .with_visible(!cfg!(windows));
         if let Some(p) = pos {
@@ -498,6 +536,7 @@ impl GuiApp {
             advancing: sample.advancing,
             paused_at: (!sample.advancing).then_some(sample.position_ms),
             settings,
+            artwork: self.play_artwork_handle.as_ref().map(|h| h.id()),
             lang: self.tr().lang,
             theme: (self.ui.theme, self.ui.accent),
         };
@@ -526,6 +565,9 @@ impl GuiApp {
         feed.karaoke = karaoke;
         feed.playing = key.playing;
         feed.settings = settings;
+        if feed.artwork.as_ref().map(|h| h.id()) != key.artwork {
+            feed.artwork.clone_from(&self.play_artwork_handle);
+        }
         feed.tr = tr;
         if jump || rebuild {
             sh.shown_pos = None;
@@ -555,6 +597,15 @@ impl GuiApp {
             DesktopLyricsAction::Close => {
                 s.enabled = false;
                 self.save_config();
+            }
+            DesktopLyricsAction::SetOpacity(v) => {
+                if let Some(v) = opacity_from_slider(v) {
+                    s.opacity = v;
+                    // Sent on every drag step: written once the slider rests.
+                    self.save_config_soon();
+                    // The Settings slider shows the new value.
+                    ctx.request_repaint();
+                }
             }
             DesktopLyricsAction::OpenMain => {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(true));
@@ -613,6 +664,7 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
     let native = class != ViewportClass::EmbeddedWindow;
     let mut sh = lock(shared);
     let mut wake_main = false;
+    let mut paused = false;
 
     if native && ctx.input(|i| i.viewport().close_requested()) {
         // Alt+F4 on the overlay: hide it (the setting is turned off by the main window).
@@ -680,6 +732,8 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
         playing: feed.playing,
         has_track: feed.has_track,
         force_controls: false,
+        artwork: feed.artwork.as_ref().map(Tex::from),
+        show_artwork: settings.show_artwork,
         tr: feed.tr,
     };
     let mut view = std::mem::take(&mut sh.view);
@@ -710,13 +764,42 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
             }
         }
         sh.frames = sh.frames.saturating_add(1);
-        if cfg!(windows) && sh.frames == 2 {
+        if std::mem::take(&mut sh.restore_transparency) {
+            // The layered style was removed after the previous pass: re-enable DWM
+            // transparency now (calling it while still layered has no effect).
+            win::restore_transparency(WINDOW_TITLE);
+        }
+        // Windows: per-pixel transparency only takes effect once the window has been layered
+        // and un-layered (observed on real hardware). Do that while it is still hidden:
+        // click-through on in frame 1, off in frame 2, transparency restored and shown in 3.
+        let priming = cfg!(windows) && sh.frames <= 2;
+        if cfg!(windows) && sh.frames == 3 {
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         }
-        if sh.frames < 3 {
+        if sh.frames < 4 {
             ctx.request_repaint();
         }
-        win::keep_layered_visible(WINDOW_TITLE, settings.locked);
+        // Lock = click-through. On Windows a click-through window is layered, which costs a
+        // lot to draw with OpenGL and drops the per-pixel transparency; so it is click-through
+        // only while the pointer is over it, and meanwhile the lyrics are not redrawn (the
+        // last frame stays, faded so what is under it shows). A watcher thread notices the
+        // pointer leaving. Elsewhere the pointer position is unknown while passing through:
+        // click-through all the time, drawing as usual.
+        let inside = win::cursor_inside(WINDOW_TITLE);
+        let want = if priming { sh.frames == 1 } else { settings.locked && inside.unwrap_or(true) };
+        if want != sh.passthrough {
+            sh.passthrough = want;
+            ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(want));
+            if !want {
+                sh.restore_transparency = true;
+                ctx.request_repaint();
+            }
+        }
+        win::keep_layered_visible(WINDOW_TITLE, sh.passthrough);
+        paused = !priming && sh.passthrough && inside.is_some();
+        if paused {
+            win::watch_pointer_leave(&ctx, WINDOW_TITLE);
+        }
         if sh.frames <= 3 {
             // Fixed pixel size across monitors with different DPI, like the main window
             // (a re-created window gets a new handle; installing is idempotent per window).
@@ -727,7 +810,10 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
     if wake_main {
         ctx.request_repaint_of(ViewportId::ROOT);
     }
-    let next = next_repaint(feed.playing && feed.sample.advancing, karaoke_line, to_next)
+    // Paused while a locked window passes clicks through (no frames until the pointer leaves).
+    let next = (!paused)
+        .then(|| next_repaint(feed.playing && feed.sample.advancing, karaoke_line, to_next))
+        .flatten()
         .map(|d| if d.is_zero() { karaoke_frame } else { d });
     lock(shared).pacing.requested = next;
     if let Some(d) = next {
@@ -752,6 +838,8 @@ mod win {
 
     /// `SetLayeredWindowAttributes` was called since the window became layered.
     static LAYERED_FIXED: AtomicBool = AtomicBool::new(false);
+    /// Whole-window alpha while the pointer is over a locked overlay (~30 %).
+    const PASSTHROUGH_ALPHA: u8 = 77;
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -771,9 +859,70 @@ mod win {
         (pid == std::process::id()).then_some(hwnd)
     }
 
+    /// Whether the mouse pointer is over the overlay (`None`: window not found).
+    pub(super) fn cursor_inside(title: &str) -> Option<bool> {
+        use winapi::shared::windef::POINT;
+        use winapi::um::winuser::{GetCursorPos, GetWindowRect, PtInRect};
+        let hwnd = overlay_hwnd(title)?;
+        let mut pt = POINT { x: 0, y: 0 };
+        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        // SAFETY: valid out pointers; `hwnd` is our live window.
+        unsafe {
+            if GetCursorPos(&mut pt) == 0 || GetWindowRect(hwnd, &mut r) == 0 {
+                return None;
+            }
+            Some(PtInRect(&r, pt) != 0)
+        }
+    }
+
+    /// Watching for the pointer to leave the (paused, click-through) overlay.
+    static WATCHING: AtomicBool = AtomicBool::new(false);
+    static WATCHER: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
+
+    /// Starts watching: a background thread checks the pointer every 100 ms (sleeping
+    /// otherwise) and wakes the overlay once it has left, so the overlay itself needs no frames
+    /// while it is paused.
+    pub(super) fn watch_pointer_leave(ctx: &eframe::egui::Context, title: &'static str) {
+        WATCHING.store(true, Ordering::SeqCst);
+        let thread = WATCHER.get_or_init(|| {
+            let ctx = ctx.clone();
+            std::thread::Builder::new()
+                .name("desktop-lyrics-pointer".into())
+                .spawn(move || loop {
+                    if !WATCHING.load(Ordering::SeqCst) {
+                        std::thread::park();
+                        continue;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if cursor_inside(title) != Some(true) && WATCHING.swap(false, Ordering::SeqCst) {
+                        ctx.request_repaint_of(super::viewport_id());
+                    }
+                })
+                .map(|h| h.thread().clone())
+                .unwrap_or_else(|_| std::thread::current())
+        });
+        thread.unpark();
+    }
+
+    /// Re-enables DWM per-pixel transparency (blur-behind with an empty region, as winit does
+    /// at creation) after the window stopped being layered.
+    pub(super) fn restore_transparency(title: &str) {
+        use winapi::um::dwmapi::{DwmEnableBlurBehindWindow, DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND};
+        use winapi::um::wingdi::{CreateRectRgn, DeleteObject};
+        let Some(hwnd) = overlay_hwnd(title) else { return };
+        // SAFETY: GDI region created and deleted here; our live window.
+        unsafe {
+            let region = CreateRectRgn(0, 0, -1, -1);
+            let bb = DWM_BLURBEHIND { dwFlags: DWM_BB_ENABLE | DWM_BB_BLURREGION, fEnable: 1, hRgnBlur: region, fTransitionOnMaximized: 0 };
+            DwmEnableBlurBehindWindow(hwnd, &bb);
+            DeleteObject(region as _);
+        }
+    }
+
     /// winit makes a click-through window `WS_EX_LAYERED`; such a window is not drawn until
     /// `SetLayeredWindowAttributes` has been called. Called every overlay frame (cheap once
-    /// done): opaque layer alpha, so the per-pixel alpha of the GL surface still applies.
+    /// done). A layered window has one alpha for the whole window: faded, so what is under
+    /// the pointer shows while it passes clicks through.
     pub(super) fn keep_layered_visible(title: &str, locked: bool) {
         if !locked {
             LAYERED_FIXED.store(false, Ordering::Relaxed);
@@ -786,7 +935,7 @@ mod win {
         // SAFETY: style query / layered attributes on our own live window.
         let ex = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
         if ex & WS_EX_LAYERED != 0 {
-            unsafe { SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA) };
+            unsafe { SetLayeredWindowAttributes(hwnd, 0, PASSTHROUGH_ALPHA, LWA_ALPHA) };
             LAYERED_FIXED.store(true, Ordering::Relaxed);
         }
     }
@@ -835,6 +984,15 @@ mod win {
     pub(super) fn keep_layered_visible(_title: &str, _locked: bool) {}
 
     pub(super) fn keep_fixed_pixel_size(_title: &str) {}
+
+    /// Unknown here: a locked overlay passes clicks through all the time.
+    pub(super) fn cursor_inside(_title: &str) -> Option<bool> {
+        None
+    }
+
+    pub(super) fn restore_transparency(_title: &str) {}
+
+    pub(super) fn watch_pointer_leave(_ctx: &eframe::egui::Context, _title: &'static str) {}
 
     /// Monitor positions are not available here; the saved position is only sanity-checked.
     pub(super) fn work_area(_near: Rect, _ppp: f32) -> Option<Rect> {
@@ -897,9 +1055,16 @@ mod tests {
     #[test]
     fn karaoke_frames_back_off_under_load() {
         assert_eq!(karaoke_interval(0.0), KARAOKE_FRAME);
-        assert!(karaoke_interval(10.0) > Duration::from_millis(60));
+        assert!(karaoke_interval(10.0) > Duration::from_millis(50));
         assert_eq!(karaoke_interval(1000.0), KARAOKE_FRAME_MAX);
         assert_eq!(karaoke_interval(f32::NAN), KARAOKE_FRAME);
+        // Time slept by the main window's frame cap is not lateness.
+        let mut p = Pacing::default();
+        let t0 = Instant::now();
+        p.frame_start_with(t0, Duration::ZERO);
+        p.requested = Some(KARAOKE_FRAME);
+        p.frame_start_with(t0 + KARAOKE_FRAME + Duration::from_millis(30), Duration::from_millis(30));
+        assert_eq!(p.late_ema_ms, 0.0);
         // Frames arriving on time keep 30 fps; consistently late ones slow down.
         let mut p = Pacing::default();
         let t0 = Instant::now();
@@ -915,7 +1080,7 @@ mod tests {
             p.requested = Some(d);
             t += d + Duration::from_millis(20);
         }
-        assert!(karaoke_interval(p.late_ema_ms) >= Duration::from_millis(80), "late frames back off");
+        assert!(karaoke_interval(p.late_ema_ms) >= Duration::from_millis(60), "late frames back off");
     }
 
     #[test]
@@ -994,7 +1159,7 @@ mod tests {
             let vp = out.viewport_output.get(&viewport_id()).expect("shown while the main window is minimized");
             assert!(vp.class == ViewportClass::Deferred, "deferred viewport");
             assert_eq!(vp.parent, ViewportId::ROOT);
-            assert_eq!(vp.builder.mouse_passthrough, Some(true), "locked = click-through");
+            assert_eq!(vp.builder.mouse_passthrough, None, "click-through is managed by the overlay itself");
             assert_eq!(vp.builder.window_level, Some(egui::WindowLevel::AlwaysOnTop));
             assert_eq!((vp.builder.decorations, vp.builder.transparent, vp.builder.taskbar), (Some(false), Some(true), Some(false)));
         }
@@ -1002,7 +1167,7 @@ mod tests {
 
         app.set_desktop_lyrics_locked(&ctx, false);
         let out = pass(&ctx, &mut app, false);
-        assert_eq!(out.viewport_output[&viewport_id()].builder.mouse_passthrough, Some(false));
+        assert_eq!(out.viewport_output[&viewport_id()].builder.mouse_passthrough, None);
 
         app.config.desktop_lyrics.enabled = false;
         pass(&ctx, &mut app, false);
@@ -1053,6 +1218,72 @@ mod tests {
         lock(&app.ui.desktop_lyrics.shared).geometry = Some(Rect::from_min_size(pos2(40.4, 900.0), vec2(500.0, 120.0)));
         let w = app.build_state_dto().desktop_lyrics_window.unwrap();
         assert_eq!((w.x, w.y, w.width, w.height), (Some(40.0), Some(900.0), 500.0, 120.0));
+    }
+
+    #[test]
+    fn opacity_from_the_overlay_updates_the_config_live_and_saves_debounced() {
+        assert_eq!(opacity_from_slider(0.35), Some(0.35));
+        assert_eq!(opacity_from_slider(1.7), Some(1.0));
+        assert_eq!(opacity_from_slider(-0.2), Some(0.0));
+        assert_eq!(opacity_from_slider(f32::NAN), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut app = super::super::tests::test_app(&ctx, dir.path(), false);
+        app.config.desktop_lyrics.enabled = true;
+        pass(&ctx, &mut app, false);
+        app.config_save_due = None;
+        // A drag sends several values; the last one wins, nothing is written yet.
+        lock(&app.ui.desktop_lyrics.shared).actions.extend([0.5, 0.4, 0.25].map(DesktopLyricsAction::SetOpacity));
+        pass(&ctx, &mut app, false);
+        assert_eq!(app.config.desktop_lyrics.opacity, 0.25);
+        assert!(app.config_save_due.is_some(), "saved debounced, not on every drag step");
+        assert_eq!(lock(&app.ui.desktop_lyrics.shared).feed.settings.opacity, 0.25, "the overlay gets it on the same pass");
+        lock(&app.ui.desktop_lyrics.shared).actions.push(DesktopLyricsAction::SetOpacity(f32::NAN));
+        pass(&ctx, &mut app, false);
+        assert_eq!(app.config.desktop_lyrics.opacity, 0.25, "garbage ignored");
+    }
+
+    #[test]
+    fn artwork_texture_lives_while_the_overlay_can_draw_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut app = super::super::tests::test_app(&ctx, dir.path(), false);
+        app.config.desktop_lyrics.enabled = true;
+        app.play_path = "/music/a.flac".into();
+        // Only the overlay sync (`logic` would replace the stand-in art with the loader's).
+        let sync = |app: &mut GuiApp| {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.sync_desktop_lyrics(ui.ctx()));
+        };
+        sync(&mut app);
+        let alive = |id: egui::TextureId| ctx.tex_manager().read().meta(id).is_some();
+        let tex = ctx.load_texture("cover", egui::ColorImage::filled([4, 4], egui::Color32::RED), egui::TextureOptions::LINEAR);
+        let id = tex.id();
+        // Stand-in for `ensure_play_artwork`.
+        app.play_artwork_handle = Some(tex);
+        let key_before = app.ui.desktop_lyrics.key.clone();
+        sync(&mut app);
+        assert_eq!(lock(&app.ui.desktop_lyrics.shared).feed.artwork.as_ref().map(|t| t.id()), Some(id));
+        assert!(app.ui.desktop_lyrics.key != key_before, "new art repaints the overlay");
+        // Track change: the main window drops its handle; the overlay's copy keeps the
+        // texture until the feed is refreshed.
+        app.play_artwork_handle = None;
+        assert!(alive(id), "still in the feed");
+        sync(&mut app);
+        assert!(lock(&app.ui.desktop_lyrics.shared).feed.artwork.is_none());
+        assert!(!alive(id), "freed once nobody can draw it");
+
+        // Closing the overlay lets go of the art as well.
+        let tex = ctx.load_texture("cover2", egui::ColorImage::filled([4, 4], egui::Color32::BLUE), egui::TextureOptions::LINEAR);
+        let id = tex.id();
+        app.play_artwork_handle = Some(tex);
+        sync(&mut app);
+        app.play_artwork_handle = None;
+        app.config.desktop_lyrics.enabled = false;
+        sync(&mut app);
+        assert!(!alive(id));
     }
 
     #[test]

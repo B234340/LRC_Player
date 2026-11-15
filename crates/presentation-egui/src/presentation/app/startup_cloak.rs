@@ -24,7 +24,11 @@ pub(crate) fn ready(frames: u64, stable_frames: u64, elapsed: Duration) -> bool 
 }
 
 #[cfg(windows)]
-pub(crate) use imp::{cloak, expect_maximized, reveal_when_ready};
+pub(crate) use imp::{cloak, expect_maximized, keep_opaque, reveal_when_ready};
+
+/// No-op off Windows.
+#[cfg(not(windows))]
+pub(crate) fn keep_opaque(_cc: &eframe::CreationContext<'_>) {}
 
 /// No-op off Windows (other platforms do not show an empty white window).
 #[cfg(not(windows))]
@@ -71,6 +75,22 @@ mod imp {
             )
         };
         hr >= 0
+    }
+
+    /// The main window is created transparent only to get an OpenGL config with alpha (for
+    /// the desktop-lyrics window). Turn DWM transparency (blur-behind, set by winit) off for
+    /// it again: DWM then composes it opaque, as before, whatever alpha the frame has.
+    pub(crate) fn keep_opaque(cc: &eframe::CreationContext<'_>) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use winapi::um::dwmapi::{DwmEnableBlurBehindWindow, DWM_BB_ENABLE, DWM_BLURBEHIND};
+        let Ok(handle) = cc.window_handle() else { return };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+        let bb = DWM_BLURBEHIND { dwFlags: DWM_BB_ENABLE, fEnable: FALSE, hRgnBlur: std::ptr::null_mut(), fTransitionOnMaximized: FALSE };
+        // SAFETY: our live top-level window; `bb` is a valid DWM_BLURBEHIND.
+        let hr = unsafe { DwmEnableBlurBehindWindow(h.hwnd.get() as HWND, &bb) };
+        if hr < 0 {
+            tracing::warn!("could not make the main window opaque: {hr:#x}");
+        }
     }
 
     pub(crate) fn cloak(cc: &eframe::CreationContext<'_>) {
