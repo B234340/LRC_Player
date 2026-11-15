@@ -36,8 +36,11 @@
 //!
 //! # Lock (click-through) and how to unlock
 //!
-//! Locking sets `ViewportCommand::MousePassthrough` (via the viewport builder): the window
-//! ignores the mouse entirely, so it cannot unlock itself. Unlock from the main window:
+//! Locking makes the window click-through (`ViewportCommand::MousePassthrough`, sent by the
+//! overlay itself). On Windows it is click-through only while the pointer is over it (a
+//! click-through window is layered: slow to draw with OpenGL and without per-pixel alpha), and
+//! then fades to ~30 %; elsewhere it is click-through all the time. A locked window cannot
+//! unlock itself. Unlock from the main window:
 //! - the transport bar's desktop lyrics button: while locked a click unlocks (it shows a lock
 //!   badge); its right-click menu has show / lock / settings;
 //! - Settings → 歌詞 → デスクトップ歌詞 → ロック;
@@ -165,6 +168,9 @@ pub(crate) fn ms_to_next_line(timeline: &LyricsTimeline, position_ms: u64) -> Op
     let t = timeline.lyric_time_ms(position_ms);
     timeline.lines().iter().find(|l| l.start_ms as i64 > t).map(|l| (l.start_ms as i64 - t) as u64)
 }
+
+/// How often a click-through overlay checks whether the pointer left it.
+const POINTER_POLL: Duration = Duration::from_millis(100);
 
 /// Frame interval of the karaoke fill when the UI thread is idle (~30 fps).
 const KARAOKE_FRAME: Duration = Duration::from_micros(33_333);
@@ -346,6 +352,9 @@ pub(crate) struct Shared {
     /// Frames painted since the window was (re)created.
     frames: u32,
     pacing: Pacing,
+    /// Click-through is currently on (see `overlay_ui`: only while locked *and* the pointer
+    /// is over the window, on Windows).
+    passthrough: bool,
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
@@ -477,6 +486,7 @@ impl GuiApp {
             dl.open = Some(initial_geometry(dl.window, area, main));
             let mut sh = lock(&dl.shared);
             sh.frames = 0;
+            sh.passthrough = false;
             sh.view = DesktopLyricsViewState::default();
             sh.shown_pos = None;
         }
@@ -492,7 +502,6 @@ impl GuiApp {
             .with_has_shadow(false)
             .with_inner_size(size)
             .with_min_inner_size(MIN_SIZE)
-            .with_mouse_passthrough(settings.locked)
             // Shown after its first frames on Windows (see the module docs).
             .with_visible(!cfg!(windows));
         if let Some(p) = pos {
@@ -759,7 +768,24 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
         if sh.frames < 3 {
             ctx.request_repaint();
         }
-        win::keep_layered_visible(WINDOW_TITLE, settings.locked);
+        // Lock = click-through. On Windows a click-through window is layered, which costs a
+        // lot to draw with OpenGL and drops the per-pixel transparency; so it is click-through
+        // only while the pointer is over it (then the lyrics fade so what is under them shows).
+        // Elsewhere the pointer position is unknown while passing through: always on.
+        let inside = win::cursor_inside(WINDOW_TITLE);
+        let want = settings.locked && inside.unwrap_or(true);
+        if want != sh.passthrough {
+            sh.passthrough = want;
+            ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(want));
+            if !want {
+                win::restore_transparency(WINDOW_TITLE);
+            }
+        }
+        win::keep_layered_visible(WINDOW_TITLE, sh.passthrough);
+        if sh.passthrough && inside.is_some() {
+            // No mouse events reach a click-through window: poll for the pointer leaving.
+            ctx.request_repaint_after(POINTER_POLL);
+        }
         if sh.frames <= 3 {
             // Fixed pixel size across monitors with different DPI, like the main window
             // (a re-created window gets a new handle; installing is idempotent per window).
@@ -795,6 +821,8 @@ mod win {
 
     /// `SetLayeredWindowAttributes` was called since the window became layered.
     static LAYERED_FIXED: AtomicBool = AtomicBool::new(false);
+    /// Whole-window alpha while the pointer is over a locked overlay (~30 %).
+    const PASSTHROUGH_ALPHA: u8 = 77;
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -814,9 +842,41 @@ mod win {
         (pid == std::process::id()).then_some(hwnd)
     }
 
+    /// Whether the mouse pointer is over the overlay (`None`: window not found).
+    pub(super) fn cursor_inside(title: &str) -> Option<bool> {
+        use winapi::shared::windef::POINT;
+        use winapi::um::winuser::{GetCursorPos, GetWindowRect, PtInRect};
+        let hwnd = overlay_hwnd(title)?;
+        let mut pt = POINT { x: 0, y: 0 };
+        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        // SAFETY: valid out pointers; `hwnd` is our live window.
+        unsafe {
+            if GetCursorPos(&mut pt) == 0 || GetWindowRect(hwnd, &mut r) == 0 {
+                return None;
+            }
+            Some(PtInRect(&r, pt) != 0)
+        }
+    }
+
+    /// Re-enables DWM per-pixel transparency (blur-behind with an empty region, as winit does
+    /// at creation) after the window stopped being layered.
+    pub(super) fn restore_transparency(title: &str) {
+        use winapi::um::dwmapi::{DwmEnableBlurBehindWindow, DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND};
+        use winapi::um::wingdi::{CreateRectRgn, DeleteObject};
+        let Some(hwnd) = overlay_hwnd(title) else { return };
+        // SAFETY: GDI region created and deleted here; our live window.
+        unsafe {
+            let region = CreateRectRgn(0, 0, -1, -1);
+            let bb = DWM_BLURBEHIND { dwFlags: DWM_BB_ENABLE | DWM_BB_BLURREGION, fEnable: 1, hRgnBlur: region, fTransitionOnMaximized: 0 };
+            DwmEnableBlurBehindWindow(hwnd, &bb);
+            DeleteObject(region as _);
+        }
+    }
+
     /// winit makes a click-through window `WS_EX_LAYERED`; such a window is not drawn until
     /// `SetLayeredWindowAttributes` has been called. Called every overlay frame (cheap once
-    /// done): opaque layer alpha, so the per-pixel alpha of the GL surface still applies.
+    /// done). A layered window has one alpha for the whole window: faded, so what is under
+    /// the pointer shows while it passes clicks through.
     pub(super) fn keep_layered_visible(title: &str, locked: bool) {
         if !locked {
             LAYERED_FIXED.store(false, Ordering::Relaxed);
@@ -829,7 +889,7 @@ mod win {
         // SAFETY: style query / layered attributes on our own live window.
         let ex = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
         if ex & WS_EX_LAYERED != 0 {
-            unsafe { SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA) };
+            unsafe { SetLayeredWindowAttributes(hwnd, 0, PASSTHROUGH_ALPHA, LWA_ALPHA) };
             LAYERED_FIXED.store(true, Ordering::Relaxed);
         }
     }
@@ -878,6 +938,13 @@ mod win {
     pub(super) fn keep_layered_visible(_title: &str, _locked: bool) {}
 
     pub(super) fn keep_fixed_pixel_size(_title: &str) {}
+
+    /// Unknown here: a locked overlay passes clicks through all the time.
+    pub(super) fn cursor_inside(_title: &str) -> Option<bool> {
+        None
+    }
+
+    pub(super) fn restore_transparency(_title: &str) {}
 
     /// Monitor positions are not available here; the saved position is only sanity-checked.
     pub(super) fn work_area(_near: Rect, _ppp: f32) -> Option<Rect> {
@@ -1044,7 +1111,7 @@ mod tests {
             let vp = out.viewport_output.get(&viewport_id()).expect("shown while the main window is minimized");
             assert!(vp.class == ViewportClass::Deferred, "deferred viewport");
             assert_eq!(vp.parent, ViewportId::ROOT);
-            assert_eq!(vp.builder.mouse_passthrough, Some(true), "locked = click-through");
+            assert_eq!(vp.builder.mouse_passthrough, None, "click-through is managed by the overlay itself");
             assert_eq!(vp.builder.window_level, Some(egui::WindowLevel::AlwaysOnTop));
             assert_eq!((vp.builder.decorations, vp.builder.transparent, vp.builder.taskbar), (Some(false), Some(true), Some(false)));
         }
@@ -1052,7 +1119,7 @@ mod tests {
 
         app.set_desktop_lyrics_locked(&ctx, false);
         let out = pass(&ctx, &mut app, false);
-        assert_eq!(out.viewport_output[&viewport_id()].builder.mouse_passthrough, Some(false));
+        assert_eq!(out.viewport_output[&viewport_id()].builder.mouse_passthrough, None);
 
         app.config.desktop_lyrics.enabled = false;
         pass(&ctx, &mut app, false);
