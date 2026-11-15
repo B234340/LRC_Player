@@ -157,6 +157,7 @@ pub fn initial_window() -> Option<WindowStateDto> {
 impl GuiApp {
     /// The real application (persistent state, audio engine, system fonts).
     pub fn new(cc: &CreationContext<'_>) -> Self {
+        super::startup_cloak::keep_opaque(cc);
         super::startup_cloak::cloak(cc);
         // The binary turns vsync off on Windows (see `frame_pacer`); pace the main window.
         if cfg!(windows) {

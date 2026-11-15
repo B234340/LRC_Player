@@ -163,7 +163,12 @@ fn main() -> Result<()> {
         .with_app_id("lrc_player")
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([min_w, min_h])
-        .with_drag_and_drop(true);
+        .with_drag_and_drop(true)
+        // Picks an OpenGL config with alpha, which the desktop-lyrics window needs to be
+        // see-through (eframe chooses one config for all windows from the main window's
+        // flag). The main window paints its whole area opaque; on Windows the app also turns
+        // DWM transparency off for it (`startup_cloak::keep_opaque`).
+        .with_transparent(true);
     if let Some(window) = lrc_player::presentation::app::initial_window() {
         viewport = viewport
             .with_inner_size([window.width.max(min_w), window.height.max(min_h)])

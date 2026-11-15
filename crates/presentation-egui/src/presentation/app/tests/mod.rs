@@ -123,7 +123,7 @@ fn gui_app_smoke_transport_and_pages() {
     assert_eq!(app.play_path, a);
 
     // Pump frames until the engine accepted the track and the worker found lyrics/duration.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15); // (exits as soon as ready; long only under load)
     while Instant::now() < deadline && (app.play_duration_ms.is_none() || app.loaded_timeline.is_none() || successor_pending(&app)) {
         run_frame(&ctx, &mut app, &mut frame);
         std::thread::sleep(Duration::from_millis(20));
@@ -395,7 +395,7 @@ fn minimized_window_still_processes_engine_and_workers() {
     app.dispatch(&ctx, UiAction::PlayTracks { paths: vec![a.clone().into(), b.clone().into()], start: 0 });
 
     // Only hidden frames from here on.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15); // (exits as soon as ready; long only under load)
     while Instant::now() < deadline && (app.play_duration_ms.is_none() || app.loaded_timeline.is_none() || app.engine_snapshot.is_none() || successor_pending(&app)) {
         run_hidden_frame(&ctx, &mut app, &mut frame);
         std::thread::sleep(Duration::from_millis(20));

@@ -153,10 +153,8 @@ const ART_GAP: f32 = 14.0;
 const ART_MIN: f32 = 40.0;
 const ART_MAX: f32 = 160.0;
 const ART_CORNER: f32 = 6.0;
-/// Narrowest text column next to the art (the art is dropped below this): a 12-character
-/// Japanese line at 32 pt still fits one row after shrinking ([`MIN_FIT`]). Larger text needs
-/// more: about eight characters of the current line.
-const ART_MIN_TEXT_W: f32 = 260.0;
+/// Smallest art square drawn (a window lower than this plus margins shows none).
+const ART_MIN_SIDE: f32 = 16.0;
 /// The opacity slider closes this long after the pointer left the window.
 const OPACITY_GRACE_S: f64 = 1.5;
 /// Below this window width the hover bar drops A−/A+.
@@ -167,18 +165,12 @@ const BAR_PAD: f32 = 6.5;
 const BAR_SPACING: f32 = 2.0;
 const BAR_SEP: f32 = 9.0;
 
-/// Where the album art goes in a window `full` showing the current line at `font_size`:
-/// a square left of the text, as tall as the window minus margins (at most [`ART_MAX`]),
-/// vertically centered. `None` when the window is too low for it or the text column next to
-/// it would be narrower than [`ART_MIN_TEXT_W`] (or ~8 characters of large text).
-pub fn artwork_rect(full: Rect, font_size: f32) -> Option<Rect> {
+/// Where the album art goes in a window `full`: a square left of the text, as tall as the
+/// window minus margins (at most [`ART_MAX`]), vertically centered. Shown whenever the setting
+/// is on (whatever the width); `None` only when the window is too low to draw one.
+pub fn artwork_rect(full: Rect) -> Option<Rect> {
     let side = (full.height() - 2.0 * ART_PAD).min(ART_MAX);
-    if !side.is_finite() || side < ART_MIN {
-        return None;
-    }
-    let text_w = full.width() - ART_PAD - side - ART_GAP - PAD_X;
-    let min_text = ART_MIN_TEXT_W.max(font_size.clamp(10.0, 120.0) * 8.0);
-    (text_w >= min_text).then(|| Rect::from_min_size(pos2(full.left() + ART_PAD, full.center().y - side / 2.0), Vec2::splat(side)))
+    (side.is_finite() && side >= ART_MIN_SIDE).then(|| Rect::from_min_size(pos2(full.left() + ART_PAD, full.center().y - side / 2.0), Vec2::splat(side)))
 }
 
 /// The art while the hover bar is up: when the bar reaches over it, it shrinks into the space
@@ -359,7 +351,7 @@ pub fn desktop_lyrics_view(ui: &mut Ui, props: &DesktopLyricsProps<'_>, state: &
     // ---- album art ----
     let size = props.font_size.clamp(10.0, 120.0);
     let art = (props.show_artwork && props.has_track && props.content != DesktopLyricsContent::NoTrack)
-        .then(|| artwork_rect(full, size))
+        .then(|| artwork_rect(full))
         .flatten();
     // ---- text ----
     let inner = text_rect(full, art);
@@ -368,7 +360,8 @@ pub fn desktop_lyrics_view(ui: &mut Ui, props: &DesktopLyricsProps<'_>, state: &
         let (bar, _) = controls_row(full, inner);
         let (shown, a) = match artwork_under_bar(r, bar, full) {
             Some(h) => (lerp_rect(r, h, t), 1.0),
-            None => (r, 1.0 - t),
+            // No room below the bar (tiny window): the art stays; the bar draws over it.
+            None => (r, 1.0),
         };
         if a > 0.01 {
             paint_art(ui, shown, props.artwork, &col, pal.dark, a);
@@ -709,7 +702,7 @@ mod tests {
 
     /// The hover bar of the test window (art on, 32 pt).
     fn bar() -> Rect {
-        controls_row(W, text_rect(W, artwork_rect(W, 32.0))).0
+        controls_row(W, text_rect(W, artwork_rect(W))).0
     }
 
     fn run(ctx: &Context, events: Vec<Event>, p: &DesktopLyricsProps<'_>, st: &mut DesktopLyricsViewState) -> Vec<DesktopLyricsAction> {
@@ -741,43 +734,38 @@ mod tests {
     }
 
     #[test]
-    fn art_goes_left_of_the_text_unless_the_window_is_narrow() {
-        let r = artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 144.0)), 32.0).expect("default size shows the art");
+    fn art_goes_left_of_the_text_at_any_width() {
+        let r = artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 144.0))).expect("default size shows the art");
         assert_eq!(r, Rect::from_min_size(pos2(ART_PAD, ART_PAD), Vec2::splat(124.0)), "square, window height minus margins");
         let text = text_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 144.0)), Some(r));
         assert_eq!((text.left(), text.right()), (r.right() + ART_GAP, 640.0 - PAD_X));
-        // Too narrow for a reasonable text column: no art (minimum window size included).
-        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(260.0, 72.0)), 32.0), None);
-        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 110.0)), 32.0), None);
-        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(390.0, 144.0)), 32.0), None);
-        assert!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 120.0)), 32.0).is_some());
-        // Large text needs a wider column.
-        assert!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 144.0)), 48.0).is_some());
-        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 144.0)), 72.0), None);
-        assert!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(760.0, 144.0)), 72.0).is_some());
+        // Shown whatever the width (the setting decides), including the minimum window size.
+        for size in [vec2(260.0, 72.0), vec2(300.0, 110.0), vec2(390.0, 144.0)] {
+            assert!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), size)).is_some(), "{size:?}");
+        }
         // A tall window caps the art and centers it vertically.
         let tall = Rect::from_min_size(pos2(100.0, 50.0), vec2(800.0, 400.0));
-        let r = artwork_rect(tall, 32.0).unwrap();
+        let r = artwork_rect(tall).unwrap();
         assert_eq!((r.width(), r.center().y, r.left()), (ART_MAX, tall.center().y, 100.0 + ART_PAD));
-        // Too low for a cover.
-        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 50.0)), 32.0), None);
+        // Only a window too low to draw one shows none.
+        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 30.0))), None);
     }
 
     #[test]
     fn hover_bar_fits_the_minimum_window_and_sits_over_the_text() {
         let min = Rect::from_min_size(pos2(0.0, 0.0), crate::presentation::app::desktop_lyrics::MIN_SIZE);
-        let (row, compact) = controls_row(min, text_rect(min, artwork_rect(min, 32.0)));
+        let (row, compact) = controls_row(min, text_rect(min, artwork_rect(min)));
         assert!(compact);
         assert_eq!(row.width(), 7.0 * SIDE + 6.0 * BAR_SPACING + BAR_SEP, "opacity button included");
         assert!(min.shrink(4.0).contains_rect(row.expand2(vec2(8.0, 0.0))), "{row:?} in {min:?}");
         // With the art, the bar is centered over the text column.
-        let text = text_rect(W, artwork_rect(W, 32.0));
+        let text = text_rect(W, artwork_rect(W));
         assert_eq!(bar().center().x, text.center().x);
-        assert_eq!(artwork_under_bar(artwork_rect(W, 32.0).unwrap(), bar(), W), artwork_rect(W, 32.0), "no overlap: stays");
+        assert_eq!(artwork_under_bar(artwork_rect(W).unwrap(), bar(), W), artwork_rect(W), "no overlap: stays");
         // A column narrower than the bar: the bar stays inside the window and reaches over the
         // art, which shrinks below it.
         let narrow = Rect::from_min_size(pos2(0.0, 0.0), vec2(430.0, 144.0));
-        let art = artwork_rect(narrow, 32.0).expect("art at 430");
+        let art = artwork_rect(narrow).expect("art at 430");
         let (row, _) = controls_row(narrow, text_rect(narrow, Some(art)));
         assert!(narrow.shrink(4.0).contains_rect(row.expand2(vec2(8.0, 0.0))));
         assert!(row.left() - 8.0 < art.right(), "overlaps");

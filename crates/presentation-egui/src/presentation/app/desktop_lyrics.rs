@@ -169,7 +169,7 @@ pub(crate) fn ms_to_next_line(timeline: &LyricsTimeline, position_ms: u64) -> Op
 /// Frame interval of the karaoke fill when the UI thread is idle (~30 fps).
 const KARAOKE_FRAME: Duration = Duration::from_micros(33_333);
 /// Slowest karaoke frame interval under load.
-const KARAOKE_FRAME_MAX: Duration = Duration::from_millis(100);
+const KARAOKE_FRAME_MAX: Duration = Duration::from_millis(66);
 
 /// Karaoke frame interval from how late overlay frames arrive (EMA, ms). Every window is drawn
 /// on the one UI thread, and on some Windows systems presenting the transparent overlay waits
@@ -177,7 +177,7 @@ const KARAOKE_FRAME_MAX: Duration = Duration::from_millis(100);
 /// window (input lag). Late frames mean the thread is busy, so the overlay backs off.
 pub(crate) fn karaoke_interval(late_ema_ms: f32) -> Duration {
     let late = if late_ema_ms.is_finite() { late_ema_ms.max(0.0) } else { 0.0 };
-    (KARAOKE_FRAME + Duration::from_secs_f32(late * 3.0 / 1000.0)).min(KARAOKE_FRAME_MAX)
+    (KARAOKE_FRAME + Duration::from_secs_f32(late * 2.0 / 1000.0)).min(KARAOKE_FRAME_MAX)
 }
 
 /// Overlay frame pacing state (see [`karaoke_interval`]).
@@ -187,6 +187,8 @@ struct Pacing {
     /// Delay requested at the end of the previous frame (lateness is measured against it).
     requested: Option<Duration>,
     late_ema_ms: f32,
+    /// `frame_pacer::slept_total()` at the previous frame.
+    slept: Duration,
     stats_since: Option<Instant>,
     stats_frames: u32,
 }
@@ -194,8 +196,15 @@ struct Pacing {
 impl Pacing {
     /// Records the start of a frame; returns the karaoke interval to use.
     fn frame_start(&mut self, now: Instant) -> Duration {
+        self.frame_start_with(now, super::frame_pacer::slept_total())
+    }
+
+    /// `slept`: total time the main window's frame cap slept so far (not "busy").
+    fn frame_start_with(&mut self, now: Instant, slept: Duration) -> Duration {
+        let slept_since = slept.saturating_sub(self.slept);
+        self.slept = slept;
         if let (Some(last), Some(req)) = (self.last_start, self.requested.take()) {
-            let late = now.saturating_duration_since(last).saturating_sub(req).as_secs_f32() * 1000.0;
+            let late = now.saturating_duration_since(last).saturating_sub(req).saturating_sub(slept_since).as_secs_f32() * 1000.0;
             self.late_ema_ms = self.late_ema_ms * 0.8 + late.min(500.0) * 0.2;
         }
         self.last_start = Some(now);
@@ -446,6 +455,7 @@ impl GuiApp {
 
         let settings = self.config.desktop_lyrics.sanitized();
         if !settings.enabled {
+            super::frame_pacer::set_shared(false);
             if self.ui.desktop_lyrics.open.take().is_some() {
                 // Not shown this pass: egui closes the window at the end of the next one.
                 self.ui.desktop_lyrics.key = None;
@@ -458,6 +468,8 @@ impl GuiApp {
         }
 
         self.update_desktop_lyrics_feed(ctx, settings);
+        // The main window yields frames to the animating overlay (see `frame_pacer`).
+        super::frame_pacer::set_shared(self.is_playing());
 
         let dl = &mut self.ui.desktop_lyrics;
         if dl.open.is_none() {
@@ -928,9 +940,16 @@ mod tests {
     #[test]
     fn karaoke_frames_back_off_under_load() {
         assert_eq!(karaoke_interval(0.0), KARAOKE_FRAME);
-        assert!(karaoke_interval(10.0) > Duration::from_millis(60));
+        assert!(karaoke_interval(10.0) > Duration::from_millis(50));
         assert_eq!(karaoke_interval(1000.0), KARAOKE_FRAME_MAX);
         assert_eq!(karaoke_interval(f32::NAN), KARAOKE_FRAME);
+        // Time slept by the main window's frame cap is not lateness.
+        let mut p = Pacing::default();
+        let t0 = Instant::now();
+        p.frame_start_with(t0, Duration::ZERO);
+        p.requested = Some(KARAOKE_FRAME);
+        p.frame_start_with(t0 + KARAOKE_FRAME + Duration::from_millis(30), Duration::from_millis(30));
+        assert_eq!(p.late_ema_ms, 0.0);
         // Frames arriving on time keep 30 fps; consistently late ones slow down.
         let mut p = Pacing::default();
         let t0 = Instant::now();
@@ -946,7 +965,7 @@ mod tests {
             p.requested = Some(d);
             t += d + Duration::from_millis(20);
         }
-        assert!(karaoke_interval(p.late_ema_ms) >= Duration::from_millis(80), "late frames back off");
+        assert!(karaoke_interval(p.late_ema_ms) >= Duration::from_millis(60), "late frames back off");
     }
 
     #[test]

@@ -983,7 +983,7 @@ fn builtin(key: &str, lang: Lang) -> Option<&'static str> {
         "settings.desktop_lyrics_next_line" => ("次の行を表示", "Show the next line"),
         "settings.desktop_lyrics_title" => ("曲名を表示", "Show the title"),
         "settings.desktop_lyrics_artwork" => ("アルバムアートを表示", "Show album art"),
-        "settings.desktop_lyrics_artwork_hint" => ("ウィンドウの幅が狭いときは自動で隠れます", "Hidden automatically when the window is too narrow"),
+        "settings.desktop_lyrics_artwork_hint" => ("歌詞の左に再生中の曲のジャケットを表示します", "Shows the cover of the playing track left of the lyrics"),
         "settings.desktop_lyrics_lock" => ("ロック（クリックを透過）", "Lock (click-through)"),
         "settings.desktop_lyrics_lock_hint" => ("ロック中は歌詞ウィンドウを操作できません。解除はここ、再生バーのボタン、または Ctrl+Alt+L", "While locked the lyrics window ignores the mouse. Unlock here, with the button on the playback bar, or Ctrl+Alt+L"),
         "settings.desktop_lyrics_reset" => ("位置をリセット", "Reset position"),
