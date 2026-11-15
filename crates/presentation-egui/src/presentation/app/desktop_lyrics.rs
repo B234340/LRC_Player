@@ -169,9 +169,6 @@ pub(crate) fn ms_to_next_line(timeline: &LyricsTimeline, position_ms: u64) -> Op
     timeline.lines().iter().find(|l| l.start_ms as i64 > t).map(|l| (l.start_ms as i64 - t) as u64)
 }
 
-/// How often a click-through overlay checks whether the pointer left it.
-const POINTER_POLL: Duration = Duration::from_millis(100);
-
 /// Frame interval of the karaoke fill when the UI thread is idle (~30 fps).
 const KARAOKE_FRAME: Duration = Duration::from_micros(33_333);
 /// Slowest karaoke frame interval under load.
@@ -355,6 +352,8 @@ pub(crate) struct Shared {
     /// Click-through is currently on (see `overlay_ui`: only while locked *and* the pointer
     /// is over the window, on Windows).
     passthrough: bool,
+    /// Re-enable DWM transparency on the next frame (the window stopped being layered).
+    restore_transparency: bool,
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
@@ -478,7 +477,8 @@ impl GuiApp {
 
         self.update_desktop_lyrics_feed(ctx, settings);
         // The main window yields frames to the animating overlay (see `frame_pacer`).
-        super::frame_pacer::set_shared(self.is_playing());
+        let overlay_paused = lock(&self.ui.desktop_lyrics.shared).passthrough;
+        super::frame_pacer::set_shared(self.is_playing() && !overlay_paused);
 
         let dl = &mut self.ui.desktop_lyrics;
         if dl.open.is_none() {
@@ -487,6 +487,7 @@ impl GuiApp {
             let mut sh = lock(&dl.shared);
             sh.frames = 0;
             sh.passthrough = false;
+            sh.restore_transparency = false;
             sh.view = DesktopLyricsViewState::default();
             sh.shown_pos = None;
         }
@@ -663,6 +664,7 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
     let native = class != ViewportClass::EmbeddedWindow;
     let mut sh = lock(shared);
     let mut wake_main = false;
+    let mut paused = false;
 
     if native && ctx.input(|i| i.viewport().close_requested()) {
         // Alt+F4 on the overlay: hide it (the setting is turned off by the main window).
@@ -762,29 +764,41 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
             }
         }
         sh.frames = sh.frames.saturating_add(1);
-        if cfg!(windows) && sh.frames == 2 {
+        if std::mem::take(&mut sh.restore_transparency) {
+            // The layered style was removed after the previous pass: re-enable DWM
+            // transparency now (calling it while still layered has no effect).
+            win::restore_transparency(WINDOW_TITLE);
+        }
+        // Windows: per-pixel transparency only takes effect once the window has been layered
+        // and un-layered (observed on real hardware). Do that while it is still hidden:
+        // click-through on in frame 1, off in frame 2, transparency restored and shown in 3.
+        let priming = cfg!(windows) && sh.frames <= 2;
+        if cfg!(windows) && sh.frames == 3 {
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         }
-        if sh.frames < 3 {
+        if sh.frames < 4 {
             ctx.request_repaint();
         }
         // Lock = click-through. On Windows a click-through window is layered, which costs a
         // lot to draw with OpenGL and drops the per-pixel transparency; so it is click-through
-        // only while the pointer is over it (then the lyrics fade so what is under them shows).
-        // Elsewhere the pointer position is unknown while passing through: always on.
+        // only while the pointer is over it, and meanwhile the lyrics are not redrawn (the
+        // last frame stays, faded so what is under it shows). A watcher thread notices the
+        // pointer leaving. Elsewhere the pointer position is unknown while passing through:
+        // click-through all the time, drawing as usual.
         let inside = win::cursor_inside(WINDOW_TITLE);
-        let want = settings.locked && inside.unwrap_or(true);
+        let want = if priming { sh.frames == 1 } else { settings.locked && inside.unwrap_or(true) };
         if want != sh.passthrough {
             sh.passthrough = want;
             ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(want));
             if !want {
-                win::restore_transparency(WINDOW_TITLE);
+                sh.restore_transparency = true;
+                ctx.request_repaint();
             }
         }
         win::keep_layered_visible(WINDOW_TITLE, sh.passthrough);
-        if sh.passthrough && inside.is_some() {
-            // No mouse events reach a click-through window: poll for the pointer leaving.
-            ctx.request_repaint_after(POINTER_POLL);
+        paused = !priming && sh.passthrough && inside.is_some();
+        if paused {
+            win::watch_pointer_leave(&ctx, WINDOW_TITLE);
         }
         if sh.frames <= 3 {
             // Fixed pixel size across monitors with different DPI, like the main window
@@ -796,7 +810,10 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
     if wake_main {
         ctx.request_repaint_of(ViewportId::ROOT);
     }
-    let next = next_repaint(feed.playing && feed.sample.advancing, karaoke_line, to_next)
+    // Paused while a locked window passes clicks through (no frames until the pointer leaves).
+    let next = (!paused)
+        .then(|| next_repaint(feed.playing && feed.sample.advancing, karaoke_line, to_next))
+        .flatten()
         .map(|d| if d.is_zero() { karaoke_frame } else { d });
     lock(shared).pacing.requested = next;
     if let Some(d) = next {
@@ -856,6 +873,35 @@ mod win {
             }
             Some(PtInRect(&r, pt) != 0)
         }
+    }
+
+    /// Watching for the pointer to leave the (paused, click-through) overlay.
+    static WATCHING: AtomicBool = AtomicBool::new(false);
+    static WATCHER: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
+
+    /// Starts watching: a background thread checks the pointer every 100 ms (sleeping
+    /// otherwise) and wakes the overlay once it has left, so the overlay itself needs no frames
+    /// while it is paused.
+    pub(super) fn watch_pointer_leave(ctx: &eframe::egui::Context, title: &'static str) {
+        WATCHING.store(true, Ordering::SeqCst);
+        let thread = WATCHER.get_or_init(|| {
+            let ctx = ctx.clone();
+            std::thread::Builder::new()
+                .name("desktop-lyrics-pointer".into())
+                .spawn(move || loop {
+                    if !WATCHING.load(Ordering::SeqCst) {
+                        std::thread::park();
+                        continue;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if cursor_inside(title) != Some(true) && WATCHING.swap(false, Ordering::SeqCst) {
+                        ctx.request_repaint_of(super::viewport_id());
+                    }
+                })
+                .map(|h| h.thread().clone())
+                .unwrap_or_else(|_| std::thread::current())
+        });
+        thread.unpark();
     }
 
     /// Re-enables DWM per-pixel transparency (blur-behind with an empty region, as winit does
@@ -945,6 +991,8 @@ mod win {
     }
 
     pub(super) fn restore_transparency(_title: &str) {}
+
+    pub(super) fn watch_pointer_leave(_ctx: &eframe::egui::Context, _title: &'static str) {}
 
     /// Monitor positions are not available here; the saved position is only sanity-checked.
     pub(super) fn work_area(_near: Rect, _ppp: f32) -> Option<Rect> {
