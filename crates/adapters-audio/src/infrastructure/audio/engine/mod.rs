@@ -20,6 +20,7 @@
 //! }
 //! ```
 
+mod autoeq_fit;
 pub(crate) mod channel_map;
 mod convert;
 mod crossfeed;
@@ -51,6 +52,11 @@ use std::time::Duration;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 
+pub use autoeq_fit::{
+    auto_eq, filters_response_db, fit_grid, parse_frequency_response,
+    parse_frequency_response_str, prepare_curves, AutoEqOptions, AutoEqResult, CurveParseError,
+    FrequencyResponse, PreparedCurves, CURVE_MAX_BYTES, FIT_MAX_HZ, FIT_MIN_HZ, TREBLE_WEIGHT,
+};
 pub use convert::ResamplerKind;
 pub use crossfeed::{Crossfeed, CrossfeedLevel};
 pub use dither::DitherMode;
@@ -60,7 +66,8 @@ pub use dsp::{
 };
 pub use normalization::{GainSource, LoudnessHint, Normalization, NormalizationMode};
 pub use peq::{
-    parse_autoeq, FilterKind, ParametricEq, PeqFilter, PEQ_MAX_FILTERS, PEQ_MAX_GAIN_DB,
+    parse_autoeq, FilterKind, ParametricEq, PeqChannel, PeqChannelMode, PeqFilter, PeqSide,
+    PEQ_MAX_FILTERS, PEQ_MAX_GAIN_DB,
 };
 pub use renderer::SpectrumTap;
 pub use signal::SignalPath;
@@ -355,7 +362,9 @@ impl AudioEngine {
     }
 
     /// Parametric EQ (in series after the 10-band EQ; both may be active). Changes are
-    /// crossfaded. Only the first [`PEQ_MAX_FILTERS`] filters are used.
+    /// crossfaded. Only the first [`PEQ_MAX_FILTERS`] filters (per channel) are used. With
+    /// [`PeqChannelMode::Separate`] output channel 1 gets `right`, every other channel the
+    /// main set (see [`ParametricEq`]).
     pub fn set_parametric_eq(&self, eq: ParametricEq) {
         self.send(Command::SetParametricEq(eq));
     }

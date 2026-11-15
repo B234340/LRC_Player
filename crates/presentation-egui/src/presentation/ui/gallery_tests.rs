@@ -724,7 +724,7 @@ fn components_page(ui: &mut Ui, query: &mut String, tr: Tr) {
             widgets::card(&mut cols[1], |ui| {
                 let mut eq = EqSettings { enabled: true, preamp_db: -3.0, bands_db: [4.5, 3.5, 2.0, -0.5, -1.5, -0.5, 1.5, 3.0, 4.0, 4.5] };
                 let peq = Default::default();
-                for a in eq_panel(ui, &EqPanelProps { settings: eq, peq: &peq, tab: Default::default(), curve: None, max_height: 600.0, importing: false, tr }) {
+                for a in eq_panel(ui, &EqPanelProps { settings: eq, peq: &peq, tab: Default::default(), curve: None, max_height: 600.0, importing: false, side: Default::default(), auto: Default::default(), tr }) {
                     if let super::UiAction::SetEq(s) = a {
                         eq = s;
                     }
@@ -752,6 +752,8 @@ fn eq_popover() {
                             curve: None,
                             max_height: 600.0,
                             importing: false,
+                            side: Default::default(),
+                            auto: Default::default(),
                             tr: Tr::JA,
                         },
                     );

@@ -371,6 +371,7 @@ fn auto_headroom_compensates_eq_boosts() {
             gain_db: 4.0,
             q: 1.0,
         }],
+        ..Default::default()
     });
     engine.sync();
     let mut seg = Vec::new();
@@ -428,6 +429,74 @@ fn auto_headroom_compensates_eq_boosts() {
         "0.8 boosted by 6 dB must hit the limiter"
     );
     assert!(tail_peak(&seg) <= 1.0);
+}
+
+/// Separate PEQ channels: the left output gets the main set, the right output `right`; the
+/// auto headroom covers the worse channel; switching back to linked applies the main set to
+/// both.
+#[test]
+fn separate_peq_channels_reach_their_outputs() {
+    let dir = TempDir::new("peq_lr");
+    let path = dir.file("sine1k.wav");
+    let rate = 48_000u32;
+    let frames = rate as usize * 8;
+    let s: Vec<i16> = (0..frames)
+        .flat_map(|n| {
+            let v = q(0.25 * (2.0 * std::f64::consts::PI * 1000.0 * n as f64 / 48_000.0).sin());
+            [v, v]
+        })
+        .collect();
+    write_wav(&path, rate, 2, &s);
+    let engine = manual_engine(rate, 2);
+    engine.set_auto_headroom(false);
+    engine.load(path, 0, true);
+    for _ in 0..20 {
+        render(&engine, 2, 480);
+    }
+    let peaks = |engine: &AudioEngine| {
+        let mut seg = Vec::new();
+        for _ in 0..40 {
+            seg.extend(render(engine, 2, 480));
+        }
+        let tail = &seg[seg.len() / 2..];
+        let l = tail.iter().step_by(2).fold(0.0f32, |m, v| m.max(v.abs()));
+        let r = tail.iter().skip(1).step_by(2).fold(0.0f32, |m, v| m.max(v.abs()));
+        (20.0 * (l / 0.25).log10(), 20.0 * (r / 0.25).log10())
+    };
+    let pk = |gain_db| PeqFilter {
+        kind: FilterKind::Peak,
+        freq_hz: 1000.0,
+        gain_db,
+        q: 1.0,
+    };
+    let mut peq = ParametricEq {
+        enabled: true,
+        filters: vec![pk(3.0)],
+        channel_mode: PeqChannelMode::Separate,
+        right: PeqChannel {
+            preamp_db: -2.0,
+            filters: vec![pk(-6.0)],
+        },
+        ..Default::default()
+    };
+    engine.set_parametric_eq(peq.clone());
+    engine.sync();
+    let (l, r) = peaks(&engine);
+    assert!((l - 3.0).abs() < 0.1, "left {l}");
+    assert!((r + 8.0).abs() < 0.1, "right {r}");
+    assert!(engine.snapshot().signal.unwrap().parametric_eq);
+    // Auto headroom: the worse channel (L, +3 dB) decides.
+    engine.set_auto_headroom(true);
+    engine.sync();
+    let hr = engine.snapshot().signal.unwrap().headroom_db;
+    assert!((hr + 3.0).abs() < 0.1, "headroom {hr}");
+    engine.set_auto_headroom(false);
+    // Linked: the main set on both channels.
+    peq.channel_mode = PeqChannelMode::Linked;
+    engine.set_parametric_eq(peq);
+    engine.sync();
+    let (l, r) = peaks(&engine);
+    assert!((l - 3.0).abs() < 0.1 && (r - 3.0).abs() < 0.1, "linked {l} {r}");
 }
 
 /// `bit_perfect` (and `processing_active`) only when every stage is off and the volume is 1.
@@ -495,8 +564,20 @@ fn bit_perfect_only_when_everything_is_off() {
         enabled: true,
         preamp_db: -1.0,
         filters: vec![],
+        ..Default::default()
     });
     assert!(check(false, "PEQ").parametric_eq);
+    // Separate channels: only the right channel's preamp changes the signal.
+    engine.set_parametric_eq(ParametricEq {
+        enabled: true,
+        channel_mode: PeqChannelMode::Separate,
+        right: PeqChannel {
+            preamp_db: -1.0,
+            filters: vec![],
+        },
+        ..Default::default()
+    });
+    assert!(check(false, "PEQ right only").parametric_eq);
     engine.set_parametric_eq(ParametricEq::default());
     check(true, "PEQ off");
 
@@ -671,6 +752,7 @@ fn stress_transport_with_dsp_changes() {
                     enabled: rng.range(0, 10) < 8,
                     preamp_db: -3.0 * rng.unit(),
                     filters,
+                    ..Default::default()
                 });
                 "peq".into()
             }

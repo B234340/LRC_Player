@@ -18,7 +18,8 @@ use crate::presentation::ui::{
     shortcuts,
     theme::{self, metrics},
     views::{
-        eq_panel, lyrics_view, quality_badge, queue_panel, signal_path_view, EqCurve, EqPanelProps, LyricsProps, QueueItem,
+        eq_auto::AutoEqView, eq_graph::OverlayInput, eq_panel, lyrics_view, quality_badge, queue_panel, signal_path_view, EqCurve,
+        EqPanelProps, LyricsProps, QueueItem,
         QueueProps, TrackRow,
     },
     format::format_count,
@@ -291,13 +292,21 @@ impl GuiApp {
             .unwrap_or(48_000)
     }
 
-    /// The EQ graph curve, recomputed only when the settings (or the rate) changed.
-    fn eq_curve(&mut self) -> &EqCurve {
+    /// The EQ graph curve (edited PEQ channel, auto-EQ overlay), recomputed only when the
+    /// settings, the curves or the rate changed.
+    pub(crate) fn eq_curve(&mut self) -> &EqCurve {
         let rate = self.graph_sample_rate();
         let auto = self.config.auto_headroom;
-        let fresh = self.ui.eq_curve.as_ref().is_some_and(|c| c.is_for(&self.eq, &self.peq, auto, rate));
+        let side = self.peq_edit_side();
+        let a = &self.auto_eq;
+        let any_curve = self.config.auto_eq.target_flat || a.target.is_some() || a.source.is_some() || a.source_r.is_some();
+        let overlay_rev = any_curve.then_some(a.rev);
+        let fresh = self.ui.eq_curve.as_ref().is_some_and(|c| c.is_for(&self.eq, &self.peq, side, auto, rate, overlay_rev));
         if !fresh {
-            self.ui.eq_curve = Some(EqCurve::compute(&self.eq, &self.peq, auto, rate));
+            let target = self.auto_eq_target();
+            let source = self.auto_eq_source(side);
+            let overlay = overlay_rev.map(|rev| OverlayInput { source: source.as_ref(), target: target.as_ref(), rev });
+            self.ui.eq_curve = Some(EqCurve::compute(&self.eq, &self.peq, side, auto, rate, overlay));
         }
         self.ui.eq_curve.as_ref().expect("set above")
     }
@@ -327,6 +336,21 @@ impl GuiApp {
             curve: self.ui.eq_curve.as_ref(),
             max_height,
             importing: self.ui.autoeq_picker.is_some(),
+            side: self.peq_edit_side(),
+            auto: AutoEqView {
+                expanded: self.auto_eq.expanded,
+                target: self.auto_eq.target.as_ref().map(|c| c.name.as_str()),
+                target_flat: self.config.auto_eq.target_flat,
+                source: self.auto_eq.source.as_ref().map(|c| c.name.as_str()),
+                source_r: self.auto_eq.source_r.as_ref().map(|c| c.name.as_str()),
+                same_source: self.config.auto_eq.same_source,
+                separate: self.peq.channel_mode == lrc_player_application::infrastructure::audio::engine::PeqChannelMode::Separate,
+                options: self.auto_eq_options(),
+                picking: self.auto_eq.picker.as_ref().map(|p| p.0),
+                running: self.auto_eq.job.is_some(),
+                last: &self.auto_eq.last,
+                can_undo: self.auto_eq.undo.is_some(),
+            },
             tr,
         };
         egui::Area::new(Id::new("eq_popover"))

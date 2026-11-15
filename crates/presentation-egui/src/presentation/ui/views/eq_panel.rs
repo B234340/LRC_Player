@@ -1,17 +1,19 @@
 //! EQ popover contents: graphic (10-band: enable switch, presets, preamp, vertical band
-//! sliders) and parametric (filter list, AutoEq import) tabs over a shared frequency-response
-//! graph (`eq_graph.rs`).
+//! sliders) and parametric (L+R / L・R 別, filter list, AutoEq import, automatic creation from
+//! a target and a measurement — `eq_auto.rs`) tabs over a shared frequency-response graph
+//! (`eq_graph.rs`).
 
 use eframe::egui::{
     self, pos2, vec2, Align, Color32, CursorIcon, FontId, Id, Layout, Rect, Sense, Stroke, Ui,
 };
 
 use crate::presentation::ui::{
-    actions::{EqSettings, ParametricEq, UiAction},
+    actions::{EqSettings, ParametricEq, PeqChannelMode, PeqSide, UiAction},
     i18n::Tr,
     icons::{icon_button, Icon},
     theme,
     views::{
+        eq_auto::{auto_eq_section, AutoEqView},
         eq_graph::{hz_text, response_graph, EqCurve},
         settings::{fit_segmented, with_max_width},
     },
@@ -69,6 +71,10 @@ pub struct EqPanelProps<'a> {
     pub max_height: f32,
     /// The AutoEq file dialog is open.
     pub importing: bool,
+    /// PEQ channel shown / edited (`Left` when linked).
+    pub side: PeqSide,
+    /// The 自動作成 section.
+    pub auto: AutoEqView<'a>,
     pub tr: Tr,
 }
 
@@ -113,9 +119,11 @@ const GRID_DB: [f32; 5] = [12.0, 6.0, 0.0, -6.0, -12.0];
 ///
 /// Layout (fits any width): header (title … tabs), graph, then for the graphic tab the
 /// enable / preset / reset row and the slider block (columns compress, below ~340 px it
-/// scrolls horizontally); for the parametric tab the enable / preamp row, the import
-/// buttons (as many rows as needed), the filter list (scrolls inside `max_height`; rows stack below
-/// ~446 px) and "add filter" … "remove all".
+/// scrolls horizontally); for the parametric tab the L+R / L・R 別 row (with the L / R
+/// selector and the copy menu; two rows when narrow), the enable / preamp row, the import
+/// buttons (as many rows as needed), the collapsible 自動作成 section, the filter list (rows
+/// stack below ~446 px) and "add filter" … "remove all". With the 自動作成 section collapsed
+/// only the filter list scrolls (inside `max_height`); expanded, the whole tab body scrolls.
 pub fn eq_panel(ui: &mut Ui, props: &EqPanelProps<'_>) -> Vec<UiAction> {
     egui::Frame::new().inner_margin(PANEL_PADDING).show(ui, |ui| eq_panel_contents(ui, props)).inner
 }
@@ -140,7 +148,13 @@ fn eq_panel_contents(ui: &mut Ui, props: &EqPanelProps<'_>) -> Vec<UiAction> {
         });
     });
     ui.add_space(8.0);
-    let graph_h = if props.max_height < 470.0 { 76.0 } else { 112.0 };
+    let overlay = props.curve.is_some_and(|c| c.overlay.is_some());
+    let graph_h = match (props.max_height < 470.0, overlay) {
+        (true, false) => 76.0,
+        (true, true) => 104.0,
+        (false, false) => 112.0,
+        (false, true) => 150.0,
+    };
     response_graph(ui, props.curve, graph_h, tr);
     ui.add_space(10.0);
 
@@ -288,13 +302,7 @@ fn pasted_profile(ui: &Ui, awaiting: bool) -> Option<String> {
 }
 
 fn parametric_tab(ui: &mut Ui, props: &EqPanelProps<'_>, max_height: f32) -> Vec<UiAction> {
-    let tr = props.tr;
-    let pal = theme::palette(ui);
-    let mut peq = props.peq.clone();
-    let mut changed = false;
     let mut actions = Vec::new();
-    let start = ui.cursor().top();
-
     // Clipboard paste (button -> RequestPaste -> Event::Paste, or plain Ctrl+V).
     let await_id = Id::new("peq_await_paste");
     let awaiting = ui.data(|d| d.get_temp::<f64>(await_id)).is_some_and(|t| ui.input(|i| i.time) - t < 2.0);
@@ -302,31 +310,55 @@ fn parametric_tab(ui: &mut Ui, props: &EqPanelProps<'_>, max_height: f32) -> Vec
         ui.data_mut(|d| d.remove::<f64>(await_id));
         actions.push(UiAction::ImportAutoEqText(text));
     }
-
-    // switch … preamp
-    ui.horizontal(|ui| {
-        ui.set_min_height(32.0);
-        let mut on = peq.enabled;
-        if enable_switch(ui, &mut on, tr) {
-            peq.enabled = on;
-            changed = true;
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let mut pre = peq.preamp_db;
-            let dv = egui::DragValue::new(&mut pre)
-                .range(-PEQ_MAX_GAIN_DB..=PEQ_MAX_GAIN_DB)
-                .speed(0.05)
-                .fixed_decimals(1)
-                .suffix(" dB");
-            if ui.add(dv).on_hover_text(tr.t("peq.preamp_hint")).changed() {
-                peq.preamp_db = pre;
-                changed = true;
-            }
-            ui.label(theme::muted(ui, tr.t("eq.preamp")));
+    if props.auto.expanded {
+        ui.scope(|ui| {
+            // A solid (always shown) scroll bar: the theme's floating bars are invisible until
+            // hovered, and here it must be obvious that more follows below.
+            let mut scroll = egui::style::ScrollStyle::solid();
+            scroll.bar_width = 5.0;
+            scroll.bar_inner_margin = 6.0;
+            ui.spacing_mut().scroll = scroll;
+            egui::ScrollArea::vertical()
+                .id_salt("peq_tab_scroll")
+                .max_height(max_height.max(120.0))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    actions.extend(parametric_body(ui, props, None, await_id));
+                });
         });
-    });
-    ui.add_space(6.0);
+    } else {
+        actions.extend(parametric_body(ui, props, Some(max_height), await_id));
+    }
+    actions
+}
 
+/// The parametric tab below the graph. `list_room`: total height for the tab (the filter list
+/// scrolls to fit it); `None` = no inner scrolling (the caller scrolls).
+fn parametric_body(ui: &mut Ui, props: &EqPanelProps<'_>, list_room: Option<f32>, await_id: Id) -> Vec<UiAction> {
+    let tr = props.tr;
+    let pal = theme::palette(ui);
+    let mut peq = props.peq.clone();
+    let separate = peq.channel_mode == PeqChannelMode::Separate;
+    let side = if separate { props.side } else { PeqSide::Left };
+    let mut ch = peq.channel(side);
+    let mut changed = false;
+    let mut actions = Vec::new();
+    let start = ui.cursor().top();
+
+    // switch, L+R / L・R 別, (L / R, copy) and the edited channel's preamp
+    let mut enabled = peq.enabled;
+    let mut pre = ch.preamp_db;
+    let head = HeaderState { separate, side, tr };
+    let (en_changed, pre_changed) = header_rows(ui, &head, &mut enabled, &mut pre, &mut actions);
+    if en_changed {
+        peq.enabled = enabled;
+        changed = true;
+    }
+    if pre_changed {
+        ch.preamp_db = pre;
+        changed = true;
+    }
+    ui.add_space(6.0);
     // import / paste, packed into as few rows as fit (a wrapping layout does not
     // wrap the enabled/disabled scopes the buttons need).
     let import_label = if props.importing { tr.t("peq.importing") } else { tr.t("peq.import_file") };
@@ -369,60 +401,191 @@ fn parametric_tab(ui: &mut Ui, props: &EqPanelProps<'_>, max_height: f32) -> Vec
             }
         });
     }
-    ui.add_space(8.0);
+    ui.add_space(6.0);
+    // 自動作成（ターゲットに合わせる）
+    actions.extend(auto_eq_section(ui, &props.auto, tr));
 
+    ui.add_space(6.0);
     // filter list
     let footer_h = 56.0;
-    let list_max = (max_height - (ui.cursor().top() - start) - footer_h).max(84.0);
-    if peq.filters.is_empty() {
+    if ch.filters.is_empty() {
         ui.add(egui::Label::new(theme::muted(ui, tr.t("peq.empty"))).wrap());
     } else {
         let mut remove = None;
-        egui::ScrollArea::vertical()
-            .id_salt("peq_filters")
-            .max_height(list_max)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                for (i, f) in peq.filters.iter_mut().enumerate() {
-                    let (c, r) = filter_row(ui, i, f, tr, &pal);
-                    changed |= c;
-                    if r {
-                        remove = Some(i);
-                    }
+        let mut rows_ui = |ui: &mut Ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            for (i, f) in ch.filters.iter_mut().enumerate() {
+                let (c, r) = filter_row(ui, i, f, tr, &pal);
+                changed |= c;
+                if r {
+                    remove = Some(i);
                 }
-            });
+            }
+        };
+        match list_room {
+            Some(room) => {
+                let list_max = (room - (ui.cursor().top() - start) - footer_h).max(84.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("peq_filters")
+                    .max_height(list_max)
+                    .auto_shrink([false, true])
+                    .show(ui, rows_ui);
+            }
+            None => rows_ui(ui),
+        }
         if let Some(i) = remove {
-            peq.filters.remove(i);
+            ch.filters.remove(i);
             changed = true;
         }
     }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.set_min_height(32.0);
-        let full = peq.filters.len() >= PEQ_MAX_FILTERS;
+        let full = ch.filters.len() >= PEQ_MAX_FILTERS;
         let add = ui.add_enabled_ui(!full, |ui| button(ui, ButtonKind::Secondary, Some(Icon::Plus), tr.t("peq.add"))).inner;
         if add.clicked() {
-            peq.filters.push(new_filter());
+            ch.filters.push(new_filter());
             if !peq.enabled {
                 peq.enabled = true;
             }
             changed = true;
         }
-        ui.label(theme::muted(ui, format!("{} / {}", peq.filters.len(), PEQ_MAX_FILTERS)));
+        ui.label(theme::muted(ui, format!("{} / {}", ch.filters.len(), PEQ_MAX_FILTERS)));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let clear = ui.add_enabled_ui(!peq.filters.is_empty(), |ui| button(ui, ButtonKind::Ghost, Some(Icon::Trash), tr.t("peq.clear"))).inner;
+            let clear = ui.add_enabled_ui(!ch.filters.is_empty(), |ui| button(ui, ButtonKind::Ghost, Some(Icon::Trash), tr.t("peq.clear"))).inner;
             if clear.clicked() {
-                peq.filters.clear();
+                ch.filters.clear();
                 changed = true;
             }
         });
     });
 
     if changed {
+        peq.set_channel(side, ch);
         actions.push(UiAction::SetParametricEq(peq));
     }
     actions
+}
+
+fn side_label(side: PeqSide) -> &'static str {
+    match side {
+        PeqSide::Left => "L",
+        PeqSide::Right => "R",
+    }
+}
+
+struct HeaderState {
+    separate: bool,
+    side: PeqSide,
+    tr: Tr,
+}
+
+/// The rows above the import buttons, packed by width:
+///
+/// * wide, L+R: `● 有効 [L+R（共通）| L・R 別] … プリアンプ [x dB]` (one row);
+/// * wide, L・R 別: `● 有効 [L+R（共通）| L・R 別]` / `編集 [L|R] [コピー] … プリアンプ（R） [x dB]`;
+/// * narrow: the mode selector, the L / R row (L・R 別), then `● 有効 … プリアンプ [x dB]`.
+///
+/// Returns (enabled changed, preamp changed).
+fn header_rows(ui: &mut Ui, h: &HeaderState, enabled: &mut bool, pre: &mut f32, actions: &mut Vec<UiAction>) -> (bool, bool) {
+    let tr = h.tr;
+    let gap = 12.0;
+    let modes = [tr.t("peq.mode_linked"), tr.t("peq.mode_separate")];
+    let font = FontId::proportional(theme::size::BODY - 0.5);
+    let text_w = |t: &str, f: &FontId| ui.painter().layout_no_wrap(t.to_owned(), f.clone(), Color32::PLACEHOLDER).size().x;
+    let seg_w = |labels: &[&str]| labels.iter().map(|t| text_w(t, &font) + 28.0).fold(56.0f32, f32::max) * labels.len() as f32 + 6.0;
+    let body = FontId::proportional(theme::size::BODY);
+    let switch_w = 40.0 + 8.0 + text_w(tr.t("eq.enabled"), &body);
+    let pre_label = if h.separate { tr.f("peq.preamp_side", &[&side_label(h.side)]) } else { tr.t("eq.preamp").to_owned() };
+    let pre_w = text_w(&pre_label, &body) + 8.0 + 72.0;
+    let side_w = text_w(tr.t("peq.side_hint"), &body) + 8.0 + seg_w(&["L", "R"]) + 8.0 + button_width(ui, tr.t("peq.copy"), false);
+    let mode_w = seg_w(&modes);
+    let avail = ui.available_width();
+    let (mut en_changed, mut pre_changed) = (false, false);
+
+    let mut switch_ui = |ui: &mut Ui| {
+        let mut on = *enabled;
+        if enable_switch(ui, &mut on, tr) {
+            *enabled = on;
+            en_changed = true;
+        }
+    };
+    let mut preamp_ui = |ui: &mut Ui| {
+        // Right to left: value, then its label.
+        let mut v = *pre;
+        let dv = egui::DragValue::new(&mut v).range(-PEQ_MAX_GAIN_DB..=PEQ_MAX_GAIN_DB).speed(0.05).fixed_decimals(1).suffix(" dB");
+        if ui.add(dv).on_hover_text(tr.t("peq.preamp_hint")).changed() {
+            *pre = v;
+            pre_changed = true;
+        }
+        ui.label(theme::muted(ui, pre_label.clone()));
+    };
+    let mode_ui = |ui: &mut Ui, actions: &mut Vec<UiAction>| {
+        let w = ui.available_width().min(mode_w);
+        let r = ui.scope(|ui| with_max_width(ui, w, |ui| fit_segmented(ui, Id::new("peq_channel_mode"), &modes, usize::from(h.separate))));
+        r.response.on_hover_text(tr.t("peq.mode_hint"));
+        if let Some(i) = r.inner {
+            actions.push(UiAction::SetPeqChannelMode(if i == 0 { PeqChannelMode::Linked } else { PeqChannelMode::Separate }));
+        }
+    };
+    let side_ui = |ui: &mut Ui, actions: &mut Vec<UiAction>| {
+        ui.label(theme::muted(ui, tr.t("peq.side_hint")));
+        let cur = usize::from(h.side == PeqSide::Right);
+        if let Some(i) = crate::presentation::ui::widgets::segmented(ui, Id::new("peq_edit_side"), &["L", "R"], cur) {
+            actions.push(UiAction::SetPeqEditSide(if i == 0 { PeqSide::Left } else { PeqSide::Right }));
+        }
+        ui.add_space(4.0);
+        ui.menu_button(tr.t("peq.copy"), |ui| {
+            if ui.button(tr.t("peq.copy_l_to_r")).clicked() {
+                actions.push(UiAction::CopyPeqChannel(PeqSide::Left));
+                ui.close();
+            }
+            if ui.button(tr.t("peq.copy_r_to_l")).clicked() {
+                actions.push(UiAction::CopyPeqChannel(PeqSide::Right));
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text(tr.t("peq.copy_hint"));
+    };
+    let row = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+        ui.horizontal(|ui| {
+            ui.set_min_height(32.0);
+            add(ui);
+        });
+    };
+
+    if !h.separate && switch_w + gap + mode_w + gap + pre_w <= avail {
+        row(ui, &mut |ui| {
+            switch_ui(ui);
+            ui.add_space(gap);
+            mode_ui(ui, actions);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| preamp_ui(ui));
+        });
+    } else if h.separate && switch_w + gap + mode_w <= avail && side_w + gap + pre_w <= avail {
+        row(ui, &mut |ui| {
+            switch_ui(ui);
+            ui.add_space(gap);
+            mode_ui(ui, actions);
+        });
+        ui.add_space(2.0);
+        row(ui, &mut |ui| {
+            side_ui(ui, actions);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| preamp_ui(ui));
+        });
+    } else {
+        row(ui, &mut |ui| mode_ui(ui, actions));
+        if h.separate {
+            ui.add_space(2.0);
+            row(ui, &mut |ui| side_ui(ui, actions));
+        }
+        ui.add_space(2.0);
+        row(ui, &mut |ui| {
+            switch_ui(ui);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| preamp_ui(ui));
+        });
+    }
+    (en_changed, pre_changed)
 }
 
 /// Width of a [`button`] with this label (see `widgets::button`).
@@ -665,5 +828,57 @@ mod tests {
         assert_eq!(parse_hz("abc"), None);
         assert!(is_pass(FilterKind::HighPass) && !is_pass(FilterKind::LowShelf));
         assert_eq!(PEQ_KINDS.len(), 5);
+    }
+
+    /// The parametric tab never grows wider than it is given (both channel modes, the
+    /// 自動作成 section open and closed, long file names), from the narrowest popover up.
+    #[test]
+    fn parametric_tab_fits_its_width() {
+        use crate::presentation::ui::views::eq_auto::FitSummary;
+        let ctx = egui::Context::default();
+        let last = [
+            FitSummary { side: Some(PeqSide::Left), before_db: 2.7, after_db: 0.3, filters: 9 },
+            FitSummary { side: Some(PeqSide::Right), before_db: 2.9, after_db: 0.4, filters: 9 },
+        ];
+        for mode in [PeqChannelMode::Linked, PeqChannelMode::Separate] {
+            let peq = ParametricEq { enabled: true, filters: vec![new_filter(); 3], channel_mode: mode, ..Default::default() };
+            for w in [288.0f32, 380.0, 464.0, 508.0] {
+                for expanded in [false, true] {
+                    let mut width = 0.0;
+                    // A few frames: some widgets size themselves from the previous frame.
+                    for _ in 0..3 {
+                        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1400.0, 1400.0))), ..Default::default() };
+                        let _ = ctx.run_ui(input, |ui| {
+                            egui::Area::new(Id::new(("fit", w as i32, expanded, mode == PeqChannelMode::Separate))).show(ui.ctx(), |ui| {
+                                ui.set_width(w);
+                                let props = EqPanelProps {
+                                    settings: EqSettings::default(),
+                                    peq: &peq,
+                                    tab: EqTab::Parametric,
+                                    curve: None,
+                                    max_height: 500.0,
+                                    importing: false,
+                                    side: PeqSide::Right,
+                                    auto: AutoEqView {
+                                        expanded,
+                                        target: Some("IEM_target_harman2019_with_a_long_name.csv"),
+                                        source: Some("DIY-IEM_L_2026-11-14_measurement.txt"),
+                                        source_r: Some("DIY-IEM_R_2026-11-14_measurement.txt"),
+                                        same_source: false,
+                                        separate: mode == PeqChannelMode::Separate,
+                                        last: &last,
+                                        can_undo: true,
+                                        ..Default::default()
+                                    },
+                                    tr: Tr::JA,
+                                };
+                                width = ui.scope(|ui| eq_panel(ui, &props)).response.rect.width();
+                            });
+                        });
+                    }
+                    assert!(width <= w + 1.0, "{mode:?} width {w} expanded {expanded}: {width}");
+                }
+            }
+        }
     }
 }

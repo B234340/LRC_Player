@@ -6,7 +6,10 @@
 
 use std::path::PathBuf;
 
-pub use lrc_player_application::infrastructure::audio::engine::{EqSettings, ParametricEq};
+pub use lrc_player_application::infrastructure::audio::engine::{
+    AutoEqOptions, EqSettings, ParametricEq, PeqChannelMode, PeqSide,
+};
+pub use crate::presentation::ui::views::eq_auto::CurveSlot;
 
 /// Top-level pages reachable from the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -186,6 +189,24 @@ pub enum UiAction {
     ImportAutoEqFile,
     /// Import an AutoEq / Equalizer APO profile from text (clipboard paste).
     ImportAutoEqText(String),
+    /// L+R (one filter set) or L・R 別.
+    SetPeqChannelMode(PeqChannelMode),
+    /// Channel shown / edited in L・R 別.
+    SetPeqEditSide(PeqSide),
+    /// Copy this channel's filters + preamp to the other channel.
+    CopyPeqChannel(PeqSide),
+    /// Expand / collapse the 自動作成 section.
+    ToggleAutoEqSection,
+    /// Open the file dialog for a target / measurement curve.
+    PickAutoEqCurve(CurveSlot),
+    ClearAutoEqCurve(CurveSlot),
+    SetAutoEqTargetFlat(bool),
+    SetAutoEqSameSource(bool),
+    SetAutoEqOptions(AutoEqOptions),
+    /// Fit the filters (worker thread).
+    RunAutoEq,
+    /// Restore the filters from before the last auto-create.
+    UndoAutoEq,
     /// Toggle the signal-path popover (transport quality indicator).
     ToggleSignalPath,
 

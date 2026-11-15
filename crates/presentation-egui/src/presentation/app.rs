@@ -20,6 +20,7 @@
 
 mod artwork;
 mod audio_quality;
+mod auto_eq;
 mod artwork_loader;
 pub(crate) mod desktop_lyrics;
 mod dispatch;
@@ -137,6 +138,8 @@ pub(crate) struct UiShell {
     pub(crate) scroll_to_sound: u8,
     /// Pending AutoEq file picker (see `app/audio_quality.rs`).
     pub(crate) autoeq_picker: Option<Receiver<audio_quality::AutoEqPick>>,
+    /// PEQ channel shown / edited in L・R 別 mode.
+    pub(crate) peq_side: lrc_player_application::infrastructure::audio::engine::PeqSide,
     pub(crate) toasts: Toasts,
     pub(crate) library_table: TrackTableState,
     pub(crate) library_query: String,
@@ -218,6 +221,8 @@ pub struct GuiApp {
     pub(crate) eq: EqSettings,
     /// Parametric EQ (mirrors `config.parametric_eq`).
     pub(crate) peq: ParametricEq,
+    /// Automatic PEQ creation: imported curves, running fit, undo (`app/auto_eq.rs`).
+    pub(crate) auto_eq: auto_eq::AutoEqState,
     /// Last `ExclusiveUnavailable` reason while exclusive mode is requested (shown in
     /// Settings; one toast per distinct reason).
     pub(crate) exclusive_unavailable: Option<String>,
@@ -355,7 +360,10 @@ impl GuiApp {
             ctx.request_repaint_after(seek::SEEK_DEBOUNCE);
             return;
         }
-        if self.ui.folder_picker.is_some() || self.ui.fonts_rx.is_some() || self.ui.drop_rx.is_some() || self.ui.autoeq_picker.is_some() {
+        if self.ui.folder_picker.is_some() || self.ui.fonts_rx.is_some() || self.ui.drop_rx.is_some() || self.ui.autoeq_picker.is_some()
+            || self.auto_eq.picker.is_some()
+            || self.auto_eq.job.is_some()
+        {
             // Results also wake the UI; this is only a safety net.
             ctx.request_repaint_after(Duration::from_millis(500));
         }
@@ -417,6 +425,8 @@ impl App for GuiApp {
         self.poll_loudness();
         self.poll_folder_picker();
         self.poll_autoeq_picker();
+        self.poll_auto_eq_curve_picker();
+        self.poll_auto_eq();
         self.poll_lyric_alignment(ctx);
         self.poll_lyrics_fetch(ctx);
         self.poll_lyric_batch();

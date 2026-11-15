@@ -360,6 +360,17 @@ impl GuiApp {
             UiAction::ImportAutoEqText(text) => {
                 self.import_autoeq_text(&text);
             }
+            UiAction::SetPeqChannelMode(mode) => self.set_peq_channel_mode(mode),
+            UiAction::SetPeqEditSide(side) => self.set_peq_edit_side(side),
+            UiAction::CopyPeqChannel(from) => self.copy_peq_channel(from),
+            UiAction::ToggleAutoEqSection => self.auto_eq.expanded = !self.auto_eq.expanded,
+            UiAction::PickAutoEqCurve(slot) => self.pick_auto_eq_curve(ctx, slot),
+            UiAction::ClearAutoEqCurve(slot) => self.clear_auto_eq_curve(slot),
+            UiAction::SetAutoEqTargetFlat(flat) => self.set_auto_eq_target_flat(flat),
+            UiAction::SetAutoEqSameSource(same) => self.set_auto_eq_same_source(same),
+            UiAction::SetAutoEqOptions(o) => self.set_auto_eq_options(o),
+            UiAction::RunAutoEq => self.start_auto_eq(Some(ctx)),
+            UiAction::UndoAutoEq => self.undo_auto_eq(),
             UiAction::ToggleSignalPath => {
                 self.ui.signal_open = !self.ui.signal_open;
                 if self.ui.signal_open {
