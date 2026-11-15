@@ -475,6 +475,9 @@ fn desktop_lyrics_rows(app: &mut GuiApp, ui: &mut Ui, tr: Tr) {
     settings_row(ui, false, tr.t("settings.desktop_lyrics_title"), None, |ui| {
         save_now |= toggle_switch(ui, &mut dl.show_title).changed();
     });
+    settings_row(ui, false, tr.t("settings.desktop_lyrics_artwork"), Some(tr.t("settings.desktop_lyrics_artwork_hint")), |ui| {
+        save_now |= toggle_switch(ui, &mut dl.show_artwork).changed();
+    });
     let mut lock = dl.locked;
     settings_row(ui, false, tr.t("settings.desktop_lyrics_lock"), Some(tr.t("settings.desktop_lyrics_lock_hint")), |ui| {
         if toggle_switch(ui, &mut lock).changed() {

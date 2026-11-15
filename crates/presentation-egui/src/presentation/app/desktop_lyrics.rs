@@ -22,7 +22,10 @@
 //! The callback must be `Send + Sync + 'static`, so it reads a snapshot ([`Shared`]) that the
 //! main window refreshes on each of its passes: title, the lyrics timeline (`Arc`, with the
 //! user offset and text shift already applied, exactly what the main lyrics view uses),
-//! settings, and the last playback position with the time it was taken. Between main-window
+//! settings, the album art (a clone of the main window's `TextureHandle`, so the texture stays
+//! alive — and drawable by the overlay — until the feed lets go of it, even when the main
+//! window drops it on a track change; all viewports share one painter, see eframe's
+//! `glow_integration.rs`), and the last playback position with the time it was taken. Between main-window
 //! passes the overlay extrapolates the position with the wall clock, so it animates at the
 //! display rate while the main window ticks slowly (or is minimized). Clicks are queued in
 //! [`Shared::actions`] and the main window is woken to apply them.
@@ -70,6 +73,7 @@ use crate::presentation::ui::{
     views::desktop_lyrics::{
         desktop_lyrics_view, DesktopLyricsAction, DesktopLyricsContent, DesktopLyricsProps, DesktopLyricsViewState, OverlayLine,
     },
+    widgets::Tex,
     Accent, ThemeMode, Tr, UiAction,
 };
 
@@ -222,6 +226,11 @@ pub(crate) fn next_repaint(playing: bool, karaoke_line: bool, to_next_line: Opti
     Some(to_next_line.map_or(MAX_IDLE, |ms| Duration::from_millis(ms + 5).min(MAX_IDLE)))
 }
 
+/// Background opacity from the overlay's slider (`None`: not a number).
+pub(crate) fn opacity_from_slider(v: f32) -> Option<f32> {
+    v.is_finite().then(|| v.clamp(0.0, 1.0))
+}
+
 /// Lyrics that only say "instrumental" (LRCLIB, NetEase-style placeholders).
 pub(crate) fn is_instrumental(timeline: &LyricsTimeline) -> bool {
     let texts: Vec<&str> = timeline.lines().iter().filter(|l| !l.is_blank()).map(|l| l.text.as_str()).collect();
@@ -291,6 +300,8 @@ pub(crate) struct Feed {
     /// Playing / buffering (play-pause icon).
     pub playing: bool,
     pub settings: DesktopLyricsSetting,
+    /// The current track's artwork (shared handle: freed only once the feed drops it too).
+    pub artwork: Option<egui::TextureHandle>,
     pub tr: Tr,
 }
 
@@ -308,6 +319,7 @@ impl Default for Feed {
             sample: PositionSample { position_ms: 0, at: Instant::now(), advancing: false, duration_ms: None },
             playing: false,
             settings: DesktopLyricsSetting::default(),
+            artwork: None,
             tr: Tr::default(),
         }
     }
@@ -344,6 +356,7 @@ struct FeedKey {
     advancing: bool,
     paused_at: Option<u64>,
     settings: DesktopLyricsSetting,
+    artwork: Option<egui::TextureId>,
     lang: crate::presentation::ui::Lang,
     theme: (ThemeMode, Accent),
 }
@@ -436,6 +449,9 @@ impl GuiApp {
             if self.ui.desktop_lyrics.open.take().is_some() {
                 // Not shown this pass: egui closes the window at the end of the next one.
                 self.ui.desktop_lyrics.key = None;
+                // Let go of the artwork texture (the overlay reads the feed each pass, so it
+                // never holds a bare id of it).
+                lock(&self.ui.desktop_lyrics.shared).feed.artwork = None;
                 ctx.request_repaint();
             }
             return;
@@ -498,6 +514,7 @@ impl GuiApp {
             advancing: sample.advancing,
             paused_at: (!sample.advancing).then_some(sample.position_ms),
             settings,
+            artwork: self.play_artwork_handle.as_ref().map(|h| h.id()),
             lang: self.tr().lang,
             theme: (self.ui.theme, self.ui.accent),
         };
@@ -526,6 +543,9 @@ impl GuiApp {
         feed.karaoke = karaoke;
         feed.playing = key.playing;
         feed.settings = settings;
+        if feed.artwork.as_ref().map(|h| h.id()) != key.artwork {
+            feed.artwork.clone_from(&self.play_artwork_handle);
+        }
         feed.tr = tr;
         if jump || rebuild {
             sh.shown_pos = None;
@@ -555,6 +575,15 @@ impl GuiApp {
             DesktopLyricsAction::Close => {
                 s.enabled = false;
                 self.save_config();
+            }
+            DesktopLyricsAction::SetOpacity(v) => {
+                if let Some(v) = opacity_from_slider(v) {
+                    s.opacity = v;
+                    // Sent on every drag step: written once the slider rests.
+                    self.save_config_soon();
+                    // The Settings slider shows the new value.
+                    ctx.request_repaint();
+                }
             }
             DesktopLyricsAction::OpenMain => {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(true));
@@ -680,6 +709,8 @@ fn overlay_ui(ui: &mut egui::Ui, class: ViewportClass, shared: &Arc<Mutex<Shared
         playing: feed.playing,
         has_track: feed.has_track,
         force_controls: false,
+        artwork: feed.artwork.as_ref().map(Tex::from),
+        show_artwork: settings.show_artwork,
         tr: feed.tr,
     };
     let mut view = std::mem::take(&mut sh.view);
@@ -1053,6 +1084,72 @@ mod tests {
         lock(&app.ui.desktop_lyrics.shared).geometry = Some(Rect::from_min_size(pos2(40.4, 900.0), vec2(500.0, 120.0)));
         let w = app.build_state_dto().desktop_lyrics_window.unwrap();
         assert_eq!((w.x, w.y, w.width, w.height), (Some(40.0), Some(900.0), 500.0, 120.0));
+    }
+
+    #[test]
+    fn opacity_from_the_overlay_updates_the_config_live_and_saves_debounced() {
+        assert_eq!(opacity_from_slider(0.35), Some(0.35));
+        assert_eq!(opacity_from_slider(1.7), Some(1.0));
+        assert_eq!(opacity_from_slider(-0.2), Some(0.0));
+        assert_eq!(opacity_from_slider(f32::NAN), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut app = super::super::tests::test_app(&ctx, dir.path(), false);
+        app.config.desktop_lyrics.enabled = true;
+        pass(&ctx, &mut app, false);
+        app.config_save_due = None;
+        // A drag sends several values; the last one wins, nothing is written yet.
+        lock(&app.ui.desktop_lyrics.shared).actions.extend([0.5, 0.4, 0.25].map(DesktopLyricsAction::SetOpacity));
+        pass(&ctx, &mut app, false);
+        assert_eq!(app.config.desktop_lyrics.opacity, 0.25);
+        assert!(app.config_save_due.is_some(), "saved debounced, not on every drag step");
+        assert_eq!(lock(&app.ui.desktop_lyrics.shared).feed.settings.opacity, 0.25, "the overlay gets it on the same pass");
+        lock(&app.ui.desktop_lyrics.shared).actions.push(DesktopLyricsAction::SetOpacity(f32::NAN));
+        pass(&ctx, &mut app, false);
+        assert_eq!(app.config.desktop_lyrics.opacity, 0.25, "garbage ignored");
+    }
+
+    #[test]
+    fn artwork_texture_lives_while_the_overlay_can_draw_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut app = super::super::tests::test_app(&ctx, dir.path(), false);
+        app.config.desktop_lyrics.enabled = true;
+        app.play_path = "/music/a.flac".into();
+        // Only the overlay sync (`logic` would replace the stand-in art with the loader's).
+        let sync = |app: &mut GuiApp| {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.sync_desktop_lyrics(ui.ctx()));
+        };
+        sync(&mut app);
+        let alive = |id: egui::TextureId| ctx.tex_manager().read().meta(id).is_some();
+        let tex = ctx.load_texture("cover", egui::ColorImage::filled([4, 4], egui::Color32::RED), egui::TextureOptions::LINEAR);
+        let id = tex.id();
+        // Stand-in for `ensure_play_artwork`.
+        app.play_artwork_handle = Some(tex);
+        let key_before = app.ui.desktop_lyrics.key.clone();
+        sync(&mut app);
+        assert_eq!(lock(&app.ui.desktop_lyrics.shared).feed.artwork.as_ref().map(|t| t.id()), Some(id));
+        assert!(app.ui.desktop_lyrics.key != key_before, "new art repaints the overlay");
+        // Track change: the main window drops its handle; the overlay's copy keeps the
+        // texture until the feed is refreshed.
+        app.play_artwork_handle = None;
+        assert!(alive(id), "still in the feed");
+        sync(&mut app);
+        assert!(lock(&app.ui.desktop_lyrics.shared).feed.artwork.is_none());
+        assert!(!alive(id), "freed once nobody can draw it");
+
+        // Closing the overlay lets go of the art as well.
+        let tex = ctx.load_texture("cover2", egui::ColorImage::filled([4, 4], egui::Color32::BLUE), egui::TextureOptions::LINEAR);
+        let id = tex.id();
+        app.play_artwork_handle = Some(tex);
+        sync(&mut app);
+        app.play_artwork_handle = None;
+        app.config.desktop_lyrics.enabled = false;
+        sync(&mut app);
+        assert!(!alive(id));
     }
 
     #[test]

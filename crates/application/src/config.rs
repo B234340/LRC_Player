@@ -273,6 +273,8 @@ pub struct DesktopLyricsSetting {
     pub show_title: bool,
     /// Click-through: the window ignores the mouse (unlock from the main window).
     pub locked: bool,
+    /// The current track's album art left of the text (hidden in a narrow window).
+    pub show_artwork: bool,
 }
 
 /// Range of [`DesktopLyricsSetting::font_size`].
@@ -280,7 +282,7 @@ pub const DESKTOP_LYRICS_FONT_RANGE: std::ops::RangeInclusive<f32> = 16.0..=72.0
 
 impl Default for DesktopLyricsSetting {
     fn default() -> Self {
-        Self { enabled: false, font_size: 32.0, opacity: 0.7, show_next_line: true, show_title: false, locked: false }
+        Self { enabled: false, font_size: 32.0, opacity: 0.7, show_next_line: true, show_title: false, locked: false, show_artwork: true }
     }
 }
 
@@ -430,6 +432,7 @@ mod tests {
         assert_eq!(d, DesktopLyricsSetting::default());
         assert!(!d.enabled && !d.locked, "off and unlocked by default");
         assert!(d.show_next_line && !d.show_title);
+        assert!(d.show_artwork, "album art on by default");
         assert!(DESKTOP_LYRICS_FONT_RANGE.contains(&d.font_size));
         assert!((0.0..=1.0).contains(&d.opacity));
         let partial: Config = serde_json::from_str(
@@ -438,6 +441,7 @@ mod tests {
         .unwrap();
         assert!(partial.desktop_lyrics.enabled);
         assert!(partial.desktop_lyrics.show_next_line, "missing fields take their defaults");
+        assert!(partial.desktop_lyrics.show_artwork, "configs written before the setting existed show the art");
         let s = partial.desktop_lyrics.sanitized();
         assert_eq!((s.opacity, s.font_size), (1.0, 16.0));
         let back: Config = serde_json::from_str(&serde_json::to_string(&partial).unwrap()).unwrap();

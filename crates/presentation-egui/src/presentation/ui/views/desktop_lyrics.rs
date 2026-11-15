@@ -3,6 +3,11 @@
 //! view (`lyrics_view::paint_karaoke`), the next line smaller and dimmer, an optional title
 //! row, and controls that fade in while the pointer is over the window.
 //!
+//! With album art on, a square cover sits left of the text (also in the no-lyrics and
+//! instrumental states); it is dropped when the window is too narrow ([`artwork_rect`]).
+//! The hover bar's opacity button swaps the buttons for a background opacity slider in place
+//! (the text stays visible below it, so the effect shows while dragging).
+//!
 //! The widget is pure: it draws into the rect it is given and returns
 //! [`DesktopLyricsAction`]s. Window commands (drag, resize) are actions too, so the app maps
 //! them to viewport commands and tests can render the widget inside an ordinary window.
@@ -21,6 +26,7 @@ use crate::presentation::ui::{
     text::{self, TextLang},
     theme,
     views::lyrics_view::{line_text, paint_karaoke},
+    widgets::{cover_uv, slim_slider, SlimSliderStyle, Tex},
 };
 
 /// The current lyric line as the overlay draws it.
@@ -71,6 +77,11 @@ pub struct DesktopLyricsProps<'a> {
     pub has_track: bool,
     /// Show the hover controls regardless of the pointer (screenshots / tests).
     pub force_controls: bool,
+    /// The current track's album art (`None`: a placeholder tile).
+    pub artwork: Option<Tex>,
+    /// The art column is on (setting); still dropped when nothing is loaded or the window is
+    /// too narrow.
+    pub show_artwork: bool,
     pub tr: Tr,
 }
 
@@ -86,6 +97,8 @@ pub enum DesktopLyricsAction {
     /// Bring the main window to the front.
     OpenMain,
     Close,
+    /// New background opacity `0..=1` from the hover bar's slider (sent while dragging).
+    SetOpacity(f32),
     /// Move the window with the pointer (`ViewportCommand::StartDrag`).
     StartDrag,
     /// Resize the window from an edge (`ViewportCommand::BeginResize`).
@@ -98,6 +111,25 @@ pub struct DesktopLyricsViewState {
     line_key: Option<u64>,
     line_since: f64,
     locked_since: Option<f64>,
+    /// The opacity slider replaces the buttons of the hover bar.
+    opacity_open: bool,
+    /// The slider is being dragged (last frame).
+    opacity_dragging: bool,
+    /// Slider value the props do not reflect yet (the main window applies it a pass later).
+    opacity_local: Option<f32>,
+    /// When the pointer left the window while the slider was open.
+    pointer_left_at: Option<f64>,
+}
+
+impl DesktopLyricsViewState {
+    /// Opens / closes the opacity slider (screenshots and tests).
+    pub fn set_opacity_slider_open(&mut self, open: bool) {
+        self.opacity_open = open;
+    }
+
+    pub fn opacity_slider_open(&self) -> bool {
+        self.opacity_open
+    }
 }
 
 /// Fade-in time of a new line.
@@ -115,6 +147,75 @@ const CONTROLS_H: f32 = 30.0;
 const NEXT_RATIO: f32 = 0.6;
 /// A long current line is shrunk down to this fraction of the font size before it wraps.
 const MIN_FIT: f32 = 0.62;
+/// Album art: margin to the window edges, gap to the text, size limits, corner radius.
+const ART_PAD: f32 = 10.0;
+const ART_GAP: f32 = 14.0;
+const ART_MIN: f32 = 40.0;
+const ART_MAX: f32 = 160.0;
+const ART_CORNER: f32 = 6.0;
+/// Narrowest text column next to the art (the art is dropped below this): a 12-character
+/// Japanese line at 32 pt still fits one row after shrinking ([`MIN_FIT`]). Larger text needs
+/// more: about eight characters of the current line.
+const ART_MIN_TEXT_W: f32 = 260.0;
+/// The opacity slider closes this long after the pointer left the window.
+const OPACITY_GRACE_S: f64 = 1.5;
+/// Below this window width the hover bar drops A−/A+.
+const COMPACT_W: f32 = 330.0;
+/// Hover bar buttons: icon size, padding, spacing; separator width.
+const BAR_ICON: f32 = 15.0;
+const BAR_PAD: f32 = 6.5;
+const BAR_SPACING: f32 = 2.0;
+const BAR_SEP: f32 = 9.0;
+
+/// Where the album art goes in a window `full` showing the current line at `font_size`:
+/// a square left of the text, as tall as the window minus margins (at most [`ART_MAX`]),
+/// vertically centered. `None` when the window is too low for it or the text column next to
+/// it would be narrower than [`ART_MIN_TEXT_W`] (or ~8 characters of large text).
+pub fn artwork_rect(full: Rect, font_size: f32) -> Option<Rect> {
+    let side = (full.height() - 2.0 * ART_PAD).min(ART_MAX);
+    if !side.is_finite() || side < ART_MIN {
+        return None;
+    }
+    let text_w = full.width() - ART_PAD - side - ART_GAP - PAD_X;
+    let min_text = ART_MIN_TEXT_W.max(font_size.clamp(10.0, 120.0) * 8.0);
+    (text_w >= min_text).then(|| Rect::from_min_size(pos2(full.left() + ART_PAD, full.center().y - side / 2.0), Vec2::splat(side)))
+}
+
+/// The art while the hover bar is up: when the bar reaches over it, it shrinks into the space
+/// below the bar (bottom-left anchored), like the text moves below the bar. `None`: no room.
+pub(crate) fn artwork_under_bar(art: Rect, bar: Rect, full: Rect) -> Option<Rect> {
+    let pill = bar.expand2(vec2(8.0, 1.0));
+    if pill.left() >= art.right() + 4.0 {
+        return Some(art);
+    }
+    let side = art.height().min(full.bottom() - ART_PAD - (pill.bottom() + 4.0));
+    (side >= ART_MIN * 0.75).then(|| Rect::from_min_size(pos2(art.left(), art.bottom() - side), Vec2::splat(side)))
+}
+
+/// The text column: right of the art, else the window minus its padding.
+fn text_rect(full: Rect, art: Option<Rect>) -> Rect {
+    let inner = full.shrink2(vec2(PAD_X, PAD_Y));
+    match art {
+        Some(a) => Rect::from_min_max(pos2(a.right() + ART_GAP, inner.top()), inner.max),
+        None => inner,
+    }
+}
+
+/// The hover bar: (row rect, compact). Centered over the text column, kept inside the window
+/// (over the art when the column is narrower than the bar).
+pub(crate) fn controls_row(full: Rect, text: Rect) -> (Rect, bool) {
+    let compact = full.width() < COMPACT_W;
+    let side = BAR_ICON + BAR_PAD * 2.0;
+    // prev play next | (A− A+) opacity | lock open close
+    let n = if compact { 7.0 } else { 9.0 };
+    let groups = if compact { 1.0 } else { 2.0 };
+    let row_w = n * side + (n - 1.0) * BAR_SPACING + groups * BAR_SEP;
+    let half = row_w / 2.0 + 8.0; // pill margin
+    let lo = full.left() + 4.0 + half;
+    let hi = full.right() - 4.0 - half;
+    let cx = if lo <= hi { text.center().x.clamp(lo, hi) } else { full.center().x };
+    (Rect::from_center_size(pos2(cx, full.top() + 6.0 + CONTROLS_H / 2.0), vec2(row_w, CONTROLS_H)), compact)
+}
 
 /// One text row of the window.
 struct Row {
@@ -203,8 +304,11 @@ pub fn desktop_lyrics_view(ui: &mut Ui, props: &DesktopLyricsProps<'_>, state: &
 
     // ---- hover (geometric: buttons and their tooltips never flip it) ----
     let pointer_in = !props.locked && ui.ctx().pointer_hover_pos().is_some_and(|p| full.contains(p));
-    let show_controls = !props.locked && (pointer_in || props.force_controls);
+    update_opacity_slider(ui, props, state, pointer_in, now);
+    // The open slider keeps the bar up (a drag may leave the window).
+    let show_controls = !props.locked && (pointer_in || props.force_controls || state.opacity_open);
     let t = ui.ctx().animate_bool_with_time(id.with("hover"), show_controls, 0.15);
+    let opacity = state.opacity_local.unwrap_or(props.opacity).clamp(0.0, 1.0);
 
     // ---- window interaction (under the controls, which are added later) ----
     if !props.locked {
@@ -225,8 +329,9 @@ pub fn desktop_lyrics_view(ui: &mut Ui, props: &DesktopLyricsProps<'_>, state: &
 
     // ---- background ----
     let painter = ui.painter_at(full);
-    // While hovered the window gets at least a faint background, so its bounds are visible.
-    let bg_alpha = props.opacity.clamp(0.0, 1.0).max(0.45 * t);
+    // While hovered the window gets at least a faint background, so its bounds are visible —
+    // except while the opacity slider is open: then it shows exactly the chosen value.
+    let bg_alpha = if state.opacity_open { opacity } else { opacity.max(0.45 * t) };
     if bg_alpha > 0.0 {
         painter.rect_filled(full, CORNER, theme::with_alpha(col.bg, bg_alpha));
     }
@@ -251,10 +356,25 @@ pub fn desktop_lyrics_view(ui: &mut Ui, props: &DesktopLyricsProps<'_>, state: &
         ui.ctx().request_repaint();
     }
 
-    // ---- text ----
-    let inner = full.shrink2(vec2(PAD_X, PAD_Y));
-    let wrap = inner.width().max(40.0);
+    // ---- album art ----
     let size = props.font_size.clamp(10.0, 120.0);
+    let art = (props.show_artwork && props.has_track && props.content != DesktopLyricsContent::NoTrack)
+        .then(|| artwork_rect(full, size))
+        .flatten();
+    // ---- text ----
+    let inner = text_rect(full, art);
+    if let Some(r) = art {
+        // Out of the hover bar's way (the column keeps its place).
+        let (bar, _) = controls_row(full, inner);
+        let (shown, a) = match artwork_under_bar(r, bar, full) {
+            Some(h) => (lerp_rect(r, h, t), 1.0),
+            None => (r, 1.0 - t),
+        };
+        if a > 0.01 {
+            paint_art(ui, shown, props.artwork, &col, pal.dark, a);
+        }
+    }
+    let wrap = inner.width().max(40.0);
     let next_size = (size * NEXT_RATIO).max(12.0);
     let title_line = if props.artist.trim().is_empty() {
         props.title.to_owned()
@@ -379,22 +499,88 @@ pub fn desktop_lyrics_view(ui: &mut Ui, props: &DesktopLyricsProps<'_>, state: &
 
     // ---- controls ----
     if t > 0.0 && !props.locked {
-        controls(ui, props, full, t, &col, &mut actions);
+        let (row, compact) = controls_row(full, inner);
+        controls(ui, props, state, opacity, full, row, compact, t, &col, &mut actions);
     }
     actions
 }
 
-fn controls(ui: &mut Ui, props: &DesktopLyricsProps<'_>, full: Rect, t: f32, col: &Colors, actions: &mut Vec<DesktopLyricsAction>) {
+/// Opens / closes bookkeeping of the opacity slider: closed while locked, after
+/// [`OPACITY_GRACE_S`] with the pointer outside the window (and no drag), or on Escape; the
+/// local value is dropped once the props caught up.
+fn update_opacity_slider(ui: &Ui, props: &DesktopLyricsProps<'_>, state: &mut DesktopLyricsViewState, pointer_in: bool, now: f64) {
+    if props.locked || (state.opacity_open && ui.input(|i| i.key_pressed(egui::Key::Escape))) {
+        state.opacity_open = false;
+    }
+    if state.opacity_open {
+        if pointer_in || state.opacity_dragging || props.force_controls {
+            state.pointer_left_at = None;
+        } else {
+            let left = *state.pointer_left_at.get_or_insert(now);
+            let remaining = OPACITY_GRACE_S - (now - left);
+            if remaining <= 0.0 {
+                state.opacity_open = false;
+            } else {
+                // One wake-up to close it (no animation runs meanwhile).
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(remaining + 0.02));
+            }
+        }
+    }
+    if !state.opacity_open {
+        state.pointer_left_at = None;
+        state.opacity_dragging = false;
+    }
+    if let Some(v) = state.opacity_local {
+        let caught_up = (v - props.opacity).abs() < 0.005;
+        if (caught_up && !state.opacity_dragging) || !state.opacity_open {
+            state.opacity_local = None;
+        }
+    }
+}
+
+/// The album art (or a quiet placeholder tile) with a hairline edge, so a white cover keeps
+/// its shape on the light panel and a black one on the dark panel.
+fn paint_art(ui: &Ui, rect: Rect, tex: Option<Tex>, col: &Colors, dark: bool, alpha: f32) {
+    let painter = ui.painter();
+    match tex {
+        Some(t) => {
+            egui::Image::new((t.id, rect.size()))
+                .uv(cover_uv(t.size, rect.size()))
+                .corner_radius(ART_CORNER)
+                .tint(Color32::WHITE.gamma_multiply(alpha))
+                .paint_at(ui, rect);
+        }
+        None => {
+            painter.rect_filled(rect, ART_CORNER, theme::with_alpha(col.bg, 0.5 * alpha));
+            painter.rect_filled(rect, ART_CORNER, theme::with_alpha(col.text, 0.07 * alpha));
+            let icon = (rect.width() * 0.36).clamp(14.0, 48.0);
+            paint_icon(painter, Rect::from_center_size(rect.center(), Vec2::splat(icon)), Icon::Note, theme::with_alpha(col.text, 0.32 * alpha));
+        }
+    }
+    let edge = if dark { Color32::from_white_alpha(26) } else { Color32::from_black_alpha(24) };
+    painter.rect_stroke(rect, ART_CORNER, Stroke::new(1.0, edge.gamma_multiply(alpha)), egui::StrokeKind::Inside);
+}
+
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    Rect::from_min_max(a.min.lerp(b.min, t), a.max.lerp(b.max, t))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn controls(
+    ui: &mut Ui,
+    props: &DesktopLyricsProps<'_>,
+    state: &mut DesktopLyricsViewState,
+    opacity: f32,
+    full: Rect,
+    row: Rect,
+    compact: bool,
+    t: f32,
+    col: &Colors,
+    actions: &mut Vec<DesktopLyricsAction>,
+) {
     let pal = theme::palette(ui);
     let tr = props.tr;
-    let compact = full.width() < 330.0;
-    let (icon, pad, spacing) = (15.0, 6.5, 2.0);
-    let side = icon + pad * 2.0;
-    let n = if compact { 6.0 } else { 8.0 };
-    let groups = if compact { 1.0 } else { 2.0 };
-    let sep = 9.0;
-    let row_w = n * side + (n - 1.0) * spacing + groups * sep;
-    let row = Rect::from_center_size(pos2(full.center().x, full.top() + 6.0 + CONTROLS_H / 2.0), vec2(row_w, CONTROLS_H));
+    let (icon, pad, spacing, sep) = (BAR_ICON, BAR_PAD, BAR_SPACING, BAR_SEP);
     let pill = row.expand2(vec2(8.0, 1.0));
     let painter = ui.painter_at(full);
     painter.rect_filled(pill, CONTROLS_H / 2.0 + 1.0, theme::with_alpha(col.bg, 0.94 * t));
@@ -404,28 +590,85 @@ fn controls(ui: &mut Ui, props: &DesktopLyricsProps<'_>, full: Rect, t: f32, col
     cui.spacing_mut().item_spacing.x = spacing;
     let style = IconButtonStyle { color: Some(col.text), hover_fill: Some(pal.hover), padding: Some(pad), ..Default::default() };
     let enabled = IconButtonStyle { enabled: props.has_track, ..style };
-    let mut button = |ui: &mut Ui, icon_kind: Icon, st: IconButtonStyle, tip: &str, action: DesktopLyricsAction| {
+
+    if state.opacity_open {
+        opacity_slider_row(&mut cui, props, state, opacity, row, style, col, actions);
+        return;
+    }
+
+    let mut toggle_opacity = false;
+    let mut button = |ui: &mut Ui, icon_kind: Icon, st: IconButtonStyle, tip: &str, action: Option<DesktopLyricsAction>| {
         if icon_button_ex(ui, icon_kind, icon, st, tip).clicked() {
-            actions.push(action);
+            match action {
+                Some(a) => actions.push(a),
+                None => toggle_opacity = true,
+            }
         }
     };
     let separator = |ui: &mut Ui| {
         let (r, _) = ui.allocate_exact_size(vec2(sep - spacing, CONTROLS_H), Sense::hover());
         ui.painter().vline(r.center().x, (r.center().y - 7.0)..=(r.center().y + 7.0), Stroke::new(1.0, theme::with_alpha(pal.border_strong, t)));
     };
-    button(&mut cui, Icon::Previous, enabled, tr.t("transport.previous"), DesktopLyricsAction::Previous);
+    button(&mut cui, Icon::Previous, enabled, tr.t("transport.previous"), Some(DesktopLyricsAction::Previous));
     let (play_icon, play_tip) = if props.playing { (Icon::Pause, tr.t("transport.pause")) } else { (Icon::Play, tr.t("transport.play")) };
-    button(&mut cui, play_icon, style, play_tip, DesktopLyricsAction::PlayPause);
-    button(&mut cui, Icon::Next, enabled, tr.t("transport.next"), DesktopLyricsAction::Next);
+    button(&mut cui, play_icon, style, play_tip, Some(DesktopLyricsAction::PlayPause));
+    button(&mut cui, Icon::Next, enabled, tr.t("transport.next"), Some(DesktopLyricsAction::Next));
     separator(&mut cui);
     if !compact {
-        button(&mut cui, Icon::TextSmaller, style, tr.t("lyrics.font_smaller"), DesktopLyricsAction::FontSmaller);
-        button(&mut cui, Icon::TextLarger, style, tr.t("lyrics.font_larger"), DesktopLyricsAction::FontLarger);
+        button(&mut cui, Icon::TextSmaller, style, tr.t("lyrics.font_smaller"), Some(DesktopLyricsAction::FontSmaller));
+        button(&mut cui, Icon::TextLarger, style, tr.t("lyrics.font_larger"), Some(DesktopLyricsAction::FontLarger));
+    }
+    button(&mut cui, Icon::Opacity, style, tr.t("desktop_lyrics.opacity"), None);
+    if !compact {
         separator(&mut cui);
     }
-    button(&mut cui, Icon::Lock, style, tr.t("desktop_lyrics.lock"), DesktopLyricsAction::Lock);
-    button(&mut cui, Icon::OpenWindow, style, tr.t("desktop_lyrics.open_main"), DesktopLyricsAction::OpenMain);
-    button(&mut cui, Icon::Close, style, tr.t("desktop_lyrics.close"), DesktopLyricsAction::Close);
+    button(&mut cui, Icon::Lock, style, tr.t("desktop_lyrics.lock"), Some(DesktopLyricsAction::Lock));
+    button(&mut cui, Icon::OpenWindow, style, tr.t("desktop_lyrics.open_main"), Some(DesktopLyricsAction::OpenMain));
+    button(&mut cui, Icon::Close, style, tr.t("desktop_lyrics.close"), Some(DesktopLyricsAction::Close));
+    if toggle_opacity {
+        state.opacity_open = true;
+        state.pointer_left_at = None;
+    }
+}
+
+/// The hover bar while adjusting the background: back button, icon, slider, value.
+#[allow(clippy::too_many_arguments)]
+fn opacity_slider_row(
+    ui: &mut Ui,
+    props: &DesktopLyricsProps<'_>,
+    state: &mut DesktopLyricsViewState,
+    opacity: f32,
+    row: Rect,
+    style: IconButtonStyle,
+    col: &Colors,
+    actions: &mut Vec<DesktopLyricsAction>,
+) {
+    let pal = theme::palette(ui);
+    let tr = props.tr;
+    if icon_button_ex(ui, Icon::ChevronLeft, BAR_ICON, style, tr.t("desktop_lyrics.opacity_back")).clicked() {
+        state.opacity_open = false;
+    }
+    let (r, _) = ui.allocate_exact_size(vec2(18.0, CONTROLS_H), Sense::hover());
+    paint_icon(ui.painter(), Rect::from_center_size(r.center(), Vec2::splat(14.0)), Icon::Opacity, theme::with_alpha(col.text, 0.8));
+    let pct = format!("{:.0}%", opacity * 100.0);
+    let label = ui.fonts_mut(|f| f.layout_no_wrap("100%".to_owned(), FontId::proportional(12.5), col.text));
+    let label_w = label.size().x + 6.0;
+    let used = ui.min_rect().width() + ui.spacing().item_spacing.x * 2.0;
+    let width = (row.width() - used - label_w).max(60.0);
+    let out = slim_slider(ui, ui.id().with("desktop_lyrics_opacity"), opacity, width, SlimSliderStyle::themed(&pal));
+    let out_resp = out.response.on_hover_text(tr.t("desktop_lyrics.opacity"));
+    state.opacity_dragging = out_resp.dragged();
+    if let Some(v) = out.dragging.or(out.committed) {
+        // Whole percents: a drag sends a value only when it changes by one.
+        let v = (v * 100.0).round() / 100.0;
+        if (v - opacity).abs() >= 0.005 || out.committed.is_some() {
+            state.opacity_local = Some(v);
+            actions.push(DesktopLyricsAction::SetOpacity(v));
+        }
+    }
+    let (lr, _) = ui.allocate_exact_size(vec2(label_w, CONTROLS_H), Sense::hover());
+    let g = ui.fonts_mut(|f| f.layout_no_wrap(pct, FontId::proportional(12.5), col.text));
+    ui.painter().galley(pos2(lr.right() - g.size().x, lr.center().y - g.size().y / 2.0), g, col.text);
 }
 
 #[cfg(test)]
@@ -446,8 +689,27 @@ mod tests {
             playing: true,
             has_track: true,
             force_controls: false,
+            artwork: None,
+            show_artwork: true,
             tr: Tr::JA,
         }
+    }
+
+    const W: Rect = Rect { min: pos2(0.0, 0.0), max: pos2(640.0, 140.0) };
+    const SIDE: f32 = BAR_ICON + BAR_PAD * 2.0;
+
+    fn click(ctx: &Context, at: egui::Pos2, p: &DesktopLyricsProps<'_>, st: &mut DesktopLyricsViewState) -> Vec<DesktopLyricsAction> {
+        run(ctx, vec![Event::PointerMoved(at)], p, st);
+        let mut got = Vec::new();
+        for pressed in [true, false] {
+            got.extend(run(ctx, vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() }], p, st));
+        }
+        got
+    }
+
+    /// The hover bar of the test window (art on, 32 pt).
+    fn bar() -> Rect {
+        controls_row(W, text_rect(W, artwork_rect(W, 32.0))).0
     }
 
     fn run(ctx: &Context, events: Vec<Event>, p: &DesktopLyricsProps<'_>, st: &mut DesktopLyricsViewState) -> Vec<DesktopLyricsAction> {
@@ -471,16 +733,99 @@ mod tests {
         for _ in 0..20 {
             run(&ctx, vec![Event::PointerMoved(pos2(320.0, 70.0))], &p, &mut st);
         }
-        // The close button is the right-most control of the row centered at the top.
-        let side = 15.0 + 13.0;
-        let row_w = 8.0 * side + 7.0 * 2.0 + 2.0 * 9.0;
-        let close = pos2(320.0 + row_w / 2.0 - side / 2.0, 6.0 + CONTROLS_H / 2.0);
-        run(&ctx, vec![Event::PointerMoved(close)], &p, &mut st);
-        let mut got = Vec::new();
-        for pressed in [true, false] {
-            got.extend(run(&ctx, vec![Event::PointerButton { pos: close, button: PointerButton::Primary, pressed, modifiers: Default::default() }], &p, &mut st));
+        // The close button is the right-most control of the row at the top.
+        let row = bar();
+        assert_eq!(row.width(), 9.0 * SIDE + 8.0 * BAR_SPACING + 2.0 * BAR_SEP, "9 buttons, 2 separators");
+        let close = pos2(row.right() - SIDE / 2.0, row.center().y);
+        assert_eq!(click(&ctx, close, &p, &mut st), vec![DesktopLyricsAction::Close]);
+    }
+
+    #[test]
+    fn art_goes_left_of_the_text_unless_the_window_is_narrow() {
+        let r = artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 144.0)), 32.0).expect("default size shows the art");
+        assert_eq!(r, Rect::from_min_size(pos2(ART_PAD, ART_PAD), Vec2::splat(124.0)), "square, window height minus margins");
+        let text = text_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 144.0)), Some(r));
+        assert_eq!((text.left(), text.right()), (r.right() + ART_GAP, 640.0 - PAD_X));
+        // Too narrow for a reasonable text column: no art (minimum window size included).
+        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(260.0, 72.0)), 32.0), None);
+        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 110.0)), 32.0), None);
+        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(390.0, 144.0)), 32.0), None);
+        assert!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 120.0)), 32.0).is_some());
+        // Large text needs a wider column.
+        assert!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 144.0)), 48.0).is_some());
+        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 144.0)), 72.0), None);
+        assert!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(760.0, 144.0)), 72.0).is_some());
+        // A tall window caps the art and centers it vertically.
+        let tall = Rect::from_min_size(pos2(100.0, 50.0), vec2(800.0, 400.0));
+        let r = artwork_rect(tall, 32.0).unwrap();
+        assert_eq!((r.width(), r.center().y, r.left()), (ART_MAX, tall.center().y, 100.0 + ART_PAD));
+        // Too low for a cover.
+        assert_eq!(artwork_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 50.0)), 32.0), None);
+    }
+
+    #[test]
+    fn hover_bar_fits_the_minimum_window_and_sits_over_the_text() {
+        let min = Rect::from_min_size(pos2(0.0, 0.0), crate::presentation::app::desktop_lyrics::MIN_SIZE);
+        let (row, compact) = controls_row(min, text_rect(min, artwork_rect(min, 32.0)));
+        assert!(compact);
+        assert_eq!(row.width(), 7.0 * SIDE + 6.0 * BAR_SPACING + BAR_SEP, "opacity button included");
+        assert!(min.shrink(4.0).contains_rect(row.expand2(vec2(8.0, 0.0))), "{row:?} in {min:?}");
+        // With the art, the bar is centered over the text column.
+        let text = text_rect(W, artwork_rect(W, 32.0));
+        assert_eq!(bar().center().x, text.center().x);
+        assert_eq!(artwork_under_bar(artwork_rect(W, 32.0).unwrap(), bar(), W), artwork_rect(W, 32.0), "no overlap: stays");
+        // A column narrower than the bar: the bar stays inside the window and reaches over the
+        // art, which shrinks below it.
+        let narrow = Rect::from_min_size(pos2(0.0, 0.0), vec2(430.0, 144.0));
+        let art = artwork_rect(narrow, 32.0).expect("art at 430");
+        let (row, _) = controls_row(narrow, text_rect(narrow, Some(art)));
+        assert!(narrow.shrink(4.0).contains_rect(row.expand2(vec2(8.0, 0.0))));
+        assert!(row.left() - 8.0 < art.right(), "overlaps");
+        let under = artwork_under_bar(art, row, narrow).unwrap();
+        assert!(under.top() > row.bottom() && under.bottom() == art.bottom() && under.width() == under.height(), "{under:?}");
+    }
+
+    #[test]
+    fn opacity_slider_opens_in_the_bar_and_stays_while_open() {
+        let ctx = Context::default();
+        let mut st = DesktopLyricsViewState::default();
+        let p = props(DesktopLyricsContent::NoLyrics);
+        for _ in 0..20 {
+            run(&ctx, vec![Event::PointerMoved(pos2(320.0, 90.0))], &p, &mut st);
         }
-        assert_eq!(got, vec![DesktopLyricsAction::Close]);
+        // prev play next | A− A+ [opacity] | …
+        let row = bar();
+        let button = pos2(row.left() + 5.0 * (SIDE + BAR_SPACING) + BAR_SEP + SIDE / 2.0, row.center().y);
+        assert!(click(&ctx, button, &p, &mut st).is_empty(), "handled inside the overlay");
+        assert!(st.opacity_slider_open());
+        run(&ctx, vec![], &p, &mut st);
+        // Left end of the slider (after the back button and the icon): 0 %.
+        let slider_left = pos2(row.left() + SIDE + 18.0 + 2.0 * BAR_SPACING + 2.0, row.center().y);
+        let got = click(&ctx, slider_left, &p, &mut st);
+        assert_eq!(got.last(), Some(&DesktopLyricsAction::SetOpacity(0.0)), "{got:?}");
+        assert_eq!(st.opacity_local, Some(0.0), "the background follows before the main window answers");
+        // Pointer out of the window: still open for a moment, then closed.
+        run(&ctx, vec![Event::PointerGone], &p, &mut st);
+        for _ in 0..10 {
+            run(&ctx, vec![], &p, &mut st);
+        }
+        assert!(st.opacity_slider_open(), "no fade-out right after leaving");
+        for _ in 0..120 {
+            run(&ctx, vec![], &p, &mut st);
+        }
+        assert!(!st.opacity_slider_open(), "closed after the grace period");
+        assert_eq!(st.opacity_local, None, "back to the configured value");
+        // The back button closes it too; locking closes it.
+        st.set_opacity_slider_open(true);
+        for _ in 0..3 {
+            run(&ctx, vec![Event::PointerMoved(pos2(320.0, 90.0))], &p, &mut st);
+        }
+        click(&ctx, pos2(row.left() + SIDE / 2.0, row.center().y), &p, &mut st);
+        assert!(!st.opacity_slider_open());
+        st.set_opacity_slider_open(true);
+        let locked = DesktopLyricsProps { locked: true, ..props(DesktopLyricsContent::NoLyrics) };
+        run(&ctx, vec![], &locked, &mut st);
+        assert!(!st.opacity_slider_open());
     }
 
     #[test]
