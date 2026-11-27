@@ -4,7 +4,7 @@
 //! `Copy`/allocation-free so it can be handed to the audio callback through a lock-free queue.
 
 use super::crossfeed::{CrossfeedCoeffs, CrossfeedState};
-use super::peq::{FilterKind, ParametricEq, PeqCoeffs, PeqState};
+use super::peq::{FilterKind, ParametricEq, PeqCoeffs, PeqSide, PeqState};
 
 /// Number of graphic-EQ bands.
 pub const EQ_BANDS: usize = 10;
@@ -360,8 +360,10 @@ impl ChainCoeffs {
 pub(crate) struct ChainState {
     c: ChainCoeffs,
     active: bool,
-    /// Product of both preamps and the headroom gain.
-    gain: f32,
+    /// Product of both preamps and the headroom gain, for the left (index 0, also mono and
+    /// channels >= 2) and the right channel (index 1); they differ only with separate PEQ
+    /// channels.
+    gain: [f32; 2],
     eq: EqState,
     peq: PeqState,
     xf: CrossfeedState,
@@ -372,7 +374,7 @@ impl ChainState {
         Self {
             c: ChainCoeffs::BYPASS,
             active: false,
-            gain: 1.0,
+            gain: [1.0; 2],
             eq: EqState::new(),
             peq: PeqState::new(),
             xf: CrossfeedState::new(),
@@ -382,7 +384,7 @@ impl ChainState {
     /// Switches coefficients; filters that were idle start from a clean state.
     pub(crate) fn set(&mut self, c: ChainCoeffs) {
         self.eq.set(c.eq);
-        if self.c.peq.count == 0 && c.peq.count > 0 {
+        if !self.c.peq.has_filters() && c.peq.has_filters() {
             self.peq.reset();
         }
         if !self.c.xfeed.active && c.xfeed.active {
@@ -390,7 +392,7 @@ impl ChainState {
         }
         self.c = c;
         self.active = c.active();
-        self.gain = c.eq.preamp * c.peq.preamp * c.headroom;
+        self.gain = [0, 1].map(|i| c.eq.preamp * c.peq.sets[i].preamp * c.headroom);
     }
 
     #[inline]
@@ -407,9 +409,9 @@ impl ChainState {
     #[inline]
     pub(crate) fn process_frame(&mut self, frame: &mut [f32]) {
         let eq_on = self.c.eq.band_mask != 0;
-        let peq_on = self.c.peq.count != 0;
-        let g = self.gain;
+        let peq_on = self.c.peq.has_filters();
         for (ch, s) in frame.iter_mut().enumerate() {
+            let g = self.gain[usize::from(ch == 1)];
             let mut y = *s;
             if eq_on {
                 y = self.eq.process(ch, y);
@@ -433,23 +435,29 @@ impl ChainState {
 const HEADROOM_GRID: usize = 512;
 
 /// Maximum of the combined magnitude response (dB) of the graphic EQ and the parametric EQ
-/// (filters only, preamps excluded) between 10 Hz and 0.49 fs.
+/// of `side` (filters only, preamps excluded) between 10 Hz and 0.49 fs.
 ///
 /// The cascade's response is the sum (in dB) of every biquad's exact response, evaluated on a
 /// 512-point log grid plus every filter's own centre frequency (where peaks and shelf corners
 /// sit), so narrow high-Q peaks are not missed between grid points. Interacting filters
 /// (overlapping boosts, a cut inside a boost) are therefore accounted for exactly, unlike the
 /// cruder "sum of all positive gains" bound which over-attenuates.
-pub(crate) fn max_boost_db(eq: &EqSettings, peq: &ParametricEq, sample_rate: u32) -> f32 {
+pub(crate) fn max_boost_db(
+    eq: &EqSettings,
+    peq: &ParametricEq,
+    side: PeqSide,
+    sample_rate: u32,
+) -> f32 {
     let eqc = EqCoeffs::from_settings(eq, sample_rate);
     let peqc = PeqCoeffs::from_settings(peq, sample_rate);
+    let set = peqc.side(side);
     let filters: Vec<BiquadCoeffs> = eqc
         .bands
         .iter()
         .enumerate()
         .filter(|(i, _)| eqc.band_mask & (1 << i) != 0)
         .map(|(_, b)| *b)
-        .chain(peqc.filters[..peqc.count].iter().copied())
+        .chain(set.used().iter().copied())
         .collect();
     if filters.is_empty() || sample_rate == 0 {
         return 0.0;
@@ -463,7 +471,11 @@ pub(crate) fn max_boost_db(eq: &EqSettings, peq: &ParametricEq, sample_rate: u32
         freqs.extend(EQ_FREQUENCIES_HZ.iter().copied());
     }
     if peqc.active {
-        freqs.extend(peq.used_filters().iter().map(|f| f.sanitized().freq_hz));
+        freqs.extend(
+            peq.used_filters(side)
+                .iter()
+                .map(|f| f.sanitized().freq_hz),
+        );
     }
     freqs
         .into_iter()
@@ -479,7 +491,8 @@ pub(crate) fn max_boost_db(eq: &EqSettings, peq: &ParametricEq, sample_rate: u32
 
 /// Auto-headroom gain (dB, <= 0): lowers the level by the largest boost of the active EQs net
 /// of their preamps (`max_boost + eq_preamp + peq_preamp`), so EQ boosts do not drive the
-/// limiter. 0 when that sum is not positive (the preamps already leave enough room).
+/// limiter. 0 when that sum is not positive (the preamps already leave enough room). With
+/// separate PEQ channels this is the worst case over both channels (one gain for all).
 pub(crate) fn auto_headroom_db(eq: &EqSettings, peq: &ParametricEq, sample_rate: u32) -> f32 {
     let eqc = EqCoeffs::from_settings(eq, sample_rate);
     let peqc = PeqCoeffs::from_settings(peq, sample_rate);
@@ -487,9 +500,15 @@ pub(crate) fn auto_headroom_db(eq: &EqSettings, peq: &ParametricEq, sample_rate:
         return 0.0;
     }
     let pre = |active: bool, lin: f32| if active { 20.0 * lin.log10() } else { 0.0 };
-    let need = max_boost_db(eq, peq, sample_rate)
-        + pre(eqc.active, eqc.preamp)
-        + pre(peqc.active, peqc.preamp);
+    let need = peq
+        .sides()
+        .iter()
+        .map(|&side| {
+            max_boost_db(eq, peq, side, sample_rate)
+                + pre(eqc.active, eqc.preamp)
+                + pre(peqc.active, peqc.side(side).preamp)
+        })
+        .fold(f32::MIN, f32::max);
     if need > 0.005 {
         -need
     } else {
@@ -499,30 +518,33 @@ pub(crate) fn auto_headroom_db(eq: &EqSettings, peq: &ParametricEq, sample_rate:
 
 // ----- response preview (UI) ----------------------------------------------------------------
 
-/// Combined magnitude response (dB) of the graphic EQ and the parametric EQ at each of
-/// `freqs`, including both preamps (each only when its EQ is active), evaluated from the exact
-/// coefficients the renderer uses at `sample_rate`. Auto headroom is not included (see
-/// [`auto_headroom_preview_db`]). A disabled/flat EQ contributes 0 dB. Frequencies at or above
-/// Nyquist are evaluated as-is (the biquad response there is still defined).
+/// Combined magnitude response (dB) of the graphic EQ and the parametric EQ of `side` at each
+/// of `freqs`, including both preamps (each only when its EQ is active), evaluated from the
+/// exact coefficients the renderer uses at `sample_rate`. With linked PEQ channels both sides
+/// give the same result. Auto headroom is not included (see [`auto_headroom_preview_db`]). A
+/// disabled/flat EQ contributes 0 dB. Frequencies at or above Nyquist are evaluated as-is (the
+/// biquad response there is still defined).
 pub fn combined_response_db(
     eq: &EqSettings,
     peq: &ParametricEq,
+    side: PeqSide,
     sample_rate: u32,
     freqs: &[f32],
 ) -> Vec<f32> {
     let sample_rate = sample_rate.max(1);
     let eqc = EqCoeffs::from_settings(eq, sample_rate);
     let peqc = PeqCoeffs::from_settings(peq, sample_rate);
+    let set = peqc.side(side);
     let filters: Vec<BiquadCoeffs> = eqc
         .bands
         .iter()
         .enumerate()
         .filter(|(i, _)| eqc.active && eqc.band_mask & (1 << i) != 0)
         .map(|(_, b)| *b)
-        .chain(peqc.filters[..peqc.count].iter().copied())
+        .chain(set.used().iter().copied())
         .collect();
     let pre = |active: bool, lin: f32| if active { 20.0 * lin.log10() } else { 0.0 };
-    let preamps = pre(eqc.active, eqc.preamp) + pre(peqc.active, peqc.preamp);
+    let preamps = pre(eqc.active, eqc.preamp) + pre(peqc.active, set.preamp);
     freqs
         .iter()
         .map(|&f| {
@@ -585,7 +607,13 @@ mod tests {
         let fs = 48_000;
         let freqs = [20.0, 100.0, 1000.0, 5000.0, 20_000.0];
         // Everything off: flat.
-        let flat = combined_response_db(&EqSettings::default(), &ParametricEq::default(), fs, &freqs);
+        let flat = combined_response_db(
+            &EqSettings::default(),
+            &ParametricEq::default(),
+            PeqSide::Left,
+            fs,
+            &freqs,
+        );
         assert_eq!(flat, vec![0.0; freqs.len()]);
         // Graphic EQ: +6 dB at 1 kHz, preamp -2 dB.
         let mut eq = EqSettings {
@@ -594,7 +622,7 @@ mod tests {
             ..Default::default()
         };
         eq.bands_db[5] = 6.0;
-        let r = combined_response_db(&eq, &ParametricEq::default(), fs, &freqs);
+        let r = combined_response_db(&eq, &ParametricEq::default(), PeqSide::Left, fs, &freqs);
         assert!((r[2] - 4.0).abs() < 0.1, "{r:?}");
         assert!((r[0] + 2.0).abs() < 0.1, "{r:?}");
         // Plus a PEQ peak of -4 dB at 1 kHz with a -1 dB preamp, and a 5 kHz high-pass.
@@ -615,8 +643,9 @@ mod tests {
                     q: std::f32::consts::FRAC_1_SQRT_2,
                 },
             ],
+            ..Default::default()
         };
-        let r = combined_response_db(&eq, &peq, fs, &freqs);
+        let r = combined_response_db(&eq, &peq, PeqSide::Left, fs, &freqs);
         // 1 kHz: +6 - 2 - 4 - 1 = -1 dB, minus the high-pass skirt (~-28 dB two octaves down).
         let hp_1k = r[2] - (-1.0);
         assert!(hp_1k < -20.0 && hp_1k > -35.0, "{r:?}");
@@ -625,20 +654,75 @@ mod tests {
             enabled: true,
             preamp_db: -1.0,
             filters: vec![peq.filters[1]],
+            ..Default::default()
         };
-        let at_fc = combined_response_db(&EqSettings::default(), &hp_only, fs, &[5000.0])[0];
+        let at_fc =
+            combined_response_db(&EqSettings::default(), &hp_only, PeqSide::Left, fs, &[5000.0])
+                [0];
         assert!((at_fc - (-1.0 - 3.01)).abs() < 0.05, "{at_fc}");
         // A disabled PEQ contributes nothing, preamp included.
         let off = ParametricEq {
             enabled: false,
             ..peq.clone()
         };
-        let r2 = combined_response_db(&eq, &off, fs, &freqs);
+        let r2 = combined_response_db(&eq, &off, PeqSide::Left, fs, &freqs);
         assert!((r2[2] - 4.0).abs() < 0.1, "{r2:?}");
         // Matches the per-biquad sum used by auto headroom.
-        let boost = max_boost_db(&eq, &ParametricEq::default(), fs);
+        let boost = max_boost_db(&eq, &ParametricEq::default(), PeqSide::Left, fs);
         assert!((boost - 6.0).abs() < 0.1);
         assert!((auto_headroom_preview_db(&eq, &ParametricEq::default(), fs) + 4.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn separate_peq_channels_in_response_headroom_and_chain() {
+        use super::super::peq::{PeqChannel, PeqChannelMode, PeqFilter};
+        let fs = 48_000;
+        let pk = |freq_hz, gain_db| PeqFilter {
+            kind: FilterKind::Peak,
+            freq_hz,
+            gain_db,
+            q: 1.0,
+        };
+        // L: +3 dB at 1 kHz, R: +8 dB at 4 kHz with a -1 dB preamp.
+        let mut peq = ParametricEq {
+            enabled: true,
+            filters: vec![pk(1000.0, 3.0)],
+            channel_mode: PeqChannelMode::Separate,
+            right: PeqChannel {
+                preamp_db: -1.0,
+                filters: vec![pk(4000.0, 8.0)],
+            },
+            ..Default::default()
+        };
+        let eq = EqSettings::default();
+        let freqs = [1000.0, 4000.0];
+        let l = combined_response_db(&eq, &peq, PeqSide::Left, fs, &freqs);
+        let r = combined_response_db(&eq, &peq, PeqSide::Right, fs, &freqs);
+        assert!((l[0] - 3.0).abs() < 0.05 && l[1].abs() < 1.5, "{l:?}");
+        assert!((r[1] - 7.0).abs() < 0.05 && r[0] < 0.5, "{r:?}");
+        // Headroom: the worse channel (R: +8 - 1 = +7 dB).
+        assert!((auto_headroom_db(&eq, &peq, fs) + 7.0).abs() < 0.05);
+        // Linked: only the main (L) set counts.
+        peq.channel_mode = PeqChannelMode::Linked;
+        assert!((auto_headroom_db(&eq, &peq, fs) + 3.0).abs() < 0.05);
+        let r_linked = combined_response_db(&eq, &peq, PeqSide::Right, fs, &freqs);
+        assert_eq!(r_linked, combined_response_db(&eq, &peq, PeqSide::Left, fs, &freqs));
+        // The chain applies each channel's preamp to its own channel.
+        peq.channel_mode = PeqChannelMode::Separate;
+        peq.filters.clear();
+        peq.right.filters.clear();
+        peq.preamp_db = -6.0;
+        let mut st = ChainState::new();
+        st.set(ChainCoeffs {
+            peq: PeqCoeffs::from_settings(&peq, fs),
+            ..ChainCoeffs::BYPASS
+        });
+        assert!(st.active());
+        let mut frame = [0.5f32, 0.5, 0.5];
+        st.process_frame(&mut frame);
+        assert!((frame[0] - 0.5 * db_to_linear(-6.0)).abs() < 1e-6);
+        assert!((frame[1] - 0.5 * db_to_linear(-1.0)).abs() < 1e-6);
+        assert!((frame[2] - frame[0]).abs() < 1e-9, "channel 2 uses the left set");
     }
 
     #[test]
@@ -675,6 +759,7 @@ mod tests {
                     q: 1.0,
                 })
                 .collect(),
+            ..Default::default()
         };
         let xf = Crossfeed {
             enabled: true,

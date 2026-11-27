@@ -300,6 +300,7 @@ impl GuiApp {
             muted: state.muted,
             eq,
             peq,
+            auto_eq: Default::default(),
             exclusive_unavailable: None,
             config_save_due: None,
 
@@ -363,6 +364,7 @@ impl GuiApp {
                 signal_open: false,
                 scroll_to_sound: 0,
                 autoeq_picker: None,
+                peq_side: Default::default(),
                 toasts: Toasts::new(),
                 library_table: Default::default(),
                 library_query: String::new(),
@@ -406,6 +408,8 @@ impl GuiApp {
             // Duration / tags / lyrics for the restored track, off the UI thread.
             gui.request_track_info();
         }
+        // Auto-EQ curves named in the config (small text files; missing ones are skipped).
+        gui.reload_auto_eq_curves();
         gui
     }
 

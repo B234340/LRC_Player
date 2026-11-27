@@ -214,7 +214,15 @@ impl GuiApp {
             self.no_output_device = false;
             self.active_output_device = Some(device.name.clone());
         }
+        let was_active = self.engine_snapshot.as_ref().is_some_and(|s| s.state != EngineState::Stopped);
+        let now_active = snap.state != EngineState::Stopped;
         self.engine_snapshot = Some(snap);
+        if now_active && !was_active {
+            // `TrackStarted` may have been handled while the last snapshot still said
+            // "stopped", which queues no gapless successor; decide it now that the engine runs
+            // (a no-op when it is already queued).
+            self.update_gapless_next();
+        }
         if skip_after_error {
             self.pending_error_skip = false;
             self.consecutive_errors += 1;

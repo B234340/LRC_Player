@@ -4,7 +4,8 @@
 //! | method | effect |
 //! |---|---|
 //! | [`GuiApp::set_parametric_eq`] / [`GuiApp::parametric_eq`] | PEQ (live; saved debounced) |
-//! | [`GuiApp::import_autoeq_text`] | parse an AutoEq / Equalizer APO profile into the PEQ |
+//! | [`GuiApp::set_peq_channel_mode`] / [`GuiApp::copy_peq_channel`] | L+R (linked) or L・R 別, copy L ↔ R |
+//! | [`GuiApp::import_autoeq_text`] | parse an AutoEq / Equalizer APO profile into the edited channel |
 //! | [`GuiApp::pick_autoeq_file`] | native `.txt` picker on a worker, then import |
 //! | [`GuiApp::set_crossfeed`], [`GuiApp::set_auto_headroom`], [`GuiApp::set_dither`] | live + saved |
 //! | [`GuiApp::set_exclusive`] | Windows only; failures arrive as `ExclusiveUnavailable` |
@@ -17,11 +18,12 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use lrc_player_application::config::{
-    Config, CrossfeedLevelSetting, DitherSetting, ParametricEqSetting, PeqFilterKindSetting, PeqFilterSetting,
+    Config, CrossfeedLevelSetting, DitherSetting, ParametricEqSetting, PeqChannelModeSetting, PeqChannelSetting,
+    PeqFilterKindSetting, PeqFilterSetting,
 };
 use lrc_player_application::infrastructure::audio::engine::{
-    parse_autoeq, AudioEngine, Crossfeed, CrossfeedLevel, DitherMode, FilterKind, ParametricEq, PeqFilter,
-    PEQ_MAX_FILTERS, PEQ_MAX_GAIN_DB,
+    parse_autoeq, AudioEngine, Crossfeed, CrossfeedLevel, DitherMode, FilterKind, ParametricEq, PeqChannel,
+    PeqChannelMode, PeqFilter, PeqSide, PEQ_MAX_FILTERS, PEQ_MAX_GAIN_DB,
 };
 
 use crate::presentation::app::GuiApp;
@@ -74,17 +76,33 @@ pub(crate) fn clamp_filter(f: PeqFilter) -> PeqFilter {
     }
 }
 
-/// Engine PEQ from the config (at most [`PEQ_MAX_FILTERS`] filters, values clamped).
+fn filters_from_config(f: &[PeqFilterSetting]) -> Vec<PeqFilter> {
+    f.iter()
+        .take(PEQ_MAX_FILTERS)
+        .map(|f| clamp_filter(PeqFilter { kind: kind_from_config(f.kind), freq_hz: f.freq_hz, gain_db: f.gain_db, q: f.q }))
+        .collect()
+}
+
+fn filters_to_config(f: &[PeqFilter]) -> Vec<PeqFilterSetting> {
+    f.iter().map(|f| PeqFilterSetting { kind: kind_to_config(f.kind), freq_hz: f.freq_hz, gain_db: f.gain_db, q: f.q }).collect()
+}
+
+fn clamp_preamp(db: f32) -> f32 {
+    finite_or(db, 0.0).clamp(-PEQ_MAX_GAIN_DB, PEQ_MAX_GAIN_DB)
+}
+
+/// Engine PEQ from the config (at most [`PEQ_MAX_FILTERS`] filters per channel, values
+/// clamped).
 pub(crate) fn peq_from_config(s: &ParametricEqSetting) -> ParametricEq {
     ParametricEq {
         enabled: s.enabled,
-        preamp_db: finite_or(s.preamp_db, 0.0).clamp(-PEQ_MAX_GAIN_DB, PEQ_MAX_GAIN_DB),
-        filters: s
-            .filters
-            .iter()
-            .take(PEQ_MAX_FILTERS)
-            .map(|f| clamp_filter(PeqFilter { kind: kind_from_config(f.kind), freq_hz: f.freq_hz, gain_db: f.gain_db, q: f.q }))
-            .collect(),
+        preamp_db: clamp_preamp(s.preamp_db),
+        filters: filters_from_config(&s.filters),
+        channel_mode: match s.channel_mode {
+            PeqChannelModeSetting::Linked => PeqChannelMode::Linked,
+            PeqChannelModeSetting::Separate => PeqChannelMode::Separate,
+        },
+        right: PeqChannel { preamp_db: clamp_preamp(s.right.preamp_db), filters: filters_from_config(&s.right.filters) },
     }
 }
 
@@ -92,11 +110,12 @@ pub(crate) fn peq_to_config(p: &ParametricEq) -> ParametricEqSetting {
     ParametricEqSetting {
         enabled: p.enabled,
         preamp_db: p.preamp_db,
-        filters: p
-            .filters
-            .iter()
-            .map(|f| PeqFilterSetting { kind: kind_to_config(f.kind), freq_hz: f.freq_hz, gain_db: f.gain_db, q: f.q })
-            .collect(),
+        filters: filters_to_config(&p.filters),
+        channel_mode: match p.channel_mode {
+            PeqChannelMode::Linked => PeqChannelModeSetting::Linked,
+            PeqChannelMode::Separate => PeqChannelModeSetting::Separate,
+        },
+        right: PeqChannelSetting { preamp_db: p.right.preamp_db, filters: filters_to_config(&p.right.filters) },
     }
 }
 
@@ -160,11 +179,17 @@ impl GuiApp {
     /// Replaces the PEQ (filters beyond [`PEQ_MAX_FILTERS`] are dropped, values clamped to
     /// the editor ranges), applies it live and saves it (debounced).
     pub fn set_parametric_eq(&mut self, mut peq: ParametricEq) {
-        peq.filters.truncate(PEQ_MAX_FILTERS);
-        for f in &mut peq.filters {
-            *f = clamp_filter(*f);
+        for filters in [&mut peq.filters, &mut peq.right.filters] {
+            filters.truncate(PEQ_MAX_FILTERS);
+            for f in filters.iter_mut() {
+                *f = clamp_filter(*f);
+            }
         }
-        peq.preamp_db = finite_or(peq.preamp_db, 0.0).clamp(-PEQ_MAX_GAIN_DB, PEQ_MAX_GAIN_DB);
+        peq.preamp_db = clamp_preamp(peq.preamp_db);
+        peq.right.preamp_db = clamp_preamp(peq.right.preamp_db);
+        if peq.channel_mode == PeqChannelMode::Linked {
+            self.ui.peq_side = PeqSide::Left;
+        }
         if peq == self.peq {
             return;
         }
@@ -176,14 +201,55 @@ impl GuiApp {
         self.save_config_soon();
     }
 
-    /// Parses an AutoEq / Equalizer APO `ParametricEQ.txt` and replaces the PEQ with it
-    /// (enabled). Toasts the outcome; returns whether it was imported.
+    /// The channel the PEQ editor shows and edits (always `Left` = the shared set when
+    /// linked).
+    pub fn peq_edit_side(&self) -> PeqSide {
+        match self.peq.channel_mode {
+            PeqChannelMode::Linked => PeqSide::Left,
+            PeqChannelMode::Separate => self.ui.peq_side,
+        }
+    }
+
+    pub fn set_peq_edit_side(&mut self, side: PeqSide) {
+        self.ui.peq_side = side;
+    }
+
+    /// L+R (one set) or L・R 別. The first switch to separate channels starts the right
+    /// channel as a copy of the shared set (so nothing changes audibly); later switches keep
+    /// the right channel that was saved.
+    pub fn set_peq_channel_mode(&mut self, mode: PeqChannelMode) {
+        if mode == self.peq.channel_mode {
+            return;
+        }
+        let mut peq = self.peq.clone();
+        if mode == PeqChannelMode::Separate && peq.right == PeqChannel::default() {
+            peq.right = PeqChannel { preamp_db: peq.preamp_db, filters: peq.filters.clone() };
+        }
+        peq.channel_mode = mode;
+        self.set_parametric_eq(peq);
+    }
+
+    /// Copies the filters + preamp of `from` to the other channel (separate mode only).
+    pub fn copy_peq_channel(&mut self, from: PeqSide) {
+        if self.peq.channel_mode != PeqChannelMode::Separate {
+            return;
+        }
+        let mut peq = self.peq.clone();
+        peq.set_channel(from.other(), peq.channel(from));
+        self.set_parametric_eq(peq);
+    }
+
+    /// Parses an AutoEq / Equalizer APO `ParametricEQ.txt` and replaces the edited channel's
+    /// filters + preamp with it (PEQ enabled). Toasts the outcome; returns whether it was
+    /// imported.
     pub fn import_autoeq_text(&mut self, text: &str) -> bool {
         let tr = self.tr();
         match parse_autoeq(text) {
-            Ok(mut peq) => {
+            Ok(parsed) => {
+                let mut peq = self.peq.clone();
                 peq.enabled = true;
-                let n = peq.filters.len();
+                let n = parsed.filters.len();
+                peq.set_channel(self.peq_edit_side(), PeqChannel { preamp_db: parsed.preamp_db, filters: parsed.filters });
                 self.set_parametric_eq(peq);
                 self.toast_success(tr.f("toast.autoeq_loaded", &[&n]));
                 true
@@ -390,14 +456,22 @@ mod tests {
                 PeqFilter { kind: FilterKind::LowShelf, freq_hz: 105.0, gain_db: 4.0, q: 0.7 },
                 PeqFilter { kind: FilterKind::HighPass, freq_hz: 30.0, gain_db: 0.0, q: 0.5 },
             ],
+            ..Default::default()
         };
         assert_eq!(peq_from_config(&peq_to_config(&peq)), peq);
+        let lr = ParametricEq {
+            channel_mode: PeqChannelMode::Separate,
+            right: PeqChannel { preamp_db: -2.0, filters: vec![PeqFilter { kind: FilterKind::Peak, freq_hz: 3000.0, gain_db: -3.0, q: 2.0 }] },
+            ..peq.clone()
+        };
+        assert_eq!(peq_from_config(&peq_to_config(&lr)), lr);
         let wild = ParametricEqSetting {
             enabled: true,
             preamp_db: f32::NAN,
             filters: (0..30)
                 .map(|_| PeqFilterSetting { kind: PeqFilterKindSetting::Peak, freq_hz: 5.0, gain_db: 99.0, q: 50.0 })
                 .collect(),
+            ..Default::default()
         };
         let p = peq_from_config(&wild);
         assert_eq!(p.preamp_db, 0.0);
@@ -559,6 +633,103 @@ mod tests {
         assert_eq!(app2.crossfeed(), Crossfeed { enabled: true, level: CrossfeedLevel::Strong });
         assert!(!app2.auto_headroom());
         assert_eq!(app2.dither(), DitherMode::Off);
+    }
+
+    /// L・R 別: the first switch copies the shared set to R, edits / imports act on the
+    /// selected channel, copy L → R / R → L, and the right channel survives a round trip
+    /// through linked mode and the config.
+    #[test]
+    fn peq_left_right_editing_and_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx, dir.path(), false);
+        let shared = ParametricEq {
+            enabled: true,
+            preamp_db: -3.0,
+            filters: vec![PeqFilter { kind: FilterKind::Peak, freq_hz: 1000.0, gain_db: 3.0, q: 1.0 }],
+            ..Default::default()
+        };
+        app.set_parametric_eq(shared.clone());
+        assert_eq!(app.peq_edit_side(), PeqSide::Left);
+        // Linked: selecting R does nothing (the shared set is edited).
+        app.set_peq_edit_side(PeqSide::Right);
+        assert_eq!(app.peq_edit_side(), PeqSide::Left);
+        app.set_peq_channel_mode(PeqChannelMode::Separate);
+        assert_eq!(app.peq.channel_mode, PeqChannelMode::Separate);
+        assert_eq!(app.peq.channel(PeqSide::Right), app.peq.channel(PeqSide::Left), "R starts as a copy");
+        assert_eq!(app.config.parametric_eq.channel_mode, PeqChannelModeSetting::Separate);
+        // Import into R only.
+        app.set_peq_edit_side(PeqSide::Right);
+        assert_eq!(app.peq_edit_side(), PeqSide::Right);
+        assert!(app.import_autoeq_text(PROFILE));
+        assert_eq!(app.peq.right.filters.len(), 3);
+        assert!((app.peq.right.preamp_db + 6.2).abs() < 1e-4);
+        assert_eq!(app.peq.filters, shared.filters, "L untouched");
+        assert_eq!(app.peq.preamp_db, -3.0);
+        // Copy R -> L, then change L and copy L -> R.
+        app.copy_peq_channel(PeqSide::Right);
+        assert_eq!(app.peq.channel(PeqSide::Left), app.peq.channel(PeqSide::Right));
+        let mut p = app.peq.clone();
+        p.filters.truncate(1);
+        p.preamp_db = -1.0;
+        app.set_parametric_eq(p);
+        app.copy_peq_channel(PeqSide::Left);
+        assert_eq!(app.peq.right.filters.len(), 1);
+        assert_eq!(app.peq.right.preamp_db, -1.0);
+        // Back to linked: the main (L) set applies, the right set is kept for later.
+        let mut p = app.peq.clone();
+        p.right.filters.push(PeqFilter { kind: FilterKind::Peak, freq_hz: 4000.0, gain_db: -2.0, q: 2.0 });
+        app.set_parametric_eq(p);
+        app.set_peq_channel_mode(PeqChannelMode::Linked);
+        assert_eq!(app.peq_edit_side(), PeqSide::Left);
+        assert_eq!(app.peq.right.filters.len(), 2);
+        app.copy_peq_channel(PeqSide::Left);
+        assert_eq!(app.peq.right.filters.len(), 2, "copy is a no-op when linked");
+        app.set_peq_channel_mode(PeqChannelMode::Separate);
+        assert_eq!(app.peq.right.filters.len(), 2, "the saved right channel comes back");
+        // A new app from the config gets the same PEQ.
+        let app2 = GuiApp::with_options(
+            &ctx,
+            crate::presentation::app::AppOptions {
+                persist: false,
+                engine: false,
+                meta_path: Some(dir.path().join("meta2.db")),
+                config: Some(app.config.clone()),
+                load_fonts: false,
+                media_controls: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(app2.peq, app.peq);
+    }
+
+    /// A config written before L/R and auto-EQ existed loads unchanged (linked, defaults).
+    #[test]
+    fn old_config_without_new_fields_loads_linked() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let cfg: Config = serde_json::from_str(
+            r#"{"resampler_taps": 32, "preferred_output_device": null,
+                "parametric_eq": {"enabled": true, "preamp_db": -2.0, "filters": [{"kind": "peak", "freq_hz": 250.0, "gain_db": 1.5, "q": 1.0}]}}"#,
+        )
+        .unwrap();
+        let app = GuiApp::with_options(
+            &ctx,
+            crate::presentation::app::AppOptions {
+                persist: false,
+                engine: false,
+                meta_path: Some(dir.path().join("meta.db")),
+                config: Some(cfg),
+                load_fonts: false,
+                media_controls: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(app.peq.channel_mode, PeqChannelMode::Linked);
+        assert_eq!(app.peq.filters.len(), 1);
+        assert_eq!(app.peq.right, PeqChannel::default());
+        assert!(app.auto_eq.target.is_none() && app.auto_eq.source.is_none());
+        assert_eq!(app.auto_eq_options(), lrc_player_application::infrastructure::audio::engine::AutoEqOptions::default());
     }
 
     #[test]

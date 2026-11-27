@@ -6,3 +6,4 @@ bench_tracks/
 .github/workflows/
 __pycache__/
 *.egg-info/
+dist/

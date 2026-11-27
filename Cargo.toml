@@ -22,3 +22,10 @@ opt-level = 3
 
 [profile.dev.package.lrc_player_adapters_audio]
 opt-level = 3
+
+# Distribution builds (portable zip): release + stripped symbols + thin LTO.
+# `cargo build --profile dist -p lrc_player_gui --target x86_64-pc-windows-gnu`
+[profile.dist]
+inherits = "release"
+strip = true
+lto = "thin"

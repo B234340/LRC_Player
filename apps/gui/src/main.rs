@@ -169,6 +169,10 @@ fn main() -> Result<()> {
         // flag). The main window paints its whole area opaque; on Windows the app also turns
         // DWM transparency off for it (`startup_cloak::keep_opaque`).
         .with_transparent(true);
+    // Window / taskbar icon (the .exe icon itself comes from build.rs on Windows).
+    if let Some(icon) = lrc_player::presentation::app_icon::icon_data() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
     if let Some(window) = lrc_player::presentation::app::initial_window() {
         viewport = viewport
             .with_inner_size([window.width.max(min_w), window.height.max(min_h)])

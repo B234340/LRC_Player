@@ -1,6 +1,11 @@
 //! Parametric EQ: user-defined RBJ-cookbook biquads (peak, shelves, low/high-pass), up to
 //! [`PEQ_MAX_FILTERS`], with its own preamp; plus a parser for the Equalizer APO / AutoEq
 //! `ParametricEQ.txt` format. Runs after (in series with) the 10-band graphic EQ.
+//!
+//! **Channels.** In [`PeqChannelMode::Linked`] (the default) one filter set and preamp apply to
+//! every output channel. In [`PeqChannelMode::Separate`] the main `preamp_db`/`filters` are the
+//! LEFT channel's and [`ParametricEq::right`] is the RIGHT channel's: output channel 0 = L,
+//! channel 1 = R; a mono output and every channel from 2 up use the left set.
 
 use anyhow::{anyhow, bail, Result};
 
@@ -33,26 +38,67 @@ pub struct PeqFilter {
     pub q: f32,
 }
 
-/// User-facing parametric EQ. Only the first [`PEQ_MAX_FILTERS`] filters are used; the engine
-/// converts this into a fixed-size coefficient array (no allocation in the audio callback).
+/// How the parametric EQ maps onto the output channels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PeqChannelMode {
+    /// One filter set (`ParametricEq::preamp_db` / `filters`) for every channel.
+    #[default]
+    Linked,
+    /// `preamp_db` / `filters` for the left channel (and mono / channels >= 2),
+    /// `ParametricEq::right` for the right channel (output channel 1).
+    Separate,
+}
+
+/// One side of a stereo pair (output channel 0 = left, 1 = right).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PeqSide {
+    #[default]
+    Left,
+    Right,
+}
+
+/// The filter set and preamp of one channel.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct ParametricEq {
-    pub enabled: bool,
+pub struct PeqChannel {
     /// Preamp in dB (clamped to ±30).
     pub preamp_db: f32,
     pub filters: Vec<PeqFilter>,
 }
 
+/// User-facing parametric EQ. Only the first [`PEQ_MAX_FILTERS`] filters (per channel) are
+/// used; the engine converts this into fixed-size coefficient arrays (no allocation in the
+/// audio callback). See the module docs for the channel mapping.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParametricEq {
+    pub enabled: bool,
+    /// Preamp in dB (clamped to ±30). Left channel in [`PeqChannelMode::Separate`].
+    pub preamp_db: f32,
+    /// Left channel in [`PeqChannelMode::Separate`].
+    pub filters: Vec<PeqFilter>,
+    pub channel_mode: PeqChannelMode,
+    /// Right channel (used only in [`PeqChannelMode::Separate`]).
+    pub right: PeqChannel,
+}
+
 const DEFAULT_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
-/// Precomputed parametric EQ (computed off the realtime thread, sent by value).
+/// Precomputed filter set of one channel.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PeqCoeffs {
-    pub(crate) active: bool,
+pub(crate) struct PeqSetCoeffs {
+    /// Linear preamp gain.
     pub(crate) preamp: f32,
     pub(crate) filters: [BiquadCoeffs; PEQ_MAX_FILTERS],
     /// Number of (non-identity) filters at the front of `filters`.
     pub(crate) count: usize,
+}
+
+/// Precomputed parametric EQ (computed off the realtime thread, sent by value).
+/// `sets[0]` is the left (or linked) set, `sets[1]` the right one (a copy of `sets[0]` when
+/// linked), so the renderer picks a set per channel without branching on the mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PeqCoeffs {
+    pub(crate) active: bool,
+    pub(crate) sets: [PeqSetCoeffs; 2],
 }
 
 fn sanitize(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
@@ -80,46 +126,147 @@ impl PeqFilter {
     }
 }
 
-impl ParametricEq {
-    /// Preamp in dB as applied (sanitized).
-    pub(crate) fn preamp_db_sanitized(&self) -> f32 {
-        sanitize(self.preamp_db, -PEQ_MAX_GAIN_DB, PEQ_MAX_GAIN_DB, 0.0)
+impl PeqSide {
+    /// Output channel index of this side (0 = left, 1 = right).
+    pub fn channel_index(self) -> usize {
+        match self {
+            PeqSide::Left => 0,
+            PeqSide::Right => 1,
+        }
     }
 
-    /// The filters that are processed.
-    pub(crate) fn used_filters(&self) -> &[PeqFilter] {
-        &self.filters[..self.filters.len().min(PEQ_MAX_FILTERS)]
+    /// The other side.
+    pub fn other(self) -> PeqSide {
+        match self {
+            PeqSide::Left => PeqSide::Right,
+            PeqSide::Right => PeqSide::Left,
+        }
     }
 }
 
-impl PeqCoeffs {
-    pub(crate) const BYPASS: PeqCoeffs = PeqCoeffs {
-        active: false,
+impl ParametricEq {
+    /// The sides whose filter sets differ: just `Left` when linked, else both.
+    pub fn sides(&self) -> &'static [PeqSide] {
+        match self.channel_mode {
+            PeqChannelMode::Linked => &[PeqSide::Left],
+            PeqChannelMode::Separate => &[PeqSide::Left, PeqSide::Right],
+        }
+    }
+
+    /// Preamp (dB) and filters that apply to `side` (the main set when linked).
+    pub fn channel_ref(&self, side: PeqSide) -> (f32, &[PeqFilter]) {
+        if self.channel_mode == PeqChannelMode::Separate && side == PeqSide::Right {
+            (self.right.preamp_db, &self.right.filters)
+        } else {
+            (self.preamp_db, &self.filters)
+        }
+    }
+
+    /// Owned copy of [`ParametricEq::channel_ref`].
+    pub fn channel(&self, side: PeqSide) -> PeqChannel {
+        let (preamp_db, filters) = self.channel_ref(side);
+        PeqChannel {
+            preamp_db,
+            filters: filters.to_vec(),
+        }
+    }
+
+    /// Replaces the set that applies to `side` (the main set when linked, so in
+    /// [`PeqChannelMode::Linked`] both sides edit the same set).
+    pub fn set_channel(&mut self, side: PeqSide, ch: PeqChannel) {
+        if self.channel_mode == PeqChannelMode::Separate && side == PeqSide::Right {
+            self.right = ch;
+        } else {
+            self.preamp_db = ch.preamp_db;
+            self.filters = ch.filters;
+        }
+    }
+
+    /// Preamp in dB of `side` as applied (sanitized).
+    pub(crate) fn preamp_db_sanitized(&self, side: PeqSide) -> f32 {
+        sanitize(self.channel_ref(side).0, -PEQ_MAX_GAIN_DB, PEQ_MAX_GAIN_DB, 0.0)
+    }
+
+    /// The filters of `side` that are processed.
+    pub(crate) fn used_filters(&self, side: PeqSide) -> &[PeqFilter] {
+        let f = self.channel_ref(side).1;
+        &f[..f.len().min(PEQ_MAX_FILTERS)]
+    }
+}
+
+impl PeqSetCoeffs {
+    pub(crate) const BYPASS: PeqSetCoeffs = PeqSetCoeffs {
         preamp: 1.0,
         filters: [BiquadCoeffs::IDENTITY; PEQ_MAX_FILTERS],
         count: 0,
     };
 
-    pub(crate) fn from_settings(eq: &ParametricEq, sample_rate: u32) -> Self {
-        if !eq.enabled {
-            return Self::BYPASS;
-        }
+    fn from_settings(eq: &ParametricEq, side: PeqSide, sample_rate: u32) -> Self {
         let mut c = Self::BYPASS;
-        for f in eq.used_filters() {
+        for f in eq.used_filters(side) {
             let b = f.coeffs(sample_rate);
             if b != BiquadCoeffs::IDENTITY {
                 c.filters[c.count] = b;
                 c.count += 1;
             }
         }
-        let pre_db = eq.preamp_db_sanitized();
+        let pre_db = eq.preamp_db_sanitized(side);
         c.preamp = if pre_db.abs() < 1.0e-3 {
             1.0
         } else {
             db_to_linear(pre_db)
         };
-        c.active = c.count > 0 || c.preamp != 1.0;
         c
+    }
+
+    /// Changes the signal (filters or a preamp).
+    pub(crate) fn active(&self) -> bool {
+        self.count > 0 || self.preamp != 1.0
+    }
+
+    /// The non-identity filters.
+    pub(crate) fn used(&self) -> &[BiquadCoeffs] {
+        &self.filters[..self.count]
+    }
+}
+
+impl PeqCoeffs {
+    pub(crate) const BYPASS: PeqCoeffs = PeqCoeffs {
+        active: false,
+        sets: [PeqSetCoeffs::BYPASS; 2],
+    };
+
+    pub(crate) fn from_settings(eq: &ParametricEq, sample_rate: u32) -> Self {
+        if !eq.enabled {
+            return Self::BYPASS;
+        }
+        let left = PeqSetCoeffs::from_settings(eq, PeqSide::Left, sample_rate);
+        let right = match eq.channel_mode {
+            PeqChannelMode::Linked => left,
+            PeqChannelMode::Separate => PeqSetCoeffs::from_settings(eq, PeqSide::Right, sample_rate),
+        };
+        PeqCoeffs {
+            // Active if either channel changes the signal.
+            active: left.active() || right.active(),
+            sets: [left, right],
+        }
+    }
+
+    /// The set output channel `ch` uses (1 = right, everything else left).
+    #[inline]
+    pub(crate) fn set_for(&self, ch: usize) -> &PeqSetCoeffs {
+        &self.sets[usize::from(ch == 1)]
+    }
+
+    /// The set of `side`.
+    pub(crate) fn side(&self, side: PeqSide) -> &PeqSetCoeffs {
+        &self.sets[side.channel_index()]
+    }
+
+    /// Some channel has filters to run.
+    #[inline]
+    pub(crate) fn has_filters(&self) -> bool {
+        self.sets[0].count != 0 || self.sets[1].count != 0
     }
 }
 
@@ -140,15 +287,16 @@ impl PeqState {
         self.state = [[[0.0; 2]; PEQ_MAX_FILTERS]; EQ_MAX_CHANNELS];
     }
 
-    /// Filters one sample of channel `ch` (preamp NOT applied here).
+    /// Filters one sample of channel `ch` with that channel's set (preamp NOT applied here).
     #[inline]
     pub(crate) fn process(&mut self, c: &PeqCoeffs, ch: usize, x: f32) -> f32 {
-        if ch >= EQ_MAX_CHANNELS || c.count == 0 {
+        let set = c.set_for(ch);
+        if ch >= EQ_MAX_CHANNELS || set.count == 0 {
             return x;
         }
         let mut y = x + ANTI_DENORMAL;
         let states = &mut self.state[ch];
-        for (f, s) in c.filters[..c.count].iter().zip(states.iter_mut()) {
+        for (f, s) in set.used().iter().zip(states.iter_mut()) {
             y = f.tick(s, y);
         }
         y
@@ -216,6 +364,7 @@ pub fn parse_autoeq(text: &str) -> Result<ParametricEq> {
         enabled: true,
         preamp_db,
         filters,
+        ..Default::default()
     })
 }
 
@@ -485,20 +634,20 @@ something unknown
         let mut eq = parse_autoeq(AUTOEQ_SAMPLE).unwrap();
         let c = PeqCoeffs::from_settings(&eq, 48_000);
         assert!(c.active);
-        assert_eq!(c.count, 10);
+        assert_eq!(c.sets[0].count, 10);
+        assert_eq!(c.sets[0], c.sets[1], "linked: both channels use the same set");
         eq.filters.push(PeqFilter {
             kind: FilterKind::Peak,
             freq_hz: 1000.0,
             gain_db: 0.0,
             q: 1.0,
         });
-        assert_eq!(PeqCoeffs::from_settings(&eq, 48_000).count, 10);
+        assert_eq!(PeqCoeffs::from_settings(&eq, 48_000).sets[0].count, 10);
         eq.enabled = false;
         assert!(!PeqCoeffs::from_settings(&eq, 48_000).active);
         let flat = ParametricEq {
             enabled: true,
-            preamp_db: 0.0,
-            filters: vec![],
+            ..Default::default()
         };
         assert!(!PeqCoeffs::from_settings(&flat, 48_000).active);
     }
@@ -525,40 +674,40 @@ something unknown
             PeqCoeffs::from_settings(
                 &ParametricEq {
                     enabled: true,
-                    preamp_db: 0.0,
                     filters: vec![PeqFilter {
                         kind,
                         freq_hz: f,
                         gain_db: g,
                         q,
                     }],
+                    ..Default::default()
                 },
                 fs,
             )
         };
         // Peak: the gain at Fc, ~0 dB far away (analytic response and measured sine).
         let pk = one(FilterKind::Peak, 1000.0, 6.0, 1.0);
-        let b = pk.filters[0];
+        let b = pk.sets[0].filters[0];
         assert!((b.magnitude_db(1000.0, fs) - 6.0).abs() < 0.01);
         assert!(b.magnitude_db(20.0, fs).abs() < 0.05);
         assert!((measured_gain_db(&pk, fs, 1000.0) - 6.0).abs() < 0.1);
         let cut = one(FilterKind::Peak, 3000.0, -9.0, 4.0);
-        assert!((cut.filters[0].magnitude_db(3000.0, fs) + 9.0).abs() < 0.01);
+        assert!((cut.sets[0].filters[0].magnitude_db(3000.0, fs) + 9.0).abs() < 0.01);
         // Shelves: full gain deep in the shelf, half the gain (in dB) at Fc, flat elsewhere.
-        let ls = one(FilterKind::LowShelf, 200.0, 8.0, DEFAULT_Q).filters[0];
+        let ls = one(FilterKind::LowShelf, 200.0, 8.0, DEFAULT_Q).sets[0].filters[0];
         assert!((ls.magnitude_db(10.0, fs) - 8.0).abs() < 0.1);
         assert!((ls.magnitude_db(200.0, fs) - 4.0).abs() < 0.05);
         assert!(ls.magnitude_db(10_000.0, fs).abs() < 0.05);
-        let hs = one(FilterKind::HighShelf, 4000.0, -6.0, DEFAULT_Q).filters[0];
+        let hs = one(FilterKind::HighShelf, 4000.0, -6.0, DEFAULT_Q).sets[0].filters[0];
         assert!((hs.magnitude_db(20_000.0, fs) + 6.0).abs() < 0.2);
         assert!((hs.magnitude_db(4000.0, fs) + 3.0).abs() < 0.05);
         assert!(hs.magnitude_db(50.0, fs).abs() < 0.05);
         // Butterworth pass filters: -3 dB at Fc, flat in the pass band, steep stop band.
-        let lp = one(FilterKind::LowPass, 2000.0, 0.0, DEFAULT_Q).filters[0];
+        let lp = one(FilterKind::LowPass, 2000.0, 0.0, DEFAULT_Q).sets[0].filters[0];
         assert!((lp.magnitude_db(2000.0, fs) + 3.01).abs() < 0.05);
         assert!(lp.magnitude_db(100.0, fs).abs() < 0.05);
         assert!(lp.magnitude_db(16_000.0, fs) < -30.0);
-        let hp = one(FilterKind::HighPass, 100.0, 0.0, DEFAULT_Q).filters[0];
+        let hp = one(FilterKind::HighPass, 100.0, 0.0, DEFAULT_Q).sets[0].filters[0];
         assert!((hp.magnitude_db(100.0, fs) + 3.01).abs() < 0.05);
         assert!(hp.magnitude_db(5000.0, fs).abs() < 0.05);
         assert!(hp.magnitude_db(25.0, fs) < -20.0);
@@ -571,7 +720,8 @@ something unknown
         let eq = parse_autoeq(AUTOEQ_SAMPLE).unwrap();
         let c = PeqCoeffs::from_settings(&eq, 44_100);
         for f in [50.0f32, 2153.0, 8214.0] {
-            let analytic: f32 = c.filters[..c.count]
+            let analytic: f32 = c.sets[0]
+                .used()
                 .iter()
                 .map(|b| b.magnitude_db(f, 44_100))
                 .sum();
@@ -581,5 +731,80 @@ something unknown
                 "{f} Hz: {analytic} vs {measured}"
             );
         }
+    }
+
+    fn peak(freq_hz: f32, gain_db: f32) -> PeqFilter {
+        PeqFilter {
+            kind: FilterKind::Peak,
+            freq_hz,
+            gain_db,
+            q: 1.0,
+        }
+    }
+
+    #[test]
+    fn separate_channels_use_their_own_sets() {
+        let mut eq = ParametricEq {
+            enabled: true,
+            preamp_db: -2.0,
+            filters: vec![peak(1000.0, 6.0)],
+            channel_mode: PeqChannelMode::Linked,
+            right: PeqChannel {
+                preamp_db: -4.0,
+                filters: vec![peak(3000.0, -6.0), peak(100.0, 3.0)],
+            },
+        };
+        // Linked: the right set is ignored, every channel uses the main set.
+        let c = PeqCoeffs::from_settings(&eq, 48_000);
+        assert_eq!(c.sets[0], c.sets[1]);
+        assert_eq!(c.set_for(1).count, 1);
+        assert_eq!(eq.channel_ref(PeqSide::Right).1.len(), 1);
+        // Separate: channel 1 = right, channels 0 and >= 2 = left.
+        eq.channel_mode = PeqChannelMode::Separate;
+        let c = PeqCoeffs::from_settings(&eq, 48_000);
+        assert_eq!(c.set_for(0).count, 1);
+        assert_eq!(c.set_for(1).count, 2);
+        assert_eq!(c.set_for(2).count, 1);
+        assert!((c.set_for(1).preamp - db_to_linear(-4.0)).abs() < 1e-6);
+        assert!((measured_gain_db(&c, 48_000, 1000.0) - 6.0).abs() < 0.1, "left: +6 dB at 1 kHz");
+        let mut st = PeqState::new();
+        let mut peak_r = 0.0f32;
+        for i in 0..48_000 {
+            let x = 0.1 * (2.0 * std::f32::consts::PI * 3000.0 * i as f32 / 48_000.0).sin();
+            let y = st.process(&c, 1, x);
+            if i > 24_000 {
+                peak_r = peak_r.max(y.abs());
+            }
+        }
+        assert!((20.0 * (peak_r / 0.1).log10() + 6.0).abs() < 0.15, "right: -6 dB at 3 kHz");
+        // Only the right channel changes the signal: still active.
+        let only_r = ParametricEq {
+            enabled: true,
+            channel_mode: PeqChannelMode::Separate,
+            right: PeqChannel {
+                preamp_db: 0.0,
+                filters: vec![peak(500.0, 2.0)],
+            },
+            ..Default::default()
+        };
+        let c = PeqCoeffs::from_settings(&only_r, 48_000);
+        assert!(c.active && c.has_filters());
+        assert_eq!(c.sets[0].count, 0);
+        // Channel accessors.
+        let mut e = eq.clone();
+        e.set_channel(
+            PeqSide::Right,
+            PeqChannel {
+                preamp_db: 1.0,
+                filters: vec![],
+            },
+        );
+        assert_eq!(e.right.preamp_db, 1.0);
+        assert_eq!(e.channel(PeqSide::Left).filters, eq.filters);
+        e.channel_mode = PeqChannelMode::Linked;
+        e.set_channel(PeqSide::Right, PeqChannel::default());
+        assert!(e.filters.is_empty(), "linked: both sides edit the main set");
+        assert_eq!(PeqSide::Left.other(), PeqSide::Right);
+        assert_eq!(e.sides(), &[PeqSide::Left]);
     }
 }

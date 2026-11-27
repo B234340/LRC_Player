@@ -1011,6 +1011,102 @@ fn sound_quality() {
     }
 }
 
+/// A synthetic IEM target (bass shelf, pinna gain, treble roll-off), absolute SPL.
+fn autoeq_target_db(f: f32) -> f32 {
+    let f = f as f64;
+    let bass = 7.0 / (1.0 + (f / 110.0).powi(2));
+    let pinna = 9.0 * (-(f / 2900.0).log2().powi(2) / (2.0 * 0.55)).exp();
+    let roll = -7.0 / (1.0 + (9500.0 / f).powi(4));
+    (75.0 + bass + pinna + roll) as f32
+}
+
+/// A synthetic DIY IEM measurement (as IEM_Measure exports it): less bass, a 6 kHz peak, a
+/// dip at 3 kHz, a treble resonance; `skew` makes L and R differ a little.
+fn autoeq_measured_db(f: f32, skew: f32) -> f32 {
+    let x = f as f64;
+    let g = |hz: f64, db: f64, w: f64| db * (-(x / hz).log2().powi(2) / (2.0 * w * w)).exp();
+    let base = autoeq_target_db(f) as f64 + 22.0 - 5.0 / (1.0 + (x / 90.0).powi(2));
+    (base + g(3100.0, -4.5, 0.25) + g(6000.0 * (1.0 + skew as f64 * 0.05), 7.0, 0.12) + g(12_000.0, -6.0, 0.15)
+        + g(1300.0, 1.5 + skew as f64, 0.4)) as f32
+}
+
+fn autoeq_curve(f: impl Fn(f32) -> f32) -> lrc_player_application::infrastructure::audio::engine::FrequencyResponse {
+    let freqs: Vec<f32> = (0..=480).map(|i| 20.0 * 1000f32.powf(i as f32 / 480.0)).collect();
+    let db = freqs.iter().map(|&x| f(x)).collect();
+    lrc_player_application::infrastructure::audio::engine::FrequencyResponse { freqs, db }
+}
+
+/// Runs the auto-create synchronously (worker + polling).
+fn run_auto_eq(a: &mut GuiApp) {
+    a.start_auto_eq(None);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while a.auto_eq_running() {
+        a.poll_auto_eq();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    a.ui.toasts = Default::default();
+}
+
+/// EQ popover, parametric tab with auto-EQ curves: L+R with the 自動作成 section expanded
+/// (before and after creating filters), collapsed, and L・R 別 (R selected) — at 1280x800,
+/// 1000x700, 560x700 and 400x640, dark and light.
+///
+/// `APP_SCREENS_DIR=<dir> cargo test -p lrc_player --lib app::screenshot_tests::autoeq -- --ignored --test-threads=1`
+#[test]
+#[ignore = "renders PNGs with wgpu; run manually"]
+fn autoeq_parametric() {
+    use super::auto_eq::{CurveSlot, LoadedCurve};
+    use crate::presentation::ui::views::EqTab;
+    use lrc_player_application::infrastructure::audio::engine::{PeqChannelMode, PeqSide};
+    let fx = fixture();
+    let sizes = [(1280.0, 800.0, false), (1000.0, 700.0, false), (560.0, 700.0, true), (400.0, 640.0, true)];
+    for dark in [true, false] {
+        let suffix = if dark { "dark" } else { "light" };
+        let mut h = start(&fx, dark, Language::Ja);
+        with_app(&mut h, |a| {
+            a.ui.right_panel = None;
+            a.navigate(Page::Library);
+            a.ui.toasts = Default::default();
+            a.ui.eq_tab = EqTab::Parametric;
+            a.ui.eq_open = true;
+            a.set_auto_eq_curve(CurveSlot::Target, LoadedCurve::new("IEM_target_harman2019.csv".into(), autoeq_curve(autoeq_target_db)));
+            a.set_auto_eq_curve(CurveSlot::Source, LoadedCurve::new("DIY-IEM_L_2026-11-14.txt".into(), autoeq_curve(|f| autoeq_measured_db(f, 0.0))));
+            a.auto_eq.expanded = true;
+        });
+        let shoot_sizes = |h: &mut H<'_>, name: &str| {
+            for (w, ht, collapsed) in sizes {
+                h.set_size(Vec2::new(w, ht));
+                with_app(h, |a| a.ui.sidebar.collapsed = collapsed);
+                shoot(h, &format!("{name}_{w}x{ht}_{suffix}"));
+            }
+        };
+        // L+R, curves loaded, nothing created yet.
+        shoot_sizes(&mut h, "autoeq_linked_loaded");
+        // After 「フィルターを作成」.
+        with_app(&mut h, run_auto_eq);
+        shoot_sizes(&mut h, "autoeq_linked_created");
+        // Section collapsed: the filter list gets the room.
+        with_app(&mut h, |a| a.auto_eq.expanded = false);
+        shoot_sizes(&mut h, "autoeq_linked_collapsed");
+        // L・R 別 with separate L / R measurements, R selected, both fitted.
+        with_app(&mut h, |a| {
+            a.auto_eq.expanded = true;
+            a.set_peq_channel_mode(PeqChannelMode::Separate);
+            a.set_auto_eq_same_source(false);
+            a.set_auto_eq_curve(CurveSlot::SourceRight, LoadedCurve::new("DIY-IEM_R_2026-11-14.txt".into(), autoeq_curve(|f| autoeq_measured_db(f, 1.0))));
+            run_auto_eq(a);
+            a.set_peq_edit_side(PeqSide::Right);
+        });
+        shoot_sizes(&mut h, "autoeq_separate_r");
+        with_app(&mut h, |a| {
+            a.auto_eq.expanded = false;
+            a.set_peq_edit_side(PeqSide::Left);
+        });
+        shoot_sizes(&mut h, "autoeq_separate_l_collapsed");
+    }
+}
+
 /// Settings → 歌詞 → 「歌詞のない曲をまとめて取得」: idle (with recently checked tracks), the
 /// confirmation dialog, running (fake LRCLIB that stalls on the 8th track), stopping and the
 /// last result, at 1280x800 and 1000x700 with the right panel, dark and light.

@@ -167,7 +167,29 @@ fn default_peq_q() -> f32 {
     std::f32::consts::FRAC_1_SQRT_2
 }
 
-/// Parametric EQ (in series after the 10-band EQ). Off and empty by default.
+/// How the parametric EQ maps onto the channels (`"linked"` | `"separate"`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PeqChannelModeSetting {
+    /// One filter set for both channels.
+    #[default]
+    Linked,
+    /// `preamp_db`/`filters` for the left channel, `right` for the right channel.
+    Separate,
+}
+
+/// Filter set and preamp of one channel.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PeqChannelSetting {
+    #[serde(default)]
+    pub preamp_db: f32,
+    #[serde(default)]
+    pub filters: Vec<PeqFilterSetting>,
+}
+
+/// Parametric EQ (in series after the 10-band EQ). Off and empty by default. In
+/// `channel_mode: "separate"` `preamp_db`/`filters` are the left channel's and `right` the
+/// right channel's; configs written before the setting existed load as linked.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ParametricEqSetting {
     #[serde(default)]
@@ -176,6 +198,56 @@ pub struct ParametricEqSetting {
     pub preamp_db: f32,
     #[serde(default)]
     pub filters: Vec<PeqFilterSetting>,
+    #[serde(default)]
+    pub channel_mode: PeqChannelModeSetting,
+    #[serde(default)]
+    pub right: PeqChannelSetting,
+}
+
+/// Automatic PEQ creation (fit a measured response to a target): the imported curve files
+/// and the fitting options. Paths are reloaded at start when the files still exist.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AutoEqSetting {
+    /// Target curve file (`None` = none chosen, unless `target_flat`).
+    pub target_path: Option<String>,
+    /// Use a flat (0 dB) target instead of a file.
+    pub target_flat: bool,
+    /// Measured response: of both earpieces when `same_source`, else of the left one.
+    pub source_path: Option<String>,
+    /// Measured response of the right earpiece (used when `same_source` is off).
+    pub source_r_path: Option<String>,
+    /// One measurement for both channels.
+    pub same_source: bool,
+    pub max_filters: usize,
+    pub max_gain_db: f32,
+    pub min_q: f32,
+    pub max_q: f32,
+    pub freq_min_hz: f32,
+    pub freq_max_hz: f32,
+    /// Largest boost above ~8 kHz (dB).
+    pub treble_boost_limit_db: f32,
+    pub use_shelves: bool,
+}
+
+impl Default for AutoEqSetting {
+    fn default() -> Self {
+        Self {
+            target_path: None,
+            target_flat: false,
+            source_path: None,
+            source_r_path: None,
+            same_source: true,
+            max_filters: 10,
+            max_gain_db: 12.0,
+            min_q: 0.5,
+            max_q: 6.0,
+            freq_min_hz: 20.0,
+            freq_max_hz: 16_000.0,
+            treble_boost_limit_db: 3.0,
+            use_shelves: true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -254,6 +326,9 @@ pub struct Config {
     pub exclusive_mode: bool,
     #[serde(default)]
     pub parametric_eq: ParametricEqSetting,
+    /// Automatic PEQ creation (curve files + options).
+    #[serde(default)]
+    pub auto_eq: AutoEqSetting,
     /// Desktop lyrics: a small always-on-top window with the current line.
     #[serde(default)]
     pub desktop_lyrics: DesktopLyricsSetting,
@@ -340,6 +415,7 @@ impl Default for Config {
             dither: DitherSetting::default(),
             exclusive_mode: false,
             parametric_eq: ParametricEqSetting::default(),
+            auto_eq: AutoEqSetting::default(),
             desktop_lyrics: DesktopLyricsSetting::default(),
         }
     }
@@ -511,6 +587,7 @@ mod tests {
                     PeqFilterSetting { kind: PeqFilterKindSetting::HighShelf, freq_hz: 10_000.0, gain_db: -3.0, q: 0.71 },
                     PeqFilterSetting { kind: PeqFilterKindSetting::HighPass, freq_hz: 20.0, gain_db: 0.0, q: 0.5 },
                 ],
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -529,5 +606,55 @@ mod tests {
             let v: CrossfeedLevelSetting = serde_json::from_str(&format!("\"{text}\"")).unwrap();
             assert_eq!(v, level);
         }
+    }
+
+    #[test]
+    fn peq_channels_and_auto_eq_defaults_and_round_trip() {
+        // Old configs (with a PEQ but without the new fields) load as linked, auto-EQ default.
+        let old: Config = serde_json::from_str(
+            r#"{"resampler_taps": 32, "preferred_output_device": null,
+                "parametric_eq": {"enabled": true, "preamp_db": -3.0, "filters": [{"kind": "peak", "freq_hz": 200.0, "gain_db": 2.0}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.parametric_eq.channel_mode, PeqChannelModeSetting::Linked);
+        assert_eq!(old.parametric_eq.right, PeqChannelSetting::default());
+        assert_eq!(old.parametric_eq.filters.len(), 1);
+        assert_eq!(old.auto_eq, AutoEqSetting::default());
+        assert!(old.auto_eq.same_source && old.auto_eq.use_shelves);
+        assert_eq!(old.auto_eq.max_filters, 10);
+        // Partial auto-EQ object.
+        let partial: Config = serde_json::from_str(
+            r#"{"resampler_taps": 32, "preferred_output_device": null, "auto_eq": {"target_flat": true, "max_filters": 6}}"#,
+        )
+        .unwrap();
+        assert!(partial.auto_eq.target_flat);
+        assert_eq!(partial.auto_eq.max_filters, 6);
+        assert_eq!(partial.auto_eq.max_gain_db, 12.0);
+        // Round trip of everything new.
+        let cfg = Config {
+            parametric_eq: ParametricEqSetting {
+                enabled: true,
+                channel_mode: PeqChannelModeSetting::Separate,
+                right: PeqChannelSetting {
+                    preamp_db: -1.5,
+                    filters: vec![PeqFilterSetting { kind: PeqFilterKindSetting::LowShelf, freq_hz: 105.0, gain_db: 3.0, q: 0.7 }],
+                },
+                ..Default::default()
+            },
+            auto_eq: AutoEqSetting {
+                target_path: Some("/x/target.csv".into()),
+                source_path: Some("/x/left.txt".into()),
+                source_r_path: Some("/x/right.txt".into()),
+                same_source: false,
+                treble_boost_limit_db: 1.0,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json["parametric_eq"]["channel_mode"], "separate");
+        let back: Config = serde_json::from_value(json).unwrap();
+        assert_eq!(back.parametric_eq, cfg.parametric_eq);
+        assert_eq!(back.auto_eq, cfg.auto_eq);
     }
 }
