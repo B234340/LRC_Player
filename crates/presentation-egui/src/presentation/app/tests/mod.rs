@@ -345,7 +345,7 @@ fn estimated_karaoke_is_display_only() {
     let mut app = test_app(&ctx, dir.path(), false);
     app.play_path = dir.path().join("song.flac").to_string_lossy().into_owned();
     let lrc = dir.path().join("song.lrc");
-    std::fs::write(&lrc, "[00:01.00]夜に駆ける\n[00:05.00]沈むように\n[00:09.00]end\n").unwrap();
+    std::fs::write(&lrc, "[00:01.00]夜の灯台へ\n[00:05.00]海まで歩く\n[00:09.00]end\n").unwrap();
     app.set_lyrics_candidates(Lyrics::rank_candidates([lrc.clone()]));
     let estimated = |app: &GuiApp| app.loaded_timeline.as_ref().unwrap().lines().iter().filter(|l| l.estimated).count();
 

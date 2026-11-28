@@ -24,40 +24,40 @@ use crate::presentation::ui::{theme, Page, RightPanel};
 const SIZE: Vec2 = Vec2::new(1280.0, 800.0);
 
 const SONGS: &[(&str, &str, &str, u64, i32)] = &[
-    ("夜に駆ける", "YOASOBI", "THE BOOK", 261_000, 2021),
-    ("アイドル", "YOASOBI", "THE BOOK 3", 213_000, 2023),
-    ("群青", "YOASOBI", "THE BOOK", 249_000, 2021),
-    ("Lemon", "米津玄師", "STRAY SHEEP", 255_000, 2020),
-    ("感電", "米津玄師", "STRAY SHEEP", 268_000, 2020),
-    ("馬と鹿", "米津玄師", "STRAY SHEEP", 249_000, 2020),
-    ("Pretender", "Official髭男dism", "Traveler", 326_000, 2019),
-    ("Subtitle", "Official髭男dism", "Subtitle", 305_000, 2022),
-    ("紅蓮華", "LiSA", "LEO-NiNE", 239_000, 2020),
-    ("炎", "LiSA", "LEO-NiNE", 275_000, 2020),
-    ("Blinding Lights", "The Weeknd", "After Hours", 200_000, 2020),
-    ("Save Your Tears", "The Weeknd", "After Hours", 215_000, 2020),
-    ("Levitating", "Dua Lipa", "Future Nostalgia", 203_000, 2020),
-    ("Don't Start Now", "Dua Lipa", "Future Nostalgia", 183_000, 2020),
-    ("ベテルギウス", "優里", "壱", 271_000, 2022),
-    ("ドライフラワー", "優里", "壱", 285_000, 2022),
-    ("怪獣の花唄", "Vaundy", "strobo", 223_000, 2020),
-    ("踊り子", "Vaundy", "strobo", 208_000, 2020),
-    ("きらり", "藤井 風", "LOVE ALL SERVE ALL", 205_000, 2022),
-    ("花", "藤井 風", "LOVE ALL SERVE ALL", 216_000, 2022),
+    ("夜の灯台", "SORAMICHI", "BLUE HOUR", 261_000, 2021),
+    ("ハミング", "SORAMICHI", "BLUE HOUR 3", 213_000, 2023),
+    ("海鳴り", "SORAMICHI", "BLUE HOUR", 249_000, 2021),
+    ("Lantern", "朝霧航太", "PAPER MOON", 255_000, 2020),
+    ("雷鳴", "朝霧航太", "PAPER MOON", 268_000, 2020),
+    ("鳥と舟", "朝霧航太", "PAPER MOON", 249_000, 2020),
+    ("Wanderer", "Morning鯨club", "Coastline", 326_000, 2019),
+    ("Footnote", "Morning鯨club", "Footnote", 305_000, 2022),
+    ("紅の帆", "RiKO", "SEA-GLASS", 239_000, 2020),
+    ("灯", "RiKO", "SEA-GLASS", 275_000, 2020),
+    ("Neon Harbor", "The Lowtides", "Night Tram", 200_000, 2020),
+    ("Salt and Silver", "The Lowtides", "Night Tram", 215_000, 2020),
+    ("Floating", "Mira Vale", "Quiet Satellite", 203_000, 2020),
+    ("Don't Look Back Yet", "Mira Vale", "Quiet Satellite", 183_000, 2020),
+    ("シリウス", "湊人", "零", 271_000, 2022),
+    ("ガラスの花", "湊人", "零", 285_000, 2022),
+    ("鯨の子守唄", "Nagare", "drift", 223_000, 2020),
+    ("踊り場", "Nagare", "drift", 208_000, 2020),
+    ("ひかり", "柚木 凪", "SLOW TRAIN HOME", 205_000, 2022),
+    ("波", "柚木 凪", "SLOW TRAIN HOME", 216_000, 2022),
 ];
 
-const LRC: &str = "[ti:夜に駆ける]\n[ar:YOASOBI]\n\
-[00:10.00]沈むように溶けてゆくように\n\
-[00:14.00]二人だけの空が広がる夜に\n\
-[00:18.00]<00:18.00>「さよなら」<00:19.20>だけ<00:19.80>だった\n\
-[00:22.00]<00:22.00>その<00:22.60>一言<00:23.40>で<00:23.80>全て<00:24.60>が<00:25.00>分かった\n\
-[00:26.00]日が沈み出した空と君の姿\n\
-[00:30.00]フェンス越しに重なっていた\n\
+const LRC: &str = "[ti:夜の灯台]\n[ar:SORAMICHI]\n\
+[00:10.00]最終電車を見送ってから歩く\n\
+[00:14.00]街灯の影が線路に伸びる夜\n\
+[00:18.00]<00:18.00>「ただいま」<00:19.20>波に<00:19.80>言った\n\
+[00:22.00]<00:22.00>遠く<00:22.60>灯台<00:23.40>が<00:23.80>夜空<00:24.60>を<00:25.00>照らした\n\
+[00:26.00]窓に映るのは眠たげな海の色\n\
+[00:30.00]ホームのベンチで風を聞いた\n\
 [00:34.00]\n\
-[00:36.00]初めて会った日から\n\
-[00:40.00]僕の心の全てを奪った\n\
-[00:44.00]どこか儚い空気を纏う君は\n\
-[00:48.00]寂しい目をしてたんだ\n";
+[00:36.00]改札を抜けた先に\n\
+[00:40.00]潮風の香りが少しした\n\
+[00:44.00]どこまでも続いていく砂浜\n\
+[00:48.00]足あとを数えてたんだ\n";
 
 fn out_dir() -> PathBuf {
     let dir = std::env::var_os("APP_SCREENS_DIR")
@@ -274,14 +274,14 @@ fn all_pages(dark: bool) {
         a.navigate(Page::Library);
         a.ui.right_panel = Some(RightPanel::Queue);
         // Sticky: the harness advances time in large steps.
-        a.ui.toasts.push(crate::presentation::ui::widgets::ToastKind::Success, "「夜に駆ける」をキューに追加しました", f32::INFINITY);
+        a.ui.toasts.push(crate::presentation::ui::widgets::ToastKind::Success, "「夜の灯台」をキューに追加しました", f32::INFINITY);
     });
     shoot(&mut h, &format!("library_queue_{suffix}"));
 
     with_app(&mut h, |a| {
         a.ui.toasts = Default::default();
         a.ui.right_panel = Some(RightPanel::Lyrics);
-        a.ui.library_query = "yoasobi".into();
+        a.ui.library_query = "soramichi".into();
     });
     shoot(&mut h, &format!("library_search_lyrics_{suffix}"));
 
@@ -301,7 +301,7 @@ fn all_pages(dark: bool) {
     with_app(&mut h, |a| a.navigate(Page::Artists));
     shoot(&mut h, &format!("artists_{suffix}"));
 
-    with_app(&mut h, |a| a.open_artist("米津玄師".into()));
+    with_app(&mut h, |a| a.open_artist("朝霧航太".into()));
     shoot(&mut h, &format!("artist_detail_{suffix}"));
 
     with_app(&mut h, |a| a.navigate(Page::Playlists));
@@ -413,7 +413,7 @@ fn real_app_polish() {
         });
         shoot(&mut h, &format!("polish_library_default_order_{suffix}"));
 
-        // Hover on the first row's artist link (Dua Lipa).
+        // Hover on the first row's artist link.
         h.hover_at(egui::pos2(775.0, 155.0));
         shoot(&mut h, &format!("polish_library_artist_link_hover_{suffix}"));
         h.remove_cursor();
@@ -461,7 +461,7 @@ fn real_app_polish() {
             // Sticky: the harness advances time in large steps.
             a.ui.toasts.push_with_action(
                 crate::presentation::ui::widgets::ToastKind::Success,
-                tr.f("toast.enqueued_one", &[&"群青"]),
+                tr.f("toast.enqueued_one", &[&"海鳴り"]),
                 f32::INFINITY,
                 tr.t("toast.show_queue"),
                 crate::presentation::ui::UiAction::Navigate(Page::Queue),
@@ -728,7 +728,7 @@ fn real_app_min_size() {
                 a.open_album(key);
             });
             shoot(&mut h, &format!("minsize_min_{side}_album_detail_{suffix}"));
-            with_app(&mut h, |a| a.open_artist("米津玄師".into()));
+            with_app(&mut h, |a| a.open_artist("朝霧航太".into()));
             shoot(&mut h, &format!("minsize_min_{side}_artist_detail_{suffix}"));
         }
     }
@@ -740,11 +740,11 @@ fn real_app_min_size() {
 #[ignore = "renders PNGs with wgpu; run manually"]
 fn real_app_mixed_cjk() {
     const EXTRA: &[(&str, &str, &str, u64)] = &[
-        ("周杰伦 - 晴天", "周杰伦", "叶惠美", 269_000),
-        ("我們的愛", "飛兒樂團", "無限", 281_000),
-        ("사랑", "아이유", "Palette", 214_000),
-        ("优里", "周深", "深深", 230_000),
-        ("说爱你", "蔡依林", "看我72变", 223_000),
+        ("林晓风 - 晴空", "林晓风", "海边的风", 269_000),
+        ("我們的海", "海邊樂團", "遠方", 281_000),
+        ("바다", "하늘빛", "Harbor", 214_000),
+        ("远行", "陈小雨", "小雨", 230_000),
+        ("说再见", "白鹭乐队", "夏天的72个车站", 223_000),
     ];
     for dark in [true, false] {
         let fx = fixture();
@@ -1290,32 +1290,32 @@ fn overlay_shot(dark: bool, shot: &OverlayShot) {
                 ctx.data_mut(|d| d.insert_temp(tex_id, t.clone()));
                 t
             });
-            let karaoke = OverlayLine { text: "<00:22.00>その一言で全てが分かった", karaoke: true, highlighted_chars: 0.0 };
+            let karaoke = OverlayLine { text: "<00:22.00>遠く灯台が夜空を照らした", karaoke: true, highlighted_chars: 0.0 };
             let content = match case {
                 OverlayCase::Karaoke => DesktopLyricsContent::Lyrics {
-                    current: Some(OverlayLine { text: "その一言で全てが分かった", highlighted_chars: 5.4, ..karaoke }),
+                    current: Some(OverlayLine { text: "遠く灯台が夜空を照らした", highlighted_chars: 5.4, ..karaoke }),
                     intro: false,
-                    next: Some("日が沈み出した空と君の姿"),
+                    next: Some("窓に映るのは眠たげな海の色"),
                     line_key: 3,
                     lang: TextLang::Ja,
                 },
                 OverlayCase::Plain => DesktopLyricsContent::Lyrics {
-                    current: Some(OverlayLine { text: "Don't start now, don't come around to see me", karaoke: false, highlighted_chars: 0.0 }),
+                    current: Some(OverlayLine { text: "Counting the windows on the last train home", karaoke: false, highlighted_chars: 0.0 }),
                     intro: false,
-                    next: Some("Walk away, you know how"),
+                    next: Some("Harbor lights, one by one"),
                     line_key: 3,
                     lang: TextLang::Latin,
                 },
-                OverlayCase::Intro => DesktopLyricsContent::Lyrics { current: None, intro: true, next: Some("沈むように溶けてゆくように"), line_key: 0, lang: TextLang::Ja },
-                OverlayCase::Interlude => DesktopLyricsContent::Lyrics { current: None, intro: false, next: Some("初めて会った日から"), line_key: 7, lang: TextLang::Ja },
+                OverlayCase::Intro => DesktopLyricsContent::Lyrics { current: None, intro: true, next: Some("最終電車を見送ってから歩く"), line_key: 0, lang: TextLang::Ja },
+                OverlayCase::Interlude => DesktopLyricsContent::Lyrics { current: None, intro: false, next: Some("改札を抜けた先に"), line_key: 7, lang: TextLang::Ja },
                 OverlayCase::NoTrack => DesktopLyricsContent::NoTrack,
                 OverlayCase::NoLyrics => DesktopLyricsContent::NoLyrics,
                 OverlayCase::Instrumental => DesktopLyricsContent::Instrumental,
             };
             let props = DesktopLyricsProps {
                 content,
-                title: "夜に駆ける",
-                artist: "YOASOBI",
+                title: "夜の灯台",
+                artist: "SORAMICHI",
                 font_size: 32.0,
                 opacity,
                 show_next_line: true,

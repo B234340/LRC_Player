@@ -232,8 +232,8 @@ mod tests {
     use crate::infrastructure::lrc_timeline::LyricsTimeline;
     use serde_json::json;
 
-    const WORDS_YAML: &str = "version: '1.0'\nmetadata:\n  title: Song\nlines:\n- text: I've been tryna call\n  start_ms: 27100\n  end_ms: 28198\n  words:\n  - text: 'I''ve '\n    start_ms: 27139\n  - text: 'been '\n    start_ms: 27528\n  - text: 'tryna '\n    start_ms: 27819\n  - text: call\n    start_ms: 28130\n- text: ''\n  start_ms: 28198\n  end_ms: 29000\n- text: On my own\n  start_ms: 29960\n  end_ms: 31779\n  words:\n  - text: 'On '\n    start_ms: 29999\n  - text: 'my '\n    start_ms: 30160\n  - text: own\n    start_ms: 30380\n";
-    const LINE_YAML: &str = "version: '1.0'\nlines:\n- text: 夢ならば\n  start_ms: 750\n  end_ms: 5513\n  words:\n  - text: 夢ならば\n    start_ms: 750\n- text: 未だに\n  start_ms: 6550\n  end_ms: 10933\n  words:\n  - text: 未だに\n    start_ms: 6550\n";
+    const WORDS_YAML: &str = "version: '1.0'\nmetadata:\n  title: Song\nlines:\n- text: I've missed the tram\n  start_ms: 27100\n  end_ms: 28198\n  words:\n  - text: 'I''ve '\n    start_ms: 27139\n  - text: 'missed '\n    start_ms: 27528\n  - text: 'the '\n    start_ms: 27819\n  - text: tram\n    start_ms: 28130\n- text: ''\n  start_ms: 28198\n  end_ms: 29000\n- text: Back by ten\n  start_ms: 29960\n  end_ms: 31779\n  words:\n  - text: 'Back '\n    start_ms: 29999\n  - text: 'by '\n    start_ms: 30160\n  - text: ten\n    start_ms: 30380\n";
+    const LINE_YAML: &str = "version: '1.0'\nlines:\n- text: 駅の灯り\n  start_ms: 750\n  end_ms: 5513\n  words:\n  - text: 駅の灯り\n    start_ms: 750\n- text: 波の音\n  start_ms: 6550\n  end_ms: 10933\n  words:\n  - text: 波の音\n    start_ms: 6550\n";
 
     fn entry(duration: f64, synced: Option<&str>, words: Option<&str>) -> Value {
         json!({
@@ -248,22 +248,22 @@ mod tests {
     fn word_timing_becomes_enhanced_lrc() {
         let lrc = word_lrc(&entry(200.0, Some("[00:27.10]x"), Some(WORDS_YAML))).unwrap();
         assert!(lrc.starts_with("[ti:Song]\n[ar:Artist]\n[al:Album]\n[re:lrclib.net]\n"));
-        assert!(lrc.contains("[00:27.10]<00:27.14>I've <00:27.53>been <00:27.82>tryna <00:28.13>call<00:28.20>\n"), "{lrc}");
+        assert!(lrc.contains("[00:27.10]<00:27.14>I've <00:27.53>missed <00:27.82>the <00:28.13>tram<00:28.20>\n"), "{lrc}");
         let t = LyricsTimeline::parse(&lrc);
         let line = &t.lines()[0];
-        assert_eq!(line.text, "I've been tryna call");
+        assert_eq!(line.text, "I've missed the tram");
         assert!(line.is_karaoke() && !line.estimated);
         assert_eq!(line.segments.len(), 4);
     }
 
     #[test]
     fn one_word_per_line_is_not_word_timing() {
-        let e = entry(256.0, Some("[00:00.75] 夢ならば\n[00:06.55] 未だに"), Some(LINE_YAML));
+        let e = entry(256.0, Some("[00:00.75] 駅の灯り\n[00:06.55] 波の音"), Some(LINE_YAML));
         assert!(word_lrc(&e).is_none());
         match from_entry(&e) {
             LrclibResult::Synced { lrc, word_sync } => {
                 assert!(!word_sync);
-                assert!(lrc.ends_with("[00:00.75] 夢ならば\n[00:06.55] 未だに\n"));
+                assert!(lrc.ends_with("[00:00.75] 駅の灯り\n[00:06.55] 波の音\n"));
                 assert_eq!(LyricsTimeline::parse(&lrc).lines().len(), 2);
             }
             other => panic!("{other:?}"),
@@ -301,14 +301,14 @@ mod tests {
 
     #[test]
     fn query_parameters() {
-        let q = LrclibQuery { title: " 夜に駆ける ".into(), artist: "YOASOBI".into(), album: "THE BOOK".into(), duration_ms: Some(258_600) };
+        let q = LrclibQuery { title: " 夜の灯台 ".into(), artist: "SORAMICHI".into(), album: "BLUE HOUR".into(), duration_ms: Some(258_600) };
         let get = q.get_params().unwrap();
-        assert_eq!(get[0], ("track_name", "夜に駆ける".to_string()));
+        assert_eq!(get[0], ("track_name", "夜の灯台".to_string()));
         assert_eq!(get[3], ("duration", "259".to_string()));
         assert!(LrclibQuery { album: String::new(), ..q.clone() }.get_params().is_none());
         assert_eq!(q.search_params().len(), 2);
         let free = LrclibQuery { artist: String::new(), ..q };
-        assert_eq!(free.search_params(), vec![("q", "夜に駆ける".to_string())]);
+        assert_eq!(free.search_params(), vec![("q", "夜の灯台".to_string())]);
     }
 
     /// Talks to the real service.

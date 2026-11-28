@@ -74,16 +74,16 @@ fn shoot(size: Vec2, ppp: f32, name: &str, mut app: impl FnMut(&mut Ui)) {
 }
 
 const ROWS: &[&str] = &[
-    "群青",
-    "夜に駆ける",
-    "怪獣の花唄",
-    "优里 - 我们的爱",
-    "周杰伦 - 晴天",
-    "我們的愛",
-    "這是什麼 說好的幸福",
-    "사랑 - 아이유 (IU)",
-    "Lemon",
-    "Blinding Lights",
+    "海鳴り",
+    "夜の灯台",
+    "鯨の子守唄",
+    "陈小雨 - 我们的海",
+    "林晓风 - 晴空",
+    "我們的海",
+    "這條路 通往海邊",
+    "바다 - 하늘빛 (HN)",
+    "Lantern",
+    "Neon Harbor",
 ];
 
 /// One row: language tag, the text in its own family (with a Latin baseline guide), and the
@@ -133,17 +133,17 @@ fn cjk_rows() {
 
 fn chinese_lyrics() -> Vec<LyricLine<'static>> {
     let texts = [
-        ("故事的小黄花", false),
-        ("从出生那年就飘着", false),
-        ("童年的荡秋千", true),
-        ("随记忆一直晃到现在", true),
-        ("刮风这天 我试过握着你手", false),
-        ("但偏偏 雨渐渐 大到我看你不见", false),
+        ("夜里的小白船", false),
+        ("慢慢开过安静的海湾", false),
+        ("月亮跟着我们走", true),
+        ("风把车窗轻轻吹开", true),
+        ("末班车上 我数着一盏盏灯", false),
+        ("窗外面 浪花轻 一下一下拍着岸", false),
         ("", false),
-        ("還要多久 我才能在你身邊", false),
-        ("等到放晴的那天 也許我會比較好一點", false),
-        ("夜に駆ける (Japanese line)", false),
-        ("사랑해요 (Korean line)", false),
+        ("還要走多遠 才會看見海邊", false),
+        ("等到天亮的時候 我會再一次回來", false),
+        ("夜の灯台 (Japanese line)", false),
+        ("바다로 가요 (Korean line)", false),
     ];
     texts
         .iter()
@@ -198,21 +198,21 @@ fn cjk_paragraph() {
         let mut job = LayoutJob { wrap: egui::text::TextWrapping { max_width: 680.0, ..Default::default() }, ..Default::default() };
         let parts: &[(&str, bool)] = &[
             ("Now playing: ", false),
-            ("周杰伦 - 晴天", true),
+            ("林晓风 - 晴空", true),
             (" · ", false),
-            ("我們的愛", true),
+            ("我們的海", true),
             (" · ", false),
-            ("夜に駆ける", true),
+            ("夜の灯台", true),
             (" · ", false),
-            ("사랑", true),
+            ("바다", true),
             (" · ", false),
-            ("Lemon", true),
+            ("Lantern", true),
             (". 歌词: ", false),
-            ("刮风这天 我试过握着你手 但偏偏 雨渐渐 大到我看你不见", false),
+            ("末班车上 我数着一盏盏灯 窗外面 浪花轻 一下一下拍着岸", false),
             (" / 歌詞: ", false),
-            ("沈むように溶けてゆくように 二人だけの空が広がる夜に", false),
+            ("最終電車を見送ってから歩く 街灯の影が線路に伸びる夜", false),
             (" / 가사: ", false),
-            ("이 밤 그날의 반딧불을 당신의 창 가까이 보낼게요", false),
+            ("오늘 밤 마지막 기차를 타고 조용한 바다를 보러 가요", false),
         ];
         for (t, bold) in parts {
             append(&mut job, t, 18.0, *bold, if *bold { pal.text } else { pal.text_muted });

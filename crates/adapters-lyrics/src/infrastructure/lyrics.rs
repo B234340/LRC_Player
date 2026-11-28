@@ -396,9 +396,9 @@ mod tests {
     /// contract is checked even when the GUI crate does not compile).
     #[test]
     fn gui_contract_enhanced_lrc_with_synthetic_first_line() {
-        let lyrics = Lyrics::parse_str("[00:00.033]<00:00.033>world.<00:00.547>execute (<00:00.576>me) ; <00:00.608>[<00:00.640>Key <00:00.671>Ingredient <00:00.702>ver.] <00:00.733>- <00:00.743><00:00.733>Mili<00:00.779>");
+        let lyrics = Lyrics::parse_str("[00:00.033]<00:00.033>night.<00:00.547>walk (<00:00.576>us) ; <00:00.608>[<00:00.640>Sea <00:00.671>Breeze <00:00.702>ver.] <00:00.733>- <00:00.743><00:00.733>Nami<00:00.779>");
         assert_eq!(lyrics.lines.len(), 2);
-        assert_eq!(lyrics.lines[1].text, "world.execute (me) ; [Key Ingredient ver.] - Mili");
+        assert_eq!(lyrics.lines[1].text, "night.walk (us) ; [Sea Breeze ver.] - Nami");
         assert!(lyrics.lines[1].segments.len() > 1);
         assert_eq!(lyrics.lines[1].segments[0].time_ms, 33);
         assert_eq!(lyrics.lines[1].segments[1].time_ms, 33);
