@@ -8,6 +8,8 @@ Windows を主な対象とし、macOS と Linux でもソースからビルド�
 lyrics window, loudness normalization, a parametric EQ with automatic fitting to a target curve,
 and WASAPI exclusive output. The UI is Japanese by default (English is available).*
 
+![再生画面](docs/images/now_playing.png)
+
 ## 主な機能
 
 **歌詞**
@@ -30,6 +32,11 @@ and WASAPI exclusive output. The UI is Japanese by default (English is available
 - フォルダーを登録してスキャン（MP3 / FLAC / WAV / AAC / M4A / OGG）
 - ライブラリ・アルバム・アーティスト・プレイリスト・再生キュー、お気に入り
 - 検索と並べ替え、キーボードショートカット、メディアキー、ドラッグ＆ドロップ
+
+<p>
+  <img src="docs/images/peq_auto.png" width="62%" alt="パラメトリック EQ の自動作成">
+  <img src="docs/images/desktop_lyrics.png" width="36%" alt="デスクトップ歌詞">
+</p>
 
 ## ダウンロードと起動（Windows）
 
