@@ -16,8 +16,10 @@ The project will use `x86_64-pc-windows-gnu` for Linux-based cross-compilation.
 
 For Windows GUI execution:
 
-- `target/x86_64-pc-windows-gnu/release/gui.exe` is the GUI application.
-- `target/x86_64-pc-windows-gnu/release/lrc_player.exe` is the CLI/daemon binary.
+- `target/x86_64-pc-windows-gnu/release/lrc_player_gui.exe` is the GUI application
+  (shipped as `LRCPlayer.exe` in the portable package, see `docs/development.md`).
+- `target/x86_64-pc-windows-gnu/release/lrc_player_cli.exe` is the CLI binary.
+- `apps/gui/build.rs` embeds the icon and version information with MinGW `windres`.
 
 To avoid startup failure on Windows when the Unix-socket IPC implementation is unavailable:
 

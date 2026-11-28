@@ -1184,7 +1184,7 @@ mod tests {
         let mut app = super::super::tests::test_app(&ctx, dir.path(), false);
         app.config.desktop_lyrics.enabled = true;
         app.play_path = "/music/a.flac".into();
-        app.play_title = Some("夜に駆ける".into());
+        app.play_title = Some("夜の灯台".into());
         let mut t = LyricsTimeline::parse(LRC);
         t.set_user_offset_ms(1_500);
         app.loaded_timeline = Some(t);
@@ -1194,7 +1194,7 @@ mod tests {
         {
             let sh = lock(&app.ui.desktop_lyrics.shared);
             let feed = &sh.feed;
-            assert!(feed.has_track && feed.title == "夜に駆ける");
+            assert!(feed.has_track && feed.title == "夜の灯台");
             let tl = feed.timeline.as_ref().expect("timeline shared");
             assert_eq!(tl.total_offset_ms(), 1_500, "the user offset of the main view applies");
             assert_eq!(overlay_lines(tl, feed.sample.position_ms).current, Some(0));

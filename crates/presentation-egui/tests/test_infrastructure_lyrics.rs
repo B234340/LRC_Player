@@ -53,11 +53,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("song.lrc");
         let mut file = File::create(&path).unwrap();
-        writeln!(file, "[00:00.033]<00:00.033>world.<00:00.547>execute (<00:00.576>me) ; <00:00.608>[<00:00.640>Key <00:00.671>Ingredient <00:00.702>ver.] <00:00.733>- <00:00.743><00:00.733>Mili<00:00.779>").unwrap();
+        writeln!(file, "[00:00.033]<00:00.033>night.<00:00.547>walk (<00:00.576>us) ; <00:00.608>[<00:00.640>Sea <00:00.671>Breeze <00:00.702>ver.] <00:00.733>- <00:00.743><00:00.733>Nami<00:00.779>").unwrap();
 
         let lyrics = Lyrics::from_lrc(&path).unwrap();
         assert_eq!(lyrics.lines.len(), 2);
-        assert_eq!(lyrics.lines[1].text, "world.execute (me) ; [Key Ingredient ver.] - Mili");
+        assert_eq!(lyrics.lines[1].text, "night.walk (us) ; [Sea Breeze ver.] - Nami");
         assert!(!lyrics.lines[1].text.contains("<00"));
         assert!(lyrics.lines[1].segments.len() > 1);
         assert_eq!(lyrics.lines[1].segments[0].time_ms, 33);

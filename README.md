@@ -1,112 +1,98 @@
-# LRC_Player
+# LRC Player
 
-Rust で実装された LRC 対応プレイヤーです。  
-現状は Cargo workspace 構成で、`apps`（実行エントリ）と `crates`（レイヤー別ライブラリ）に分割されています。
+歌詞（LRC）の表示に強い、デスクトップ向けの音楽プレイヤーです。
+行ごと・文字ごとのタイミングでカラオケのように歌詞を塗りつぶし、音質の調整機能も備えています。
+Windows を主な対象とし、macOS と Linux でもソースからビルドして使えます。
 
-## 現在の構成
+*A desktop music player focused on synced lyrics (LRC) — karaoke-style word timing, a desktop
+lyrics window, loudness normalization, a parametric EQ with automatic fitting to a target curve,
+and WASAPI exclusive output. The UI is Japanese by default (English is available).*
+
+![再生画面](docs/images/now_playing.png)
+
+## 主な機能
+
+**歌詞**
+- 行単位・文字単位（`<mm:ss.xx>` タグ）の LRC を表示。文字単位はカラオケのように塗りつぶします
+- 行単位の LRC も、読みの長さから文字のタイミングを推定して塗りつぶし（表示のみ・ファイルは変更しません）
+- 歌詞全体を行単位・文字単位でずらす機能、曲ごとのオフセット
+- デスクトップ歌詞：ほかのアプリの上に浮かぶ小さな歌詞ウィンドウ（透明度・アルバムアート・クリック透過）
+- LRCLIB からの歌詞取得（オンにしたときだけ）と、歌詞のない曲の一括取得
+- 曲の音声から文字タイミングを作る補助ツール [`lrc-align`](tools/lrc_align/README.md)（任意・Python）
+
+**音質**
+- 音量の正規化（ReplayGain タグ、なければ EBU R128 で自動測定）
+- 10 バンドのグラフィック EQ と、最大 20 フィルターのパラメトリック EQ
+- パラメトリック EQ の自動作成：ターゲットと測定データ（.txt / .csv）を読み込み、近づけるフィルターを計算。L/R 別の適用にも対応
+- AutoEq / Equalizer APO 形式の読み込み、クロスフィード、自動ヘッドルーム、ディザー
+- WASAPI 排他モード（Windows）と、再生中の信号経路の表示（ビットパーフェクトかどうか）
+- ギャップレス再生
+
+**ライブラリ**
+- フォルダーを登録してスキャン（MP3 / FLAC / WAV / AAC / M4A / OGG）
+- ライブラリ・アルバム・アーティスト・プレイリスト・再生キュー、お気に入り
+- 検索と並べ替え、キーボードショートカット、メディアキー、ドラッグ＆ドロップ
+
+<p>
+  <img src="docs/images/peq_auto.png" width="62%" alt="パラメトリック EQ の自動作成">
+  <img src="docs/images/desktop_lyrics.png" width="36%" alt="デスクトップ歌詞">
+</p>
+
+## ダウンロードと起動（Windows）
+
+1. ポータブル版の zip（`LRC_Player-<バージョン>-win64-portable.zip`）を展開します。
+2. フォルダー内の `LRCPlayer.exe` を起動します。インストールは不要です。
+3. 左のメニュー「フォルダー」で音楽フォルダーを追加すると、ライブラリが作られます。
+
+設定やライブラリは exe と同じフォルダーの `data` に保存されるので、フォルダーごと持ち運べます。
+削除するときはフォルダーごと消してください（レジストリは使いません）。
+
+ポータブル版は [開発者向けガイド](docs/development.md#ポータブル版を作る) の手順でソースから作れます。
+
+## 使い方
+
+画面の説明、歌詞ファイルの置き方、音質設定、デスクトップ歌詞、ショートカットなどは
+**[ユーザーガイド](docs/guide.md)** にまとめています。
+
+歌詞ファイルは、曲と同じフォルダーに同じ名前で置くのがいちばん簡単です。
 
 ```text
-LRC_Player/
-├── Cargo.toml                               # workspace ルート。member crate を定義
-├── README.md                                # このファイル
-├── .cargo/                                  # Cargo ローカル設定
-├── .github/                                 # CI / 運用設定
-│   ├── instructions/                        # 開発・運用向け補助ドキュメント
-│   └── workflows/                           # GitHub Actions ワークフロー
-├── apps/                                    # 実行バイナリ群（Composition Root）
-│   ├── cli/
-│   │   ├── Cargo.toml                       # CLI アプリ crate 定義
-│   │   └── src/main.rs                      # CLI エントリポイント
-│   └── gui/
-│       ├── Cargo.toml                       # GUI アプリ crate 定義
-│       └── src/main.rs                      # GUI エントリポイント
-├── crates/                                  # レイヤー別ライブラリ群
-│   ├── domain/
-│   │   ├── Cargo.toml                       # ドメイン層 crate 定義
-│   │   └── src/lib.rs                       # domain 公開モジュール入口
-│   ├── ports/
-│   │   ├── Cargo.toml                       # ポート層 crate 定義
-│   │   └── src/lib.rs                       # ports 公開モジュール入口
-│   ├── application/
-│   │   ├── Cargo.toml                       # アプリケーション層 crate 定義
-│   │   └── src/lib.rs                       # usecase / dto / vm の公開入口
-│   ├── adapters-persistence/
-│   │   ├── Cargo.toml                       # 永続化アダプター crate 定義
-│   │   └── src/lib.rs                       # persistence 実装の公開入口
-│   ├── adapters-audio/
-│   │   ├── Cargo.toml                       # オーディオ出力アダプター crate 定義
-│   │   └── src/lib.rs                       # audio 実装の公開入口
-│   ├── adapters-scan/
-│   │   ├── Cargo.toml                       # スキャンアダプター crate 定義
-│   │   └── src/lib.rs                       # scan 実装の公開入口
-│   ├── adapters-lyrics/
-│   │   ├── Cargo.toml                       # 歌詞探索/解析アダプター crate 定義
-│   │   └── src/lib.rs                       # lyrics 実装の公開入口
-│   ├── presentation-egui/
-│   │   ├── Cargo.toml                       # egui プレゼンテーション crate 定義
-│   │   ├── src/lib.rs                       # presentation 公開入口
-│   │   ├── src/presentation/                # 画面/タブ/アクション実装
-│   │   ├── tests/                           # 統合テスト群
-│   │   ├── bench/10k_tracks/generate.rs     # 10k データ生成ベンチ補助
-│   │   └── benches/ten_k_tracks.rs          # Criterion ベンチ本体
-│   └── sample_data/
-│       └── test.lrc                         # テスト用 LRC サンプル
-├── shared/
-│   └── contracts/
-│       ├── Cargo.toml                       # shared 契約 crate 定義
-│       └── src/
-│           ├── lib.rs                       # shared 公開モジュール入口
-│           ├── dto.rs                       # 共有 DTO 定義
-│           ├── error.rs                     # 共有エラー型
-│           ├── ipc.rs                       # IPC プロトコル/通信
-│           └── result.rs                    # 共有 Result エイリアス
-├── docs/
-│   ├── README.md                            # ドキュメント入口
-│   └── ADR/                                 # アーキテクチャ決定記録
-└── target/                                  # ビルド成果物（自動生成）
+Music/
+├── 01 夜の駅.flac
+└── 01 夜の駅.lrc
 ```
 
-## Workspace メンバー
+## プライバシー
 
-- `crates/domain`
-- `crates/ports`
-- `crates/application`
-- `crates/adapters-persistence`
-- `crates/adapters-audio`
-- `crates/adapters-scan`
-- `crates/adapters-lyrics`
-- `shared/contracts`
-- `crates/presentation-egui`
-- `apps/gui`
-- `apps/cli`
+- インターネットに接続するのは、歌詞の取得（LRCLIB）を使うときだけです。
+  自動取得は初期状態でオフで、一括取得は実行前に確認を表示します。
+  送信するのは曲名・アーティスト名・アルバム名・再生時間です。
+- 再生履歴などを外部に送信することはありません。
 
-## 実行と検証
+## 動作環境
 
-GUI 起動:
+- Windows 10 / 11（64bit）、OpenGL 2.0 以上に対応したグラフィックス
+- macOS / Linux：ソースからビルドして利用できます（排他モードは Windows のみ）
+
+## ソースからビルド
+
+[Rust](https://www.rust-lang.org/)（1.94 以上）が必要です。
 
 ```bash
-cargo run -p lrc_player_gui
+cargo run --release -p lrc_player_gui
 ```
 
-CLI 起動:
+Linux から Windows 向けにクロスビルドする方法、テスト、パッケージの作り方は
+**[開発者向けガイド](docs/development.md)** を参照してください。
 
-```bash
-cargo run -p lrc_player_cli -- --help
-```
+## ドキュメント
 
-workspace 全体のビルド確認:
+- [ユーザーガイド](docs/guide.md)
+- [開発者向けガイド](docs/development.md)
+- [変更履歴](CHANGELOG.md)
+- [lrc-align（文字タイミング生成ツール）](tools/lrc_align/README.md)
+- [設計判断の記録（ADR）](docs/ADR/)
 
-```bash
-cargo check --workspace
-```
+## ライセンス
 
-既存テスト実行:
-
-```bash
-cargo test --workspace
-```
-
-## 補足
-
-- `target/` は生成物のため通常は編集対象外です。
-- `crates/presentation-egui` は現状、UI と統合テストを集約する主要 crate です。
+未定です（決まり次第、このリポジトリに LICENSE を追加します）。

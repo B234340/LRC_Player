@@ -104,30 +104,30 @@ struct Mock {
 }
 
 const SONGS: &[(&str, &str, &str, u64)] = &[
-    ("夜に駆ける", "YOASOBI", "THE BOOK", 261_000),
-    ("アイドル", "YOASOBI", "THE BOOK 3", 213_000),
-    ("群青", "YOASOBI", "THE BOOK", 249_000),
-    ("Lemon", "米津玄師", "STRAY SHEEP", 255_000),
-    ("感電", "米津玄師", "STRAY SHEEP", 268_000),
-    ("馬と鹿", "米津玄師", "STRAY SHEEP", 249_000),
-    ("Pretender", "Official髭男dism", "Traveler", 326_000),
-    ("Subtitle", "Official髭男dism", "Subtitle", 305_000),
-    ("紅蓮華", "LiSA", "LEO-NiNE", 239_000),
-    ("炎", "LiSA", "LEO-NiNE", 275_000),
-    ("Blinding Lights", "The Weeknd", "After Hours", 200_000),
-    ("Save Your Tears", "The Weeknd", "After Hours", 215_000),
-    ("Levitating", "Dua Lipa", "Future Nostalgia", 203_000),
-    ("Don't Start Now", "Dua Lipa", "Future Nostalgia", 183_000),
-    ("ベテルギウス", "優里", "壱", 271_000),
-    ("ドライフラワー", "優里", "壱", 285_000),
-    ("怪獣の花唄", "Vaundy", "strobo", 223_000),
-    ("踊り子", "Vaundy", "strobo", 208_000),
-    ("Mixed Nuts", "Official髭男dism", "Mixed Nuts", 213_000),
-    ("Bling-Bang-Bang-Born", "Creepy Nuts", "Bling-Bang-Bang-Born", 168_000),
-    ("Idol (English Version)", "YOASOBI", "THE BOOK 3", 213_000),
-    ("Shinunoga E-Wa", "Fujii Kaze", "HELP EVER HURT NEVER", 186_000),
-    ("きらり", "藤井 風", "LOVE ALL SERVE ALL", 205_000),
-    ("花", "藤井 風", "LOVE ALL SERVE ALL", 216_000),
+    ("夜の灯台", "SORAMICHI", "BLUE HOUR", 261_000),
+    ("ハミング", "SORAMICHI", "BLUE HOUR 3", 213_000),
+    ("海鳴り", "SORAMICHI", "BLUE HOUR", 249_000),
+    ("Lantern", "朝霧航太", "PAPER MOON", 255_000),
+    ("雷鳴", "朝霧航太", "PAPER MOON", 268_000),
+    ("鳥と舟", "朝霧航太", "PAPER MOON", 249_000),
+    ("Wanderer", "Morning鯨club", "Coastline", 326_000),
+    ("Footnote", "Morning鯨club", "Footnote", 305_000),
+    ("紅の帆", "RiKO", "SEA-GLASS", 239_000),
+    ("灯", "RiKO", "SEA-GLASS", 275_000),
+    ("Neon Harbor", "The Lowtides", "Night Tram", 200_000),
+    ("Salt and Silver", "The Lowtides", "Night Tram", 215_000),
+    ("Floating", "Mira Vale", "Quiet Satellite", 203_000),
+    ("Don't Look Back Yet", "Mira Vale", "Quiet Satellite", 183_000),
+    ("シリウス", "湊人", "零", 271_000),
+    ("ガラスの花", "湊人", "零", 285_000),
+    ("鯨の子守唄", "Nagare", "drift", 223_000),
+    ("踊り場", "Nagare", "drift", 208_000),
+    ("Paper Plane", "Morning鯨club", "Paper Plane", 213_000),
+    ("Hop-Step-Jump-Run", "Quiet Owls", "Hop-Step-Jump-Run", 168_000),
+    ("Humming (English Version)", "SORAMICHI", "BLUE HOUR 3", 213_000),
+    ("Umi no Uta", "Yuzuki Nagi", "WALK SLOW, RUN FAR", 186_000),
+    ("ひかり", "柚木 凪", "SLOW TRAIN HOME", 205_000),
+    ("波", "柚木 凪", "SLOW TRAIN HOME", 216_000),
 ];
 
 fn mock_rows(n: usize) -> Vec<TrackRow> {
@@ -212,17 +212,17 @@ impl Mock {
 
 fn mock_lyrics() -> Vec<LyricLine<'static>> {
     let texts = [
-        ("沈むように溶けてゆくように", false),
-        ("二人だけの空が広がる夜に", false),
-        ("「さよなら」だけだった", true),
-        ("その一言で全てが分かった", true),
-        ("日が沈み出した空と君の姿", false),
-        ("フェンス越しに重なっていた", false),
+        ("最終電車を見送ってから歩く", false),
+        ("街灯の影が線路に伸びる夜", false),
+        ("「ただいま」波に言った", true),
+        ("遠く灯台が夜空を照らした", true),
+        ("窓に映るのは眠たげな海の色", false),
+        ("ホームのベンチで風を聞いた", false),
         ("", false),
-        ("初めて会った日から", false),
-        ("僕の心の全てを奪った", false),
-        ("どこか儚い空気を纏う君は", false),
-        ("寂しい目をしてたんだ", false),
+        ("改札を抜けた先に", false),
+        ("潮風の香りが少しした", false),
+        ("どこまでも続いていく砂浜", false),
+        ("足あとを数えてたんだ", false),
     ];
     texts
         .iter()
@@ -244,7 +244,7 @@ struct ShellState {
 impl ShellState {
     fn new(collapsed: bool) -> Self {
         let mut toasts = Toasts::new();
-        toasts.success("「夜に駆ける」をキューに追加しました");
+        toasts.success("「夜の灯台」をキューに追加しました");
         Self {
             mock: None,
             sidebar: SidebarState { collapsed },

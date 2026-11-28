@@ -672,8 +672,8 @@ mod tests {
     fn props(content: DesktopLyricsContent<'_>) -> DesktopLyricsProps<'_> {
         DesktopLyricsProps {
             content,
-            title: "夜に駆ける",
-            artist: "YOASOBI",
+            title: "夜の灯台",
+            artist: "SORAMICHI",
             font_size: 32.0,
             opacity: 0.7,
             show_next_line: true,
@@ -720,7 +720,7 @@ mod tests {
     fn controls_appear_on_hover_and_emit_actions() {
         let ctx = Context::default();
         let mut st = DesktopLyricsViewState::default();
-        let line = OverlayLine { text: "沈むように溶けてゆくように", karaoke: true, highlighted_chars: 4.0 };
+        let line = OverlayLine { text: "最終電車を見送ってから歩く", karaoke: true, highlighted_chars: 4.0 };
         let p = props(DesktopLyricsContent::Lyrics { current: Some(line), intro: false, next: Some("次"), line_key: 1, lang: TextLang::Ja });
         // Hover: the controls fade in (animation needs a few frames).
         for _ in 0..20 {

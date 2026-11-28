@@ -264,7 +264,7 @@ pub fn family_in_context(text: &str, context: TextLang, bold: bool) -> FontFamil
 // ---------------------------------------------------------------------------------------
 
 /// [`lang_of`] with a document-level hint: a Han-only string that is Japanese only by default
-/// (no kana, every character in the Japanese repertoire, e.g. 故事的小黄花) takes `context` when
+/// (no kana, every character in the Japanese repertoire, e.g. 夜里的小白船) takes `context` when
 /// `context` is Chinese, so a Chinese song's lyrics or a Chinese album's track list do not
 /// switch to Japanese glyph forms on such lines. Strings with kana / Hangul / non-JIS hanzi are
 /// unaffected.
@@ -404,7 +404,7 @@ fn classify_han(text: &str) -> TextLang {
         }
         kyujitai += u32::from(TRADITIONAL_MARKERS.contains(&c));
     }
-    // All-JIS Traditional Chinese (還要多久 我才能在你身邊): several traditional forms that modern
+    // All-JIS Traditional Chinese (還要走多遠 才會看見海邊): several traditional forms that modern
     // Japanese replaced, and no Japan-only shinjitai (駆, 歩, 険 …) to say otherwise.
     chinese |= kyujitai >= 2 && !japan_only;
     if !chinese {
@@ -501,14 +501,14 @@ mod tests {
 
     #[test]
     fn simplified_chinese() {
-        for s in ["优里", "我们的爱", "周杰伦 - 晴天", "说", "爱", "们", "陈奕迅 - 十年"] {
+        for s in ["优里", "我们的爱", "林晓风 - 晴空", "说", "爱", "们", "陈小雨 - 远行"] {
             assert_eq!(lang_of(s), TextLang::ZhHans, "{s}");
         }
     }
 
     #[test]
     fn traditional_chinese() {
-        for s in ["我們的愛", "們", "說", "這是什麼", "周杰倫 - 說好的幸福", "還要多久 我才能在你身邊", "等到放晴的那天 也許我會比較好一點"] {
+        for s in ["我們的愛", "們", "說", "這是什麼", "林曉風 - 說好的海", "還要走多遠 才會看見海邊", "等到天亮的時候 我會再一次回來"] {
             assert_eq!(lang_of(s), TextLang::ZhHant, "{s}");
         }
     }
@@ -545,19 +545,19 @@ mod tests {
 
     #[test]
     fn context_hint() {
-        let song = ["故事的小黄花", "从出生那年就飘着", "童年的荡秋千", ""];
+        let song = ["夜里的小白船", "慢慢开过安静的海湾", "月亮跟着我们走", ""];
         let ctx = dominant_lang(song);
         assert_eq!(ctx, TextLang::ZhHans);
-        assert_eq!(lang_of("故事的小黄花"), TextLang::Ja);
-        assert_eq!(lang_in_context("故事的小黄花", ctx), TextLang::ZhHans);
+        assert_eq!(lang_of("夜里的小白船"), TextLang::Ja);
+        assert_eq!(lang_in_context("夜里的小白船", ctx), TextLang::ZhHans);
         // Kana, Hangul and Latin are never overridden; Japanese context changes nothing.
         assert_eq!(lang_in_context("夜に駆ける", ctx), TextLang::Ja);
         assert_eq!(lang_in_context("사랑", ctx), TextLang::Ko);
         assert_eq!(lang_in_context("Lemon", ctx), TextLang::Latin);
-        let jp = ["沈むように溶けてゆくように", "群青", "二人だけの空が広がる夜に"];
+        let jp = ["最終電車を見送ってから歩く", "潮騒", "街灯の影が線路に伸びる夜"];
         assert_eq!(dominant_lang(jp), TextLang::Ja);
-        assert_eq!(lang_in_context("群青", dominant_lang(jp)), TextLang::Ja);
-        assert_eq!(dominant_lang(["我們的愛", "還要多久 我才能在你身邊", "我们"]), TextLang::ZhHant);
+        assert_eq!(lang_in_context("潮騒", dominant_lang(jp)), TextLang::Ja);
+        assert_eq!(dominant_lang(["我們的愛", "還要走多遠 才會看見海邊", "我们"]), TextLang::ZhHant);
         assert_eq!(dominant_lang(["Lemon", ""]), TextLang::Latin);
     }
 
